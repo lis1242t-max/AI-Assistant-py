@@ -7,6 +7,7 @@ import sys
 import sqlite3
 import subprocess
 import threading
+import time
 from datetime import datetime
 from PyQt6 import QtWidgets, QtGui, QtCore
 import requests
@@ -771,6 +772,16 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     print(f"[GET_AI_RESPONSE] Забыть историю: {should_forget}")
     print(f"[GET_AI_RESPONSE] Файл прикреплён: {file_path if file_path else 'Нет'}")
 
+    # НОРМАЛИЗАЦИЯ МАТЕМАТИЧЕСКИХ СИМВОЛОВ
+    # Заменяем специальные символы на стандартные ASCII
+    user_message = user_message.replace('×', '*')  # Умножение
+    user_message = user_message.replace('÷', '/')  # Деление
+    user_message = user_message.replace('−', '-')  # Минус (длинное тире)
+    user_message = user_message.replace('±', '+/-')  # Плюс-минус
+    user_message = user_message.replace('–', '-')  # Среднее тире
+    user_message = user_message.replace('—', '-')  # Длинное тире
+    print(f"[GET_AI_RESPONSE] Нормализованное сообщение: {user_message}")
+
     # ОПРЕДЕЛЯЕМ РЕАЛЬНЫЙ ЯЗЫК ВОПРОСА
     detected_language = detect_message_language(user_message)
     print(f"[GET_AI_RESPONSE] Определённый язык вопроса: {detected_language}")
@@ -1102,18 +1113,101 @@ def is_short_text(text: str) -> bool:
     return len(s) <= SHORT_TEXT_THRESHOLD and lines <= 2
 
 # -------------------------
+# Animated Checkbox
+# -------------------------
+class AnimatedCheckBox(QtWidgets.QCheckBox):
+    """Чекбокс с плавной анимацией масштабирования через размер шрифта"""
+    
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        
+        # Флаг блокировки быстрых нажатий
+        self.animation_in_progress = False
+        
+        try:
+            # Сохраняем исходный размер шрифта с проверкой
+            self.original_font = self.font()
+            self.original_font_size = self.original_font.pointSize()
+            if self.original_font_size <= 0:
+                self.original_font_size = 11  # Дефолт для чекбоксов
+            
+            # Анимация размера шрифта
+            self.font_animation = QtCore.QVariantAnimation()
+            self.font_animation.setDuration(180)  # Быстро и плавно
+            self.font_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+            self.font_animation.valueChanged.connect(self.update_font_size)
+        except Exception as e:
+            print(f"[AnimatedCheckBox] Ошибка инициализации: {e}")
+            self.original_font_size = 11
+    
+    def update_font_size(self, size):
+        """Обновляет размер шрифта для эффекта масштабирования"""
+        try:
+            if hasattr(self, 'original_font') and size > 0:
+                new_font = QtGui.QFont(self.original_font)
+                new_font.setPointSize(int(size))
+                self.setFont(new_font)
+        except Exception as e:
+            print(f"[AnimatedCheckBox] Ошибка update_font_size: {e}")
+    
+    def nextCheckState(self):
+        """Переопределяем для добавления анимации"""
+        if self.animation_in_progress:
+            return
+        
+        try:
+            # Запускаем анимацию
+            self.start_animation()
+        except Exception as e:
+            print(f"[AnimatedCheckBox] Ошибка анимации: {e}")
+        
+        # Вызываем родительский метод
+        super().nextCheckState()
+    
+    def start_animation(self):
+        """Плавная анимация увеличения/уменьшения при клике"""
+        try:
+            self.animation_in_progress = True
+            
+            # Останавливаем текущую анимацию
+            if hasattr(self, 'font_animation') and self.font_animation.state() == QtCore.QAbstractAnimation.State.Running:
+                self.font_animation.stop()
+            
+            # Вычисляем размеры
+            increase_size = self.original_font_size + 2  # Увеличение на 2pt
+            
+            # Анимация: нормальный → увеличенный → нормальный
+            self.font_animation.setStartValue(self.original_font_size)
+            self.font_animation.setKeyValueAt(0.5, increase_size)  # Середина - увеличение
+            self.font_animation.setEndValue(self.original_font_size)  # Конец - возврат
+            self.font_animation.start()
+            
+            # Разблокируем
+            QtCore.QTimer.singleShot(180, lambda: setattr(self, 'animation_in_progress', False))
+        except Exception as e:
+            print(f"[AnimatedCheckBox] Ошибка start_animation: {e}")
+            self.animation_in_progress = False
+
+# -------------------------
 # Message widget (с адаптивным размером эмодзи)
 # -------------------------
 class MessageWidget(QtWidgets.QWidget):
     """Виджет для отображения сообщения"""
 
     def __init__(self, speaker: str, text: str, add_controls: bool = False,
-                 language: str = "russian", main_window=None, parent=None):
+                 language: str = "russian", main_window=None, parent=None, thinking_time: float = 0):
         super().__init__(parent)
         self.text = text
         self.language = language
         self.speaker = speaker  # Сохраняем спикера
         self.main_window = main_window  # Ссылка на главное окно
+        self.copy_button = None  # Ссылка на кнопку копирования для анимации
+        self.thinking_time = thinking_time  # Время обдумывания в секундах
+        
+        # Создаём эффект прозрачности для анимации
+        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(0)  # Начинаем с полной прозрачности
 
         # Цвет и выравнивание пузыря
         if speaker == "Вы":
@@ -1144,11 +1238,25 @@ class MessageWidget(QtWidgets.QWidget):
         if align == QtCore.Qt.AlignmentFlag.AlignRight:
             main_layout.addStretch()
 
-        # вертикальный столбик: пузырь + панель кнопок (вне пузыря)
+        # вертикальный столбик: метка времени (если есть) + пузырь + панель кнопок (вне пузыря)
         col_widget = QtWidgets.QWidget()
         col_layout = QtWidgets.QVBoxLayout(col_widget)
         col_layout.setContentsMargins(0, 0, 0, 0)
-        col_layout.setSpacing(6)
+        col_layout.setSpacing(4)
+        
+        # Метка времени обдумывания (только для ИИ, если thinking_time > 0)
+        if speaker != "Вы" and speaker != "Система" and thinking_time > 0:
+            time_label = QtWidgets.QLabel(f"⏱ думал ~{thinking_time:.1f} с")
+            time_label.setStyleSheet("""
+                QLabel {
+                    color: #9ca3af;
+                    font-size: 11px;
+                    font-style: italic;
+                    padding: 2px 8px;
+                }
+            """)
+            time_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+            col_layout.addWidget(time_label)
 
         # пузырь сообщения
         message_container = QtWidgets.QWidget()
@@ -1193,7 +1301,16 @@ class MessageWidget(QtWidgets.QWidget):
         container_layout.addWidget(message_label)
 
 
-        col_layout.addWidget(message_container, alignment=(QtCore.Qt.AlignmentFlag.AlignLeft if align == QtCore.Qt.AlignmentFlag.AlignLeft else QtCore.Qt.AlignmentFlag.AlignRight))
+        # Добавляем контейнер с правильным выравниванием
+        if align == QtCore.Qt.AlignmentFlag.AlignCenter:
+            # Система - строго по центру
+            col_layout.addWidget(message_container, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        elif align == QtCore.Qt.AlignmentFlag.AlignLeft:
+            # AI - слева
+            col_layout.addWidget(message_container, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        else:
+            # Пользователь - справа
+            col_layout.addWidget(message_container, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
 
         # Решаем сторону для панели кнопок
         if speaker == "Вы":
@@ -1240,6 +1357,7 @@ class MessageWidget(QtWidgets.QWidget):
                 border: 1px solid rgba(102, 126, 234, 0.5);
             }}
         """)
+        self.copy_button = copy_btn  # Сохраняем ссылку для анимации
         controls_layout.addWidget(copy_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
         # Кнопка редактирования (только для пользователя)
         if speaker == "Вы":
@@ -1314,10 +1432,28 @@ class MessageWidget(QtWidgets.QWidget):
         main_layout.addWidget(col_widget)
         if align == QtCore.Qt.AlignmentFlag.AlignLeft:
             main_layout.addStretch()
+        
+        # Плавная анимация появления - УВЕЛИЧЕНА плавность
+        self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_in_animation.setDuration(700)  # Ещё медленнее для плавности
+        self.fade_in_animation.setStartValue(0.0)
+        self.fade_in_animation.setEndValue(1.0)
+        self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        
+        # Запускаем анимацию с небольшой задержкой для стабильности
+        QtCore.QTimer.singleShot(10, self.fade_in_animation.start)
 
     def copy_text(self):
         clipboard = QtWidgets.QApplication.clipboard()
         clipboard.setText(self.text)
+        
+        # Анимация: показываем галочку
+        if self.copy_button:
+            original_text = self.copy_button.text()
+            self.copy_button.setText("✓")
+            
+            # Возвращаем обратно через 1.5 секунды
+            QtCore.QTimer.singleShot(1500, lambda: self.copy_button.setText(original_text) if self.copy_button else None)
 
     def regenerate_response(self):
         """Перегенерировать ответ ассистента"""
@@ -1382,6 +1518,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_generating = False
         self.current_user_message = ""
         self.current_worker = None
+        
+        # Таймер обдумывания
+        self.thinking_start_time = None
+        self.thinking_elapsed_time = 0
         
         # Режим редактирования
         self.is_editing = False
@@ -1542,13 +1682,13 @@ class MainWindow(QtWidgets.QMainWindow):
         modes_layout.setContentsMargins(0, 0, 0, 0)
         modes_layout.addStretch()
 
-        self.think_toggle = QtWidgets.QCheckBox("💡 Думать")
+        self.think_toggle = AnimatedCheckBox("💡 Думать")
         self.think_toggle.setObjectName("modeToggle")
         self.think_toggle.stateChanged.connect(self.toggle_thinking)
         self.think_toggle.setMinimumHeight(42)
         modes_layout.addWidget(self.think_toggle)
 
-        self.search_toggle = QtWidgets.QCheckBox("🔍 Поиск")
+        self.search_toggle = AnimatedCheckBox("🔍 Поиск")
         self.search_toggle.setObjectName("modeToggle")
         self.search_toggle.stateChanged.connect(self.toggle_search)
         self.search_toggle.setMinimumHeight(42)
@@ -1745,7 +1885,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #chatContainer { background: transparent; }
 
         QScrollArea { background: transparent; border: none; }
-        QScrollArea > QWidget > QWidget { background: #e8edf5; border-radius: 24px; }
+        QScrollArea > QWidget > QWidget { background: #e8edf5; border-radius: 28px; }
 
         QScrollBar:vertical { background: transparent; width: 10px; }
         QScrollBar::handle:vertical { background: #cbd5e0; border-radius: 5px; min-height: 30px; }
@@ -2137,11 +2277,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Закрываем sidebar после переключения
         self.toggle_sidebar()
 
-    def add_message_widget(self, speaker: str, text: str, add_controls: bool = False):
+    def add_message_widget(self, speaker: str, text: str, add_controls: bool = False, thinking_time: float = 0):
         message_widget = MessageWidget(speaker, text, add_controls,
                                        language=self.current_language,
                                        main_window=self,
-                                       parent=self.messages_widget)
+                                       parent=self.messages_widget,
+                                       thinking_time=thinking_time)
         self.messages_layout.insertWidget(self.messages_layout.count() - 1, message_widget)
         QtCore.QTimer.singleShot(50, self.scroll_to_bottom)
 
@@ -2249,6 +2390,9 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Запускаем анимацию точек
         self.start_status_animation()
+        
+        # Запускаем таймер обдумывания
+        self.thinking_start_time = time.time()
 
         worker = AIWorker(user_text, self.current_language, self.deep_thinking, self.use_search, False, self.chat_manager, self.current_chat_id, self.attached_file_path)
         worker.signals.finished.connect(self.handle_response)
@@ -2262,42 +2406,89 @@ class MainWindow(QtWidgets.QMainWindow):
             self.clear_attached_file()
 
     def handle_response(self, response: str):
-        # ВАЖНО: Сбрасываем флаг генерации
-        self.is_generating = False
-        
-        self.add_message_widget(ASSISTANT_NAME, response, add_controls=True)
-        self.chat_manager.save_message(self.current_chat_id, "assistant", response)
-        
-        # Автоматическое именование чата по первому сообщению
-        messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=5)
-        # Если это первый ответ (2 сообщения: вопрос пользователя + ответ ассистента)
-        if len(messages) == 2:
-            # Берём первое сообщение пользователя
-            first_user_msg = messages[0][1] if messages[0][0] == "user" else ""
-            if first_user_msg:
-                # Обрезаем до 40 символов для читаемости
-                chat_title = first_user_msg[:40]
-                if len(first_user_msg) > 40:
-                    chat_title += "..."
-                # Делаем первую букву заглавной
-                chat_title = chat_title[0].upper() + chat_title[1:] if chat_title else "Новый чат"
-                # Обновляем название чата
-                self.chat_manager.update_chat_title(self.current_chat_id, chat_title)
-                # Обновляем список чатов
-                self.load_chats_list()
-        
-        self.send_btn.setEnabled(True)
-        self.send_btn.setText("→")  # Возвращаем стрелку
-
-        self.input_field.setEnabled(True)
-        self.input_field.setFocus()
-        
-        # Гарантируем, что окно остаётся активным
-        self.activateWindow()
-        self.raise_()
-        
-        # Останавливаем анимацию точек
-        self.stop_status_animation()
+        """Обработка ответа AI с полной защитой от ошибок"""
+        try:
+            # ВАЖНО: Сбрасываем флаг генерации
+            self.is_generating = False
+            
+            # Вычисляем время обдумывания с защитой
+            thinking_time_to_show = 0
+            try:
+                if hasattr(self, 'thinking_start_time') and self.thinking_start_time:
+                    self.thinking_elapsed_time = time.time() - self.thinking_start_time
+                    print(f"[THINKING] Время обдумывания: {self.thinking_elapsed_time:.2f}s")
+                    # Передаём время только если был режим "думать" или "поиск"
+                    thinking_time_to_show = self.thinking_elapsed_time if (self.deep_thinking or self.use_search) else 0
+                else:
+                    self.thinking_elapsed_time = 0
+            except Exception as e:
+                print(f"[HANDLE_RESPONSE] Ошибка расчёта времени: {e}")
+                self.thinking_elapsed_time = 0
+            
+            # Проверяем валидность ответа
+            if not response:
+                response = "[Ошибка] Пустой ответ от модели"
+                print(f"[HANDLE_RESPONSE] ✗ Получен пустой ответ")
+            elif not isinstance(response, str):
+                response = str(response) if response else "[Ошибка] Некорректный ответ"
+                print(f"[HANDLE_RESPONSE] ✗ Ответ не строка, конвертирован")
+            
+            # Добавляем сообщение с защитой
+            try:
+                self.add_message_widget(ASSISTANT_NAME, response, add_controls=True, thinking_time=thinking_time_to_show)
+            except Exception as e:
+                print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
+                try:
+                    # Пробуем без thinking_time
+                    self.add_message_widget(ASSISTANT_NAME, response, add_controls=True, thinking_time=0)
+                except Exception as e2:
+                    print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
+            
+            # Сохраняем в БД с защитой
+            try:
+                if hasattr(self, 'chat_manager') and hasattr(self, 'current_chat_id'):
+                    self.chat_manager.save_message(self.current_chat_id, "assistant", response)
+                else:
+                    print(f"[HANDLE_RESPONSE] ✗ Нет chat_manager или current_chat_id")
+            except Exception as e:
+                print(f"[HANDLE_RESPONSE] ✗ Ошибка сохранения в БД: {e}")
+            
+            # Сбрасываем таймер
+            self.thinking_start_time = None
+            
+            # Автоматическое именование чата с защитой
+            try:
+                messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=5)
+                if messages and len(messages) == 2:
+                    first_user_msg = messages[0][1] if len(messages[0]) > 1 and messages[0][0] == "user" else ""
+                    if first_user_msg and isinstance(first_user_msg, str) and len(first_user_msg) > 0:
+                        chat_title = first_user_msg[:40]
+                        if len(first_user_msg) > 40:
+                            chat_title += "..."
+                        chat_title = chat_title[0].upper() + chat_title[1:] if len(chat_title) > 0 else "Новый чат"
+                        self.chat_manager.update_chat_title(self.current_chat_id, chat_title)
+                        self.load_chats_list()
+            except Exception as e:
+                print(f"[HANDLE_RESPONSE] Ошибка автоименования: {e}")
+            
+        except Exception as e:
+            print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # ВСЕГДА восстанавливаем UI
+            try:
+                self.send_btn.setEnabled(True)
+                self.send_btn.setText("→")
+                self.input_field.setEnabled(True)
+                self.input_field.setFocus()
+                self.activateWindow()
+                self.raise_()
+                # Останавливаем анимацию точек
+                if hasattr(self, 'stop_status_animation'):
+                    self.stop_status_animation()
+            except Exception as e:
+                print(f"[HANDLE_RESPONSE] Ошибка восстановления UI: {e}")
 
 
     def regenerate_last_response(self):
@@ -2378,6 +2569,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(self.status_base_text)
         self.start_status_animation()
         
+        # Запускаем таймер обдумывания
+        self.thinking_start_time = time.time()
+        
         self.current_user_message = last_user_msg
         
         worker = AIWorker(last_user_msg, self.current_language, self.deep_thinking, 
@@ -2444,6 +2638,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_editing = True
         self.editing_message_text = last_user_msg
         
+        # СОХРАНЯЕМ ТЕКУЩИЕ РЕЖИМЫ (не сбрасываем галочки)
+        # Пользователь сможет изменить режим перед повторной отправкой
+        # Режимы остаются такими, какие были установлены
+        print(f"[EDIT] Текущие режимы: думать={self.deep_thinking}, поиск={self.use_search}")
+        
         # ВОЗВРАЩАЕМ ТЕКСТ В ПОЛЕ ВВОДА И УСТАНАВЛИВАЕМ КУРСОР В КОНЕЦ
         self.input_field.setText(last_user_msg)
         self.input_field.setEnabled(True)
@@ -2452,27 +2651,50 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"[EDIT] ✓ Режим редактирования активирован")
 
     def clear_chat(self):
-        reply = QtWidgets.QMessageBox.question(
-            self, "Подтверждение",
-            "Вы уверены, что хотите очистить текущий чат?\nЭто действие нельзя отменить.",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            # Очищаем сообщения
-            self.chat_manager.clear_chat_messages(self.current_chat_id)
+        """Очистка чата с защитой от ошибок"""
+        try:
+            reply = QtWidgets.QMessageBox.question(
+                self, "Подтверждение",
+                "Вы уверены, что хотите очистить текущий чат?\nЭто действие нельзя отменить.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
             
-            # Сбрасываем название на "Новый чат"
-            self.chat_manager.update_chat_title(self.current_chat_id, "Новый чат")
-            
-            # Обновляем список чатов для отображения нового названия
-            self.load_chats_list()
-            
-            # Очищаем визуальное отображение
-            while self.messages_layout.count() > 1:
-                item = self.messages_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            self.add_message_widget("Система", "История чата очищена.", add_controls=False)
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                try:
+                    # Очищаем сообщения
+                    self.chat_manager.clear_chat_messages(self.current_chat_id)
+                    print("[CLEAR_CHAT] Сообщения очищены из БД")
+                except Exception as e:
+                    print(f"[CLEAR_CHAT] ✗ Ошибка очистки БД: {e}")
+                
+                try:
+                    # Сбрасываем название на "Новый чат"
+                    self.chat_manager.update_chat_title(self.current_chat_id, "Новый чат")
+                    print("[CLEAR_CHAT] Название сброшено")
+                except Exception as e:
+                    print(f"[CLEAR_CHAT] ✗ Ошибка обновления названия: {e}")
+                
+                try:
+                    # Обновляем список чатов
+                    self.load_chats_list()
+                except Exception as e:
+                    print(f"[CLEAR_CHAT] ✗ Ошибка обновления списка: {e}")
+                
+                try:
+                    # Очищаем визуальное отображение
+                    while self.messages_layout.count() > 1:
+                        item = self.messages_layout.takeAt(0)
+                        if item and item.widget():
+                            item.widget().deleteLater()
+                    self.add_message_widget("Система", "История чата очищена.", add_controls=False)
+                    print("[CLEAR_CHAT] UI очищен")
+                except Exception as e:
+                    print(f"[CLEAR_CHAT] ✗ Ошибка очистки UI: {e}")
+                    
+        except Exception as e:
+            print(f"[CLEAR_CHAT] ✗ Критическая ошибка: {e}")
+            import traceback
+            traceback.print_exc()
 
 def main():
     init_db()
