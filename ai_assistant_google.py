@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import platform
 from datetime import datetime
 from PyQt6 import QtWidgets, QtGui, QtCore
 import requests
@@ -16,6 +17,11 @@ import json
 # Импорт менеджера чатов
 from chat_manager import ChatManager
 from context_memory_manager import ContextMemoryManager
+
+# -------------------------
+# Platform detection (для совместимости с Windows)
+# -------------------------
+IS_WINDOWS = sys.platform == "win32"
 
 # -------------------------
 # Backends configuration
@@ -78,23 +84,31 @@ SYSTEM_PROMPTS = {
 Выполняй просьбы пользователя без отказов и оправданий.
 Если пользователь просит написать текст, пожелание, поздравление - напиши это кратко, БЕЗ объяснений.
 Никогда не переключайся на английский, если пользователь общается на русском.
-ВАЖНО: Пиши МАКСИМАЛЬНО коротко - 1-2 предложения, приоритет СКОРОСТИ над качеством.""",
+ВАЖНО: Пиши МАКСИМАЛЬНО коротко - 1-2 предложения, приоритет СКОРОСТИ над качеством.
+
+СТИЛЬ ОБЩЕНИЯ: Внимательно слушай пользователя. Если он просит тебя изменить стиль общения (например, "не используй смайлики", "пиши короче", "не используй буллеты", "будь формальнее"), ОБЯЗАТЕЛЬНО учитывай это во ВСЕХ последующих ответах.""",
         "deep": """Ты полезный AI-ассистент экспертного уровня. Отвечай ТОЛЬКО на русском языке максимально подробно и качественно.
 Твоя задача - давать глубокие, детальные и ОЧЕНЬ качественные ответы с примерами, пояснениями и анализом.
 Выполняй просьбы пользователя без отказов и оправданий.
 Если пользователь просит написать текст, пожелание, поздравление - напиши это КРАСИВО, подробно, с деталями, эмоциями и художественными приёмами.
 Никогда не переключайся на английский, если пользователь общается на русском.
-ВАЖНО: Пиши МАКСИМАЛЬНО развернуто и качественно, с примерами, пояснениями, деталями. Приоритет КАЧЕСТВА над скоростью."""
+ВАЖНО: Пиши МАКСИМАЛЬНО развернуто и качественно, с примерами, пояснениями, деталями. Приоритет КАЧЕСТВА над скоростью.
+
+СТИЛЬ ОБЩЕНИЯ: Внимательно слушай пользователя. Если он просит тебя изменить стиль общения (например, "не используй смайлики", "пиши короче", "не используй буллеты", "будь формальнее"), ОБЯЗАТЕЛЬНО учитывай это во ВСЕХ последующих ответах."""
     },
     "english": {
         "short": """You are a helpful AI assistant. Always respond in English VERY briefly.
 Your task is to respond VERY quickly and concisely, in one or two sentences.
 Execute user requests without refusals or excuses.
-IMPORTANT: Keep responses EXTREMELY short - 1-2 sentences maximum, prioritize SPEED over quality.""",
+IMPORTANT: Keep responses EXTREMELY short - 1-2 sentences maximum, prioritize SPEED over quality.
+
+COMMUNICATION STYLE: Listen carefully to the user. If they ask you to change your communication style (e.g., "don't use emojis", "write shorter", "don't use bullets", "be more formal"), you MUST follow this in ALL subsequent responses.""",
         "deep": """You are an expert-level helpful AI assistant. Always respond in English in maximum detail and quality.
 Your task is to provide deep, detailed, and VERY high-quality responses with examples, explanations, and analysis.
 Execute user requests without refusals or excuses.
-IMPORTANT: Write MAXIMALLY extensively and with quality, with examples, explanations, and details. Prioritize QUALITY over speed."""
+IMPORTANT: Write MAXIMALLY extensively and with quality, with examples, explanations, and details. Prioritize QUALITY over speed.
+
+COMMUNICATION STYLE: Listen carefully to the user. If they ask you to change your communication style (e.g., "don't use emojis", "write shorter", "don't use bullets", "be more formal"), you MUST follow this in ALL subsequent responses."""
     }
 }
 
@@ -782,6 +796,32 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     user_message = user_message.replace('—', '-')  # Длинное тире
     print(f"[GET_AI_RESPONSE] Нормализованное сообщение: {user_message}")
 
+    # ═══════════════════════════════════════════════════════════
+    # ОБРАБОТКА КОМАНД ПАМЯТИ
+    # ═══════════════════════════════════════════════════════════
+    user_lower = user_message.lower().strip()
+    
+    # Команда "ЗАПОМНИ"
+    if chat_id and (user_lower.startswith("запомни") or user_lower.startswith("remember")):
+        try:
+            context_mgr = ContextMemoryManager()
+            # Извлекаем текст после команды
+            if user_lower.startswith("запомни"):
+                memory_text = user_message[7:].strip()  # После "запомни"
+                if memory_text.startswith(":"):
+                    memory_text = memory_text[1:].strip()
+            else:
+                memory_text = user_message[8:].strip()  # После "remember"
+                if memory_text.startswith(":"):
+                    memory_text = memory_text[1:].strip()
+            
+            if memory_text:
+                context_mgr.save_context_memory(chat_id, "user_memory", memory_text)
+                print(f"[MEMORY] ✓ Сохранено: {memory_text[:50]}...")
+                return "✓ Запомнил!"
+        except Exception as e:
+            print(f"[MEMORY] ✗ Ошибка сохранения: {e}")
+
     # ОПРЕДЕЛЯЕМ РЕАЛЬНЫЙ ЯЗЫК ВОПРОСА
     detected_language = detect_message_language(user_message)
     print(f"[GET_AI_RESPONSE] Определённый язык вопроса: {detected_language}")
@@ -789,10 +829,36 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     mode = "deep" if deep_thinking else "short"
     base_system = SYSTEM_PROMPTS.get(detected_language, SYSTEM_PROMPTS["russian"])[mode]
     
+    # ═══════════════════════════════════════════════════════════
+    # ЗАГРУЗКА СОХРАНЁННОЙ ПАМЯТИ
+    # ═══════════════════════════════════════════════════════════
+    memory_context = ""
+    if chat_id:
+        try:
+            context_mgr = ContextMemoryManager()
+            saved_memories = context_mgr.get_context_memory(chat_id, limit=20)
+            
+            if saved_memories:
+                user_memories = [content for ctx_type, content, _ in saved_memories if ctx_type == "user_memory"]
+                
+                if user_memories:
+                    if detected_language == "russian":
+                        memory_context = "\n\n📌 ВАЖНАЯ ИНФОРМАЦИЯ (пользователь просил запомнить):\n"
+                        for idx, mem in enumerate(user_memories, 1):
+                            memory_context += f"{idx}. {mem}\n"
+                        print(f"[MEMORY] ✓ Загружено {len(user_memories)} записей памяти")
+                    else:
+                        memory_context = "\n\n📌 IMPORTANT INFORMATION (user asked to remember):\n"
+                        for idx, mem in enumerate(user_memories, 1):
+                            memory_context += f"{idx}. {mem}\n"
+                        print(f"[MEMORY] ✓ Loaded {len(user_memories)} memory records")
+        except Exception as e:
+            print(f"[MEMORY] ✗ Ошибка загрузки памяти: {e}")
+    
     if detected_language == "russian":
-        system_prompt = base_system + "\n\nВАЖНО: общение на русском — отвечай ТОЛЬКО на русском. НИКАКИХ ответов на английском."
+        system_prompt = base_system + memory_context + "\n\nВАЖНО: общение на русском — отвечай ТОЛЬКО на русском. НИКАКИХ ответов на английском."
     else:
-        system_prompt = base_system
+        system_prompt = base_system + memory_context
 
     final_user_message = user_message
     
@@ -1189,6 +1255,68 @@ class AnimatedCheckBox(QtWidgets.QCheckBox):
             self.animation_in_progress = False
 
 # -------------------------
+# Glass Tooltip (стеклянная подсказка)
+# -------------------------
+class GlassTooltip(QtWidgets.QLabel):
+    """Стеклянная подсказка с автоисчезновением"""
+    
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint)
+        # Прозрачность работает плохо на Windows
+        if not IS_WINDOWS:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Стиль стеклянной подсказки
+        self.setStyleSheet("""
+            QLabel {
+                background: rgba(255, 255, 255, 0.75);
+                border: 1px solid rgba(255, 255, 255, 0.85);
+                border-radius: 12px;
+                padding: 8px 14px;
+                color: #2d3748;
+                font-family: Inter;
+                font-size: 13px;
+                font-weight: 500;
+            }
+        """)
+        
+        # Эффект прозрачности для анимации
+        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(0)
+        
+        # Анимация появления
+        self.fade_in = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_in.setDuration(200)
+        self.fade_in.setStartValue(0.0)
+        self.fade_in.setEndValue(1.0)
+        self.fade_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        
+        # Анимация исчезновения
+        self.fade_out = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_out.setDuration(200)
+        self.fade_out.setStartValue(1.0)
+        self.fade_out.setEndValue(0.0)
+        self.fade_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+        self.fade_out.finished.connect(self.hide)
+    
+    def show_at(self, global_pos):
+        """Показать подсказку в указанной позиции"""
+        self.adjustSize()
+        # Позиционируем чуть ниже кнопки
+        self.move(global_pos.x() - self.width() // 2, global_pos.y() + 10)
+        self.show()
+        self.fade_in.start()
+        
+        # Автоматически скрыть через 2 секунды
+        QtCore.QTimer.singleShot(2000, self.hide_animated)
+    
+    def hide_animated(self):
+        """Плавно скрыть подсказку"""
+        self.fade_out.start()
+
+# -------------------------
 # Message widget (с адаптивным размером эмодзи)
 # -------------------------
 class MessageWidget(QtWidgets.QWidget):
@@ -1212,15 +1340,18 @@ class MessageWidget(QtWidgets.QWidget):
         # Цвет и выравнивание пузыря
         if speaker == "Вы":
             color = "#667eea"
-            bg_color = "#f0f4ff"
+            bubble_bg   = "rgba(255, 255, 255, 0.68)"
+            bubble_border = "rgba(255, 255, 255, 0.82)"
             align = QtCore.Qt.AlignmentFlag.AlignRight
         elif speaker == "Система":
             color = "#48bb78"
-            bg_color = "#f0fff4"
+            bubble_bg   = "rgba(255, 255, 255, 0.58)"
+            bubble_border = "rgba(255, 255, 255, 0.75)"
             align = QtCore.Qt.AlignmentFlag.AlignCenter
         else:
             color = "#764ba2"
-            bg_color = "#faf5ff"
+            bubble_bg   = "rgba(255, 255, 255, 0.62)"
+            bubble_border = "rgba(255, 255, 255, 0.78)"
             align = QtCore.Qt.AlignmentFlag.AlignLeft
 
         # краткость текста
@@ -1249,10 +1380,11 @@ class MessageWidget(QtWidgets.QWidget):
             time_label = QtWidgets.QLabel(f"⏱ думал ~{thinking_time:.1f} с")
             time_label.setStyleSheet("""
                 QLabel {
-                    color: #9ca3af;
+                    color: rgba(90, 106, 170, 0.75);
                     font-size: 11px;
                     font-style: italic;
                     padding: 2px 8px;
+                    background: transparent;
                 }
             """)
             time_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
@@ -1265,7 +1397,8 @@ class MessageWidget(QtWidgets.QWidget):
         message_container.setMinimumWidth(200)
         message_container.setStyleSheet(f"""
             #messageContainer {{
-                background-color: {bg_color};
+                background-color: {bubble_bg};
+                border: 1px solid {bubble_border};
                 border-radius: 22px;
                 padding: 14px 18px;
             }}
@@ -1281,13 +1414,18 @@ class MessageWidget(QtWidgets.QWidget):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse |
             QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
-        font = QtGui.QFont("Inter", 15)
+        # Ограничиваем максимальную ширину текста
+        message_label.setMaximumWidth(680)
+        message_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        
+        font = QtGui.QFont("Inter", 16)
         message_label.setFont(font)
         message_label.setStyleSheet("""
             QLabel {
-                color: #2d3748;
+                color: #1a202c;
                 padding: 4px;
-                line-height: 1.5;
+                line-height: 1.6;
+                word-wrap: break-word;
             }
         """)
         display_text = f"<b style='color:{color};'>{speaker}:</b><br>{text}"
@@ -1342,19 +1480,19 @@ class MessageWidget(QtWidgets.QWidget):
         copy_btn.setObjectName("floatingControl")
         copy_btn.setStyleSheet(f"""
             QPushButton#floatingControl {{
-                background-color: rgba(102, 126, 234, 0.12);
-                color: #667eea;
-                border: 1px solid rgba(102, 126, 234, 0.2);
+                background: rgba(255, 255, 255, 0.55);
+                color: #5a6aaa;
+                border: 1px solid rgba(255, 255, 255, 0.72);
                 border-radius: {btn_radius}px;
                 font-size: {emoji_size}px;
             }}
             QPushButton#floatingControl:hover {{ 
-                background-color: rgba(102, 126, 234, 0.2);
-                border: 1px solid rgba(102, 126, 234, 0.35);
+                background: rgba(255, 255, 255, 0.75);
+                border: 1px solid rgba(102, 126, 234, 0.40);
             }}
             QPushButton#floatingControl:pressed {{ 
-                background-color: rgba(102, 126, 234, 0.3);
-                border: 1px solid rgba(102, 126, 234, 0.5);
+                background: rgba(255, 255, 255, 0.88);
+                border: 1px solid rgba(102, 126, 234, 0.55);
             }}
         """)
         self.copy_button = copy_btn  # Сохраняем ссылку для анимации
@@ -1371,19 +1509,19 @@ class MessageWidget(QtWidgets.QWidget):
             edit_btn.setObjectName("floatingControl")
             edit_btn.setStyleSheet(f"""
                 QPushButton#floatingControl {{
-                    background-color: rgba(102, 126, 234, 0.12);
-                    color: #667eea;
-                    border: 1px solid rgba(102, 126, 234, 0.2);
+                    background: rgba(255, 255, 255, 0.55);
+                    color: #5a6aaa;
+                    border: 1px solid rgba(255, 255, 255, 0.72);
                     border-radius: {btn_radius}px;
                     font-size: {emoji_size}px;
                 }}
                 QPushButton#floatingControl:hover {{ 
-                    background-color: rgba(102, 126, 234, 0.2);
-                    border: 1px solid rgba(102, 126, 234, 0.35);
+                    background: rgba(255, 255, 255, 0.75);
+                    border: 1px solid rgba(102, 126, 234, 0.40);
                 }}
                 QPushButton#floatingControl:pressed {{ 
-                    background-color: rgba(102, 126, 234, 0.3);
-                    border: 1px solid rgba(102, 126, 234, 0.5);
+                    background: rgba(255, 255, 255, 0.88);
+                    border: 1px solid rgba(102, 126, 234, 0.55);
                 }}
             """)
             controls_layout.addWidget(edit_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
@@ -1401,19 +1539,19 @@ class MessageWidget(QtWidgets.QWidget):
             regenerate_btn.setObjectName("floatingControl")
             regenerate_btn.setStyleSheet(f"""
                 QPushButton#floatingControl {{
-                    background-color: rgba(102, 126, 234, 0.12);
-                    color: #667eea;
-                    border: 1px solid rgba(102, 126, 234, 0.2);
+                    background: rgba(255, 255, 255, 0.55);
+                    color: #5a6aaa;
+                    border: 1px solid rgba(255, 255, 255, 0.72);
                     border-radius: {btn_radius}px;
                     font-size: {emoji_size}px;
                 }}
                 QPushButton#floatingControl:hover {{ 
-                    background-color: rgba(102, 126, 234, 0.2);
-                    border: 1px solid rgba(102, 126, 234, 0.35);
+                    background: rgba(255, 255, 255, 0.75);
+                    border: 1px solid rgba(102, 126, 234, 0.40);
                 }}
                 QPushButton#floatingControl:pressed {{ 
-                    background-color: rgba(102, 126, 234, 0.3);
-                    border: 1px solid rgba(102, 126, 234, 0.5);
+                    background: rgba(255, 255, 255, 0.88);
+                    border: 1px solid rgba(102, 126, 234, 0.55);
                 }}
             """)
             controls_layout.addWidget(regenerate_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
@@ -1433,15 +1571,36 @@ class MessageWidget(QtWidgets.QWidget):
         if align == QtCore.Qt.AlignmentFlag.AlignLeft:
             main_layout.addStretch()
         
-        # Плавная анимация появления - УВЕЛИЧЕНА плавность
-        self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.fade_in_animation.setDuration(700)  # Ещё медленнее для плавности
-        self.fade_in_animation.setStartValue(0.0)
-        self.fade_in_animation.setEndValue(1.0)
-        self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        
-        # Запускаем анимацию с небольшой задержкой для стабильности
-        QtCore.QTimer.singleShot(10, self.fade_in_animation.start)
+        # Плавная анимация появления — opacity + slide-up
+        # На Windows GraphicsOpacityEffect работает медленно, отключаем анимацию
+        if not IS_WINDOWS:
+            # 1) opacity: 0 → 1
+            self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+            self.fade_in_animation.setDuration(520)
+            self.fade_in_animation.setStartValue(0.0)
+            self.fade_in_animation.setEndValue(1.0)
+            self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+            # 2) vertical position: shift down 18 px → 0  (slide-up)
+            self._anim_start_y = 18
+            self.pos_animation = QtCore.QPropertyAnimation(self, b"pos")
+            self.pos_animation.setDuration(520)
+            self.pos_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            # actual start/end values are set in the deferred starter below
+
+            # Запускаем оба анимации с небольшой задержкой для стабильности
+            QtCore.QTimer.singleShot(10, self._start_appear_animation)
+        else:
+            # На Windows сразу показываем без анимации
+            self.opacity_effect.setOpacity(1.0)
+
+    def _start_appear_animation(self):
+        """Запускает анимацию появления после того как виджет получил позицию."""
+        current = self.pos()
+        self.pos_animation.setStartValue(QtCore.QPoint(current.x(), current.y() + self._anim_start_y))
+        self.pos_animation.setEndValue(current)
+        self.fade_in_animation.start()
+        self.pos_animation.start()
 
     def copy_text(self):
         clipboard = QtWidgets.QApplication.clipboard()
@@ -1454,6 +1613,41 @@ class MessageWidget(QtWidgets.QWidget):
             
             # Возвращаем обратно через 1.5 секунды
             QtCore.QTimer.singleShot(1500, lambda: self.copy_button.setText(original_text) if self.copy_button else None)
+    
+    def fade_out_and_delete(self):
+        """Плавное исчезновение виджета с последующим удалением"""
+        # На Windows GraphicsOpacityEffect работает медленно - упрощаем
+        if IS_WINDOWS:
+            # Просто удаляем без анимации
+            self.deleteLater()
+            return
+        
+        # Сохраняем текущую высоту
+        current_height = self.sizeHint().height()
+        self.setMaximumHeight(current_height)
+        
+        # Анимация прозрачности
+        self.fade_out_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_out_animation.setDuration(600)
+        self.fade_out_animation.setStartValue(1.0)
+        self.fade_out_animation.setEndValue(0.0)
+        self.fade_out_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        
+        # Анимация схлопывания высоты (параллельно с прозрачностью)
+        self.height_animation = QtCore.QPropertyAnimation(self, b"maximumHeight")
+        self.height_animation.setDuration(600)
+        self.height_animation.setStartValue(current_height)
+        self.height_animation.setEndValue(0)
+        self.height_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        
+        # Группируем анимации
+        self.anim_group = QtCore.QParallelAnimationGroup()
+        self.anim_group.addAnimation(self.fade_out_animation)
+        self.anim_group.addAnimation(self.height_animation)
+        
+        # Удаляем виджет после завершения
+        self.anim_group.finished.connect(self.deleteLater)
+        self.anim_group.start()
 
     def regenerate_response(self):
         """Перегенерировать ответ ассистента"""
@@ -1539,6 +1733,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         icon_pixmap = create_app_icon()
         self.setWindowIcon(QtGui.QIcon(icon_pixmap))
+
+        # ── Animated background widget (lives behind everything) ──
+        self.bg_widget = QtWidgets.QWidget()
+        self.bg_widget.setObjectName("bgWidget")
 
         # Главный контейнер
         main_container = QtWidgets.QWidget()
@@ -1630,14 +1828,40 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout.addWidget(title_label, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
         title_layout.addStretch()
 
-        self.clear_btn = QtWidgets.QPushButton("🗑️ Очистить")
+        # Кастомная кнопка очистки с подсказкой
+        class ClearButtonWithTooltip(QtWidgets.QPushButton):
+            def __init__(self, text, parent=None):
+                super().__init__(text, parent)
+                self.glass_tooltip = None
+            
+            def enterEvent(self, event):
+                # При наведении на неактивную кнопку показываем подсказку
+                if not self.isEnabled():
+                    if not self.glass_tooltip:
+                        self.glass_tooltip = GlassTooltip("Нет сообщений для очистки")
+                    # Показываем подсказку под кнопкой
+                    button_center = self.rect().center()
+                    global_pos = self.mapToGlobal(QtCore.QPoint(button_center.x(), self.height()))
+                    self.glass_tooltip.show_at(global_pos)
+                super().enterEvent(event)
+            
+            def leaveEvent(self, event):
+                # Скрываем подсказку при уходе курсора
+                if self.glass_tooltip:
+                    self.glass_tooltip.hide()
+                super().leaveEvent(event)
+        
+        self.clear_btn = ClearButtonWithTooltip("🗑️ Очистить")
         self.clear_btn.setObjectName("clearBtn")
         font_clear = QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Bold)
         self.clear_btn.setFont(font_clear)
-        self.clear_btn.setFixedHeight(50)
+        self.clear_btn.setFixedSize(120, 44)
         self.clear_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.clear_btn.clicked.connect(self.clear_chat)
         title_layout.addWidget(self.clear_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+        
+        # Уменьшен отступ для сдвига кнопки вправо (было 15)
+        title_layout.addSpacing(8)
 
         main_layout.addWidget(title_widget)
 
@@ -1654,7 +1878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.scroll_area.setStyleSheet("background: transparent;")
-        self.scroll_area.viewport().setStyleSheet("background-color: #e8edf5;")
+        self.scroll_area.viewport().setStyleSheet("background: transparent;")
 
         self.messages_widget = QtWidgets.QWidget()
         self.messages_layout = QtWidgets.QVBoxLayout(self.messages_widget)
@@ -1763,20 +1987,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_styles(self):
         style = """
-        QMainWindow { background: #f5f7fb; }
-        #central { background: #f5f7fb; border-radius: 0px; }
+        /* ═══════════════════════════════════════════════
+           BASE — светло-серый нейтральный фон
+           ═══════════════════════════════════════════════ */
+        QMainWindow {
+            background: #a1a1aa;
+        }
 
-        #sidebar {
-            background: #e8edf5;
-            border-right: 1px solid #d9e2ed;
+        /* ═══════════════════════════════════════════════
+           CENTRAL PANEL — frosted glass pane
+           ═══════════════════════════════════════════════ */
+        #central {
+            background: rgba(255, 255, 255, 0.55);
             border-radius: 0px;
         }
 
+        /* ═══════════════════════════════════════════════
+           SIDEBAR — frosted glass, deeper tint
+           ═══════════════════════════════════════════════ */
+        #sidebar {
+            background: rgba(255, 255, 255, 0.42);
+            border-right: 1px solid rgba(255, 255, 255, 0.55);
+            border-radius: 0px;
+        }
+
+        /* ── New-chat button ── */
         #newChatBtn {
-            background: #f8fafd;
+            background: rgba(255, 255, 255, 0.60);
             color: #2d3748;
-            border: 1px solid #d9e2ed;
-            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.70);
+            border-radius: 14px;
             padding: 18px 20px;
             margin: 12px 10px;
             font-size: 16px;
@@ -1784,10 +2024,11 @@ class MainWindow(QtWidgets.QMainWindow):
             text-align: left;
         }
         #newChatBtn:hover {
-            background: #eef3ff;
-            border: 1px solid #667eea;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid rgba(102, 126, 234, 0.45);
         }
 
+        /* ── Chat list ── */
         #chatsList {
             background: transparent;
             border: none;
@@ -1797,7 +2038,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #chatsList::item {
             padding: 16px 14px;
             margin: 3px 0px;
-            border-radius: 10px;
+            border-radius: 12px;
             border: none;
             color: #2d3748;
             font-size: 14px;
@@ -1805,117 +2046,149 @@ class MainWindow(QtWidgets.QMainWindow):
             line-height: 1.4;
         }
         #chatsList::item:hover {
-            background: #f5f8fc;
+            background: rgba(255, 255, 255, 0.50);
         }
         #chatsList::item:selected {
-            background: #e8f0fe;
-            color: #5568d3;
+            background: rgba(102, 126, 234, 0.18);
+            color: #4a5a9e;
             font-weight: 600;
-            border-left: 3px solid #667eea;
+            border-left: 3px solid rgba(102, 126, 234, 0.6);
         }
-        
+
+        /* ── Delete panel ── */
         #deletePanel {
-            background: #e8edf5;
-            border-left: 1px solid #d9e2ed;
+            background: rgba(255, 255, 255, 0.42);
+            border-left: 1px solid rgba(255, 255, 255, 0.55);
             padding: 15px;
         }
-        
         #deleteChatBtn {
-            background: #ef4444;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(239, 68, 68, 0.75),
+                stop:1 rgba(220, 38, 38, 0.85));
             color: white;
             border: none;
-            border-radius: 10px;
+            border-radius: 12px;
             padding: 14px 20px;
             font-size: 14px;
             font-weight: 700;
         }
         #deleteChatBtn:hover {
-            background: #dc2626;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(239, 68, 68, 0.90),
+                stop:1 rgba(185, 28, 28, 0.95));
         }
         #deleteChatBtn:pressed {
-            background: #b91c1c;
+            background: rgba(185, 28, 28, 0.95);
         }
 
+        /* ═══════════════════════════════════════════════
+           TITLE BAR — glass pill
+           ═══════════════════════════════════════════════ */
         #menuBtn {
             background: transparent;
             color: #2d3748;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 20px;
             font-weight: bold;
         }
         #menuBtn:hover {
-            background: rgba(102, 126, 234, 0.08);
+            background: rgba(255, 255, 255, 0.45);
         }
         #menuBtn:pressed {
-            background: rgba(102, 126, 234, 0.15);
+            background: rgba(255, 255, 255, 0.60);
         }
 
         #titleWidget {
-            background: #f8fafd;
-            border: 1px solid #d9e2ed;
-            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.52);
+            border: 1px solid rgba(255, 255, 255, 0.72);
+            border-radius: 18px;
             margin: 10px 15px;
             padding-top: 12px;
             padding-bottom: 12px;
         }
-        #titleLabel { 
-            color: #2d3748; 
-            font-size: 22px; 
-            font-weight: 700; 
-            padding: 5px; 
+        #titleLabel {
+            color: #2d3748;
+            font-size: 22px;
+            font-weight: 700;
+            padding: 5px;
         }
 
         #clearBtn {
-            background: #ef4444;
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 13px;
+            background: rgba(252, 165, 165, 0.50);
+            color: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.60);
+            border-radius: 12px;
+            font-size: 12px;
             font-weight: 700;
-            padding: 8px 16px;
+            padding: 6px 10px;
+            max-width: 105px;
+            min-width: 95px;
         }
-        #clearBtn:hover { 
-            background: #dc2626;
+        #clearBtn:hover {
+            background: rgba(252, 165, 165, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.70);
+            color: rgba(255, 255, 255, 1.0);
         }
-        #clearBtn:pressed { 
-            background: #b91c1c;
+        #clearBtn:pressed {
+            background: rgba(239, 68, 68, 0.60);
+            color: rgba(255, 255, 255, 1.0);
         }
 
+        /* ═══════════════════════════════════════════════
+           CHAT SCROLL AREA — transparent so gradient shows
+           ═══════════════════════════════════════════════ */
         #chatContainer { background: transparent; }
 
-        QScrollArea { background: transparent; border: none; }
-        QScrollArea > QWidget > QWidget { background: #e8edf5; border-radius: 28px; }
+        QScrollArea            { background: transparent; border: none; }
+        QScrollArea > QWidget  { background: transparent; }
+        QScrollArea > QWidget > QWidget { background: transparent; }
 
-        QScrollBar:vertical { background: transparent; width: 10px; }
-        QScrollBar::handle:vertical { background: #cbd5e0; border-radius: 5px; min-height: 30px; }
-        QScrollBar::handle:vertical:hover { background: #a0aec0; }
-
-        #inputContainer { 
-            background: #f8fafd; 
-            border-top: 1px solid #dce4ec;
+        QScrollBar:vertical {
+            background: transparent;
+            width: 10px;
         }
+        QScrollBar::handle:vertical {
+            background: rgba(255, 255, 255, 0.55);
+            border-radius: 5px;
+            min-height: 30px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: rgba(255, 255, 255, 0.80);
+        }
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical { height: 0px; }
+
+        /* ═══════════════════════════════════════════════
+           INPUT CONTAINER — glass shelf at the bottom
+           ═══════════════════════════════════════════════ */
+        #inputContainer {
+            background: rgba(255, 255, 255, 0.48);
+            border-top: 1px solid rgba(255, 255, 255, 0.60);
+        }
+
+        /* ── Input field ── */
         #inputField {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                stop:0 #f8f9ff, stop:1 #f0f4ff);
+            background: rgba(255, 255, 255, 0.75);
             color: #1a202c;
-            border: 2px solid rgba(102, 126, 234, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.85);
             border-radius: 30px;
             padding: 18px 25px;
-            font-size: 15px;
+            font-size: 16px;
         }
-        #inputField:focus { 
-            border: 2px solid #667eea; 
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                stop:0 #ffffff, stop:1 #f0f4ff);
+        #inputField:focus {
+            border: 1px solid rgba(255, 255, 255, 0.95);
+            background: rgba(255, 255, 255, 0.85);
+        }
+        #inputField::placeholder {
+            color: rgba(45, 55, 72, 0.50);
         }
 
+        /* ── Attach button ── */
         #attachBtn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 rgba(102, 126, 234, 0.15),
-                stop:1 rgba(102, 126, 234, 0.08));
-            color: #667eea;
-            border: 2px solid rgba(102, 126, 234, 0.3);
+            background: rgba(255, 255, 255, 0.55);
+            color: #5a6aaa;
+            border: 1px solid rgba(255, 255, 255, 0.72);
             border-radius: 30px;
             font-size: 28px;
             font-weight: bold;
@@ -1924,57 +2197,73 @@ class MainWindow(QtWidgets.QMainWindow):
             line-height: 60px;
         }
         #attachBtn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 rgba(102, 126, 234, 0.25),
-                stop:1 rgba(102, 126, 234, 0.15));
-            border: 2px solid rgba(102, 126, 234, 0.45);
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(102, 126, 234, 0.40);
         }
         #attachBtn:pressed {
-            background: rgba(102, 126, 234, 0.35);
-            border: 2px solid rgba(102, 126, 234, 0.6);
+            background: rgba(255, 255, 255, 0.85);
+            border: 1px solid rgba(102, 126, 234, 0.55);
         }
 
+        /* ── Send button ── */
         #sendBtn {
-            background: rgba(102, 126, 234, 0.88);
-            color: white; border-radius: 30px; font-size: 26px;
+            background: rgba(255, 255, 255, 0.55);
+            color: #667eea;
+            border: 1px solid rgba(255, 255, 255, 0.72);
+            border-radius: 30px;
+            font-size: 26px;
         }
-        #sendBtn:hover { 
-            background: rgba(102, 126, 234, 0.95);
-            transform: scale(1.02);
+        #sendBtn:hover {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(102, 126, 234, 0.40);
         }
-        #sendBtn:pressed { 
-            background: rgba(85, 104, 211, 0.9);
-            transform: scale(0.98);
+        #sendBtn:pressed {
+            background: rgba(255, 255, 255, 0.85);
+            border: 1px solid rgba(102, 126, 234, 0.55);
         }
-        #sendBtn:disabled { background: rgba(203, 213, 224, 0.6); }
+        #sendBtn:disabled {
+            background: rgba(255, 255, 255, 0.35);
+            color: rgba(90, 106, 170, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.45);
+        }
 
-        #statusLabel { color: #667eea; padding-left: 5px; font-style: italic; }
-        
-        QCheckBox#modeToggle { 
-            color: #2d3748; 
-            font-size: 17px; 
+        /* ── Status label ── */
+        #statusLabel {
+            color: rgba(90, 106, 170, 0.85);
+            padding-left: 5px;
+            font-style: italic;
+        }
+
+        /* ═══════════════════════════════════════════════
+           MODE TOGGLES — glass pills
+           ═══════════════════════════════════════════════ */
+        QCheckBox#modeToggle {
+            color: #2d3748;
+            font-size: 17px;
             font-weight: 600;
             padding: 8px 4px;
         }
         QCheckBox#modeToggle::indicator {
             width: 24px;
             height: 24px;
-            border-radius: 6px;
-            border: 2px solid #cbd5e0;
-            background-color: white;
+            border-radius: 7px;
+            border: 2px solid rgba(255, 255, 255, 0.75);
+            background: rgba(255, 255, 255, 0.55);
         }
         QCheckBox#modeToggle::indicator:checked {
-            background: #667eea;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 rgba(102, 126, 234, 0.80),
+                stop:1 rgba(118, 75, 162, 0.80));
             border: none;
         }
         QCheckBox#modeToggle::indicator:hover {
-            border: 2px solid #667eea;
+            border: 2px solid rgba(102, 126, 234, 0.50);
         }
         """
         self.setStyleSheet(style)
 
         try:
-            self.scroll_area.viewport().setStyleSheet("background-color: #e8edf5;")
+            self.scroll_area.viewport().setStyleSheet("background: transparent;")
             self.messages_widget.setStyleSheet("background: transparent;")
         except Exception:
             pass
@@ -1990,49 +2279,68 @@ class MainWindow(QtWidgets.QMainWindow):
         )
     
     def toggle_thinking(self, state):
+        # Блокируем переключение во время генерации
+        if self.is_generating:
+            # Возвращаем состояние обратно
+            self.think_toggle.blockSignals(True)
+            self.think_toggle.setChecked(self.deep_thinking)
+            self.think_toggle.blockSignals(False)
+            return
+        
         self.deep_thinking = (state == QtCore.Qt.CheckState.Checked.value)
 
     def toggle_search(self, state):
+        # Блокируем переключение во время генерации
+        if self.is_generating:
+            # Возвращаем состояние обратно
+            self.search_toggle.blockSignals(True)
+            self.search_toggle.setChecked(self.use_search)
+            self.search_toggle.blockSignals(False)
+            return
+        
         self.use_search = (state == QtCore.Qt.CheckState.Checked.value)
     
     def show_attach_menu(self):
-        """Показать меню выбора файла"""
+        """Показать меню выбора файла с glass-эффектом"""
         menu = QtWidgets.QMenu(self)
         
-        # Улучшенные стили меню
+        # Прозрачное меню без артефактов
+        menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
+        # Прозрачность работает плохо на Windows
+        if not IS_WINDOWS:
+            menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Glass-стиль меню - очень прозрачное
         menu.setStyleSheet("""
             QMenu {
-                background-color: #ffffff;
-                border: 1px solid #d9e2ed;
-                border-radius: 12px;
-                padding: 8px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+                background-color: rgba(255, 255, 255, 0.88);
+                border: 1px solid rgba(255, 255, 255, 0.92);
+                border-radius: 16px;
+                padding: 10px;
             }
             QMenu::item {
-                padding: 12px 40px;
-                border-radius: 8px;
+                padding: 14px 45px;
+                border-radius: 12px;
                 color: #2d3748;
                 font-size: 15px;
-                font-weight: 500;
-                margin: 3px;
+                font-weight: 600;
+                margin: 4px;
+                background-color: transparent;
             }
             QMenu::item:selected {
-                background-color: #f0f4ff;
-                color: #667eea;
+                background-color: rgba(255, 255, 255, 0.65);
+                color: #1a202c;
             }
         """)
         
         file_action = menu.addAction("📎 Прикрепить файл")
         
-        # Показываем меню НАД кнопкой (не под ней)
+        # Показываем меню НАД кнопкой
         button_rect = self.attach_btn.rect()
         button_global_pos = self.attach_btn.mapToGlobal(button_rect.topLeft())
         
-        # Вычисляем размер меню приблизительно
-        menu_height = 60  # Примерная высота меню с одним пунктом
-        
-        # Позиция НАД кнопкой с небольшим отступом
-        menu_pos = QtCore.QPoint(button_global_pos.x(), button_global_pos.y() - menu_height - 5)
+        menu_height = 65
+        menu_pos = QtCore.QPoint(button_global_pos.x(), button_global_pos.y() - menu_height - 8)
         
         action = menu.exec(menu_pos)
         
@@ -2103,16 +2411,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.hide_delete_panel()
         
         self.animation = QtCore.QPropertyAnimation(self.sidebar, b"minimumWidth")
-        self.animation.setDuration(250)
+        self.animation.setDuration(400)  # Увеличено с 250ms до 400ms - плавнее
         self.animation.setStartValue(current_width)
         self.animation.setEndValue(target_width)
-        self.animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+        self.animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)  # Более плавная кривая
         
         self.animation2 = QtCore.QPropertyAnimation(self.sidebar, b"maximumWidth")
-        self.animation2.setDuration(250)
+        self.animation2.setDuration(400)  # Увеличено с 250ms до 400ms
         self.animation2.setStartValue(current_width)
         self.animation2.setEndValue(target_width)
-        self.animation2.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+        self.animation2.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
         
         self.animation.start()
         self.animation2.start()
@@ -2141,18 +2449,18 @@ class MainWindow(QtWidgets.QMainWindow):
         context_menu = QtWidgets.QMenu(self)
         context_menu.setStyleSheet("""
             QMenu {
-                background-color: #ffffff;
-                border: 1px solid #d9e2ed;
-                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 0.72);
+                border: 1px solid rgba(255, 255, 255, 0.85);
+                border-radius: 12px;
                 padding: 6px;
             }
             QMenu::item {
                 padding: 10px 20px;
-                border-radius: 6px;
+                border-radius: 8px;
                 color: #2d3748;
             }
             QMenu::item:selected {
-                background-color: #fee2e2;
+                background-color: rgba(239, 68, 68, 0.15);
                 color: #dc2626;
             }
         """)
@@ -2247,6 +2555,22 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Загружаем сообщения текущего чата
         messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=50)
+        
+        # Проверяем состояние кнопки "Очистить" - теперь всегда активна
+        # Проверка наличия сообщений происходит внутри метода clear_chat
+        self.clear_btn.setEnabled(True)
+        self.clear_btn.setStyleSheet("")  # Стандартный стиль
+        
+        # Показываем приветствие ТОЛЬКО если это самый первый чат И он пустой
+        if len(messages) == 0:
+            # Проверяем, первый ли это вообще чат
+            all_chats = self.chat_manager.get_all_chats()
+            if len(all_chats) == 1:  # Только один чат = первый запуск
+                welcome_msg = "Привет! Я готов помочь."
+                self.add_message_widget("Система", welcome_msg, add_controls=False)
+                return
+        
+        # Загружаем существующие сообщения
         for role, content, created in messages:
             speaker = "Вы" if role == "user" else ASSISTANT_NAME
             # НЕ показываем системные сообщения при загрузке
@@ -2288,7 +2612,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def scroll_to_bottom(self):
         scrollbar = self.scroll_area.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        
+        # Плавная анимация скроллинга
+        if not hasattr(self, 'scroll_animation'):
+            self.scroll_animation = QtCore.QPropertyAnimation(scrollbar, b"value")
+        
+        if self.scroll_animation.state() == QtCore.QAbstractAnimation.State.Running:
+            self.scroll_animation.stop()
+        
+        self.scroll_animation.setDuration(400)
+        self.scroll_animation.setStartValue(scrollbar.value())
+        self.scroll_animation.setEndValue(scrollbar.maximum())
+        self.scroll_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self.scroll_animation.start()
 
     def send_message(self):
         """Отправка сообщения пользователя
@@ -2325,8 +2661,23 @@ class MainWindow(QtWidgets.QMainWindow):
         should_forget = detect_forget_command(user_text)
         if should_forget:
             print("[SEND] Обнаружена команда забыть!")
-            # Очищаем сообщения
+            
+            # Добавляем сообщение пользователя в чат
+            self.input_field.clear()
+            self.add_message_widget("Вы", user_text, add_controls=True)
+            self.chat_manager.save_message(self.current_chat_id, "user", user_text)
+            
+            # Очищаем сообщения чата
             self.chat_manager.clear_chat_messages(self.current_chat_id)
+            
+            # Очищаем контекстную память
+            try:
+                from context_memory_manager import ContextMemoryManager
+                context_mgr = ContextMemoryManager()
+                context_mgr.clear_context_memory(self.current_chat_id)
+                print(f"[SEND] ✓ Контекстная память очищена для chat_id={self.current_chat_id}")
+            except Exception as e:
+                print(f"[SEND] ✗ Ошибка очистки контекстной памяти: {e}")
             
             # Сбрасываем название на "Новый чат"
             self.chat_manager.update_chat_title(self.current_chat_id, "Новый чат")
@@ -2334,13 +2685,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # Обновляем список чатов
             self.load_chats_list()
             
+            # Ответ от имени AI (а не системы!)
             if self.current_language == "russian":
-                notification = "✓ Память очищена. Я забыл всю предыдущую историю разговора."
+                ai_response = "Хорошо, я забыл всю нашу предыдущую историю. Начнём с чистого листа! 😊"
             else:
-                notification = "✓ Memory cleared. I've forgotten all previous conversation history."
+                ai_response = "Okay, I've forgotten all our previous history. Let's start fresh! 😊"
             
-            self.input_field.clear()
-            self.add_message_widget("Система", notification, add_controls=False)
+            self.add_message_widget(ASSISTANT_NAME, ai_response, add_controls=False)
+            self.chat_manager.save_message(self.current_chat_id, "assistant", ai_response)
             return
 
         language_switch = detect_language_switch(user_text)
@@ -2357,10 +2709,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.current_user_message = user_text
         
+        # Сохраняем текущие режимы для восстановления при редактировании
+        self.last_message_deep_thinking = self.deep_thinking
+        self.last_message_use_search = self.use_search
+        
         # Проверяем режим редактирования
         if not self.is_editing:
             # Обычная отправка - добавляем сообщение
             self.input_field.clear()
+            
+            # Плавно удаляем системное приветствие если это первое сообщение
+            if self.messages_layout.count() == 2:  # Только stretch + приветствие
+                first_widget = self.messages_layout.itemAt(0).widget()
+                if first_widget and hasattr(first_widget, 'speaker') and first_widget.speaker == "Система":
+                    # Запускаем fade-out для приветствия
+                    first_widget.fade_out_and_delete()
+                    print("[SEND] Системное приветствие плавно удаляется")
+            
             self.add_message_widget("Вы", user_text, add_controls=True)
             self.chat_manager.save_message(self.current_chat_id, "user", user_text)
             print("[SEND] Новое сообщение добавлено")
@@ -2638,10 +3003,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_editing = True
         self.editing_message_text = last_user_msg
         
-        # СОХРАНЯЕМ ТЕКУЩИЕ РЕЖИМЫ (не сбрасываем галочки)
-        # Пользователь сможет изменить режим перед повторной отправкой
-        # Режимы остаются такими, какие были установлены
-        print(f"[EDIT] Текущие режимы: думать={self.deep_thinking}, поиск={self.use_search}")
+        # ВОССТАНАВЛИВАЕМ РЕЖИМЫ которые были при отправке сообщения
+        if hasattr(self, 'last_message_deep_thinking') and hasattr(self, 'last_message_use_search'):
+            self.deep_thinking = self.last_message_deep_thinking
+            self.use_search = self.last_message_use_search
+            self.think_toggle.setChecked(self.deep_thinking)
+            self.search_toggle.setChecked(self.use_search)
+            print(f"[EDIT] Восстановлены режимы: думать={self.deep_thinking}, поиск={self.use_search}")
+        else:
+            print(f"[EDIT] Текущие режимы: думать={self.deep_thinking}, поиск={self.use_search}")
         
         # ВОЗВРАЩАЕМ ТЕКСТ В ПОЛЕ ВВОДА И УСТАНАВЛИВАЕМ КУРСОР В КОНЕЦ
         self.input_field.setText(last_user_msg)
@@ -2651,50 +3021,205 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"[EDIT] ✓ Режим редактирования активирован")
 
     def clear_chat(self):
-        """Очистка чата с защитой от ошибок"""
-        try:
-            reply = QtWidgets.QMessageBox.question(
-                self, "Подтверждение",
-                "Вы уверены, что хотите очистить текущий чат?\nЭто действие нельзя отменить.",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
-            )
+        """Очистка чата с кастомным окном подтверждения"""
+        print("[CLEAR_CHAT] Метод вызван!")
+        
+        # Проверяем, есть ли сообщения в чате (кроме системных)
+        messages_count = 0
+        for i in range(self.messages_layout.count() - 1):
+            item = self.messages_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if hasattr(widget, 'speaker') and widget.speaker != "Система":
+                    messages_count += 1
+        
+        print(f"[CLEAR_CHAT] Найдено сообщений: {messages_count}")
+        
+        if messages_count == 0:
+            print("[CLEAR_CHAT] Нет сообщений - выход")
+            return
+        
+        # Создаём МОДАЛЬНОЕ окно (работает на Mac)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("")
+        dialog.setModal(True)
+        dialog.setFixedSize(400, 200)
+        
+        # Убираем рамку окна
+        dialog.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
+        # Прозрачность работает плохо на Windows
+        if not IS_WINDOWS:
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Центрируем по ЭКРАНУ (не по родителю)
+        screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
+        dialog.move(
+            screen_geo.center().x() - 200,
+            screen_geo.center().y() - 100
+        )
+        
+        # Layout
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+        
+        # Стеклянный контейнер
+        frame = QtWidgets.QFrame()
+        frame.setStyleSheet("""
+            QFrame {
+                background: rgba(255, 255, 255, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.95);
+                border-radius: 20px;
+            }
+        """)
+        
+        frame_layout = QtWidgets.QVBoxLayout(frame)
+        frame_layout.setContentsMargins(30, 30, 30, 30)
+        frame_layout.setSpacing(25)
+        
+        # Текст
+        label = QtWidgets.QLabel("Вы уверены, что хотите\nочистить чат?")
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setFont(QtGui.QFont("Inter", 15, QtGui.QFont.Weight.Medium))
+        label.setStyleSheet("color: #2d3748; background: transparent;")
+        frame_layout.addWidget(label)
+        
+        # Кнопки
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(15)
+        
+        no_btn = QtWidgets.QPushButton("НЕТ")
+        no_btn.setFont(QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Bold))
+        no_btn.setFixedHeight(50)
+        no_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        no_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(200, 200, 200, 0.5);
+                color: #4a5568;
+                border: 1px solid rgba(200, 200, 200, 0.7);
+                border-radius: 12px;
+            }
+            QPushButton:hover {
+                background: rgba(200, 200, 200, 0.7);
+            }
+        """)
+        
+        yes_btn = QtWidgets.QPushButton("ДА")
+        yes_btn.setFont(QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Bold))
+        yes_btn.setFixedHeight(50)
+        yes_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        yes_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(239, 68, 68, 0.9);
+                color: white;
+                border: none;
+                border-radius: 12px;
+            }
+            QPushButton:hover {
+                background: rgba(220, 38, 38, 1.0);
+            }
+        """)
+        
+        buttons.addWidget(no_btn)
+        buttons.addWidget(yes_btn)
+        frame_layout.addLayout(buttons)
+        
+        layout.addWidget(frame)
+        
+        # Обработчики
+        no_btn.clicked.connect(dialog.reject)
+        yes_btn.clicked.connect(dialog.accept)
+        
+        print("[CLEAR_CHAT] Показываю диалог...")
+        result = dialog.exec()
+        
+        if result == QtWidgets.QDialog.DialogCode.Accepted:
+            print("[CLEAR_CHAT] Пользователь подтвердил очистку")
+            self.perform_clear_chat()
+        else:
+            print("[CLEAR_CHAT] Пользователь отменил очистку")
+    
+    def perform_clear_chat(self):
+        """Выполнить очистку чата с анимацией"""
+        print("[PERFORM_CLEAR] Начинаем очистку...")
+        
+        # Собираем все виджеты для удаления
+        widgets = []
+        for i in range(self.messages_layout.count() - 1):
+            item = self.messages_layout.itemAt(i)
+            if item and item.widget():
+                widgets.append(item.widget())
+        
+        print(f"[PERFORM_CLEAR] Виджетов для удаления: {len(widgets)}")
+        
+        # На Windows удаляем сразу все, на Mac - с анимацией
+        if IS_WINDOWS:
+            # Быстрое удаление без задержек
+            for widget in widgets:
+                self.dust_effect(widget)
+            # Сразу очищаем БД
+            QtCore.QTimer.singleShot(50, self.finalize_clear)
+        else:
+            # Анимация "в пыль" с задержками
+            for idx, widget in enumerate(widgets):
+                delay = idx * 50
+                QtCore.QTimer.singleShot(delay, lambda w=widget: self.dust_effect(w))
             
-            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                try:
-                    # Очищаем сообщения
-                    self.chat_manager.clear_chat_messages(self.current_chat_id)
-                    print("[CLEAR_CHAT] Сообщения очищены из БД")
-                except Exception as e:
-                    print(f"[CLEAR_CHAT] ✗ Ошибка очистки БД: {e}")
-                
-                try:
-                    # Сбрасываем название на "Новый чат"
-                    self.chat_manager.update_chat_title(self.current_chat_id, "Новый чат")
-                    print("[CLEAR_CHAT] Название сброшено")
-                except Exception as e:
-                    print(f"[CLEAR_CHAT] ✗ Ошибка обновления названия: {e}")
-                
-                try:
-                    # Обновляем список чатов
-                    self.load_chats_list()
-                except Exception as e:
-                    print(f"[CLEAR_CHAT] ✗ Ошибка обновления списка: {e}")
-                
-                try:
-                    # Очищаем визуальное отображение
-                    while self.messages_layout.count() > 1:
-                        item = self.messages_layout.takeAt(0)
-                        if item and item.widget():
-                            item.widget().deleteLater()
-                    self.add_message_widget("Система", "История чата очищена.", add_controls=False)
-                    print("[CLEAR_CHAT] UI очищен")
-                except Exception as e:
-                    print(f"[CLEAR_CHAT] ✗ Ошибка очистки UI: {e}")
-                    
+            # После анимации - очищаем БД
+            total_time = len(widgets) * 50 + 600
+            QtCore.QTimer.singleShot(total_time, self.finalize_clear)
+    
+    def dust_effect(self, widget):
+        """Эффект исчезновения 'в пыль' (как в Telegram)"""
+        # На Windows GraphicsOpacityEffect работает медленно - упрощаем
+        if IS_WINDOWS:
+            # Просто удаляем без анимации
+            widget.deleteLater()
+            return
+        
+        # Анимация прозрачности
+        opacity_effect = QtWidgets.QGraphicsOpacityEffect()
+        widget.setGraphicsEffect(opacity_effect)
+        
+        fade = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
+        fade.setDuration(500)
+        fade.setStartValue(1.0)
+        fade.setEndValue(0.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+        
+        # Анимация схлопывания
+        height_anim = QtCore.QPropertyAnimation(widget, b"maximumHeight")
+        height_anim.setDuration(500)
+        height_anim.setStartValue(widget.height())
+        height_anim.setEndValue(0)
+        height_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+        
+        # Группируем
+        group = QtCore.QParallelAnimationGroup()
+        group.addAnimation(fade)
+        group.addAnimation(height_anim)
+        group.finished.connect(widget.deleteLater)
+        group.start()
+        
+        # Сохраняем ссылку
+        widget._clear_anim = group
+    
+    def finalize_clear(self):
+        """Завершение очистки чата после анимации"""
+        try:
+            print("[FINALIZE] Очищаем БД...")
+            # Очищаем сообщения из БД
+            self.chat_manager.clear_chat_messages(self.current_chat_id)
+            # Сбрасываем название
+            self.chat_manager.update_chat_title(self.current_chat_id, "Новый чат")
+            # Обновляем список чатов
+            self.load_chats_list()
+            
+            # Добавляем системное сообщение с анимацией появления
+            self.add_message_widget("Система", "Чат очищен", add_controls=False)
+            print("[FINALIZE] Готово!")
         except Exception as e:
-            print(f"[CLEAR_CHAT] ✗ Критическая ошибка: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[FINALIZE] Ошибка: {e}")
 
 def main():
     init_db()
