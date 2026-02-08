@@ -40,7 +40,7 @@ No API keys or internet connection are required.
 
 Current State
 
-This is the first public stable release (v1.0).
+This is the v2.0.0
 
 The core functionality is complete:
 	•	Chat works reliably
