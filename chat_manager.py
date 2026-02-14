@@ -185,3 +185,28 @@ class ChatManager:
         
         conn.commit()
         conn.close()
+    
+    def delete_all_chats(self) -> int:
+        """
+        Удалить ВСЕ чаты и их сообщения, создать новый пустой чат.
+        Возвращает ID нового чата.
+        """
+        conn = sqlite3.connect(CHATS_DB)
+        cur = conn.cursor()
+        
+        # Удаляем все сообщения
+        cur.execute("DELETE FROM chat_messages")
+        
+        # Удаляем все чаты
+        cur.execute("DELETE FROM chats")
+        
+        # Создаём новый чат
+        now = datetime.utcnow().isoformat()
+        cur.execute("INSERT INTO chats (title, created_at, updated_at, is_active) VALUES (?, ?, ?, ?)",
+                   ("Новый чат", now, now, 1))
+        new_chat_id = cur.lastrowid
+        
+        conn.commit()
+        conn.close()
+        
+        return new_chat_id
