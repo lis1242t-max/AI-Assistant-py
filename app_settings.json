@@ -1,4 +1,4 @@
 {
-  "theme": "dark",
-  "liquid_glass": true
+  "theme": "light",
+  "liquid_glass": false
 }

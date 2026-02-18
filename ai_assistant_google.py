@@ -160,8 +160,16 @@ INTERNET_REQUIRED_KEYWORDS = {
     "software": ["обновление", "update", "релиз", "release", "версия", "version", "новая версия"],
     # Recipes and cooking
     "recipes": ["рецепт", "recipe", "как приготовить", "how to cook", "как готовить", "готовить", "приготовить", "блюдо", "dish"],
-    # Search explicitly
-    "search": ["найди", "search", "поиск", "найти", "погугли", "google", "посмотри в интернете", "check online"]
+    # Search explicitly — все варианты как пользователь может попросить поискать
+    "search": [
+        "найди", "search", "поиск", "найти", "погугли", "загугли", "google",
+        "посмотри в интернете", "посмотри в инете", "посмотри в сети",
+        "поищи в интернете", "поищи в инете", "поищи в сети",
+        "поищи", "поищи информацию", "ищи", "найди в интернете",
+        "check online", "look up", "загляни в интернет",
+        "что говорит интернет", "что пишут", "что пишет интернет",
+        "найди информацию", "есть ли в интернете", "поищи онлайн"
+    ]
 }
 
 # Keywords that indicate NO internet search needed
@@ -186,6 +194,23 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
     }
     """
     
+    # ПРИОРИТЕТ 0: Команда ОТКЛЮЧИТЬ поиск (выше всего остального)
+    STOP_SEARCH_PHRASES = [
+        "прекрати искать", "перестань искать", "не ищи", "не надо искать",
+        "отключи поиск", "выключи поиск", "без поиска", "не используй интернет",
+        "не лезь в интернет", "не ищи в интернете", "не ищи в инете",
+        "stop searching", "don't search", "no internet", "disable search",
+        "не нужно искать", "не ищи ничего", "ответь без поиска",
+    ]
+    message_lower_pre = user_message.lower().strip()
+    if any(phrase in message_lower_pre for phrase in STOP_SEARCH_PHRASES):
+        return {
+            "requires_search": False,
+            "confidence": 0.0,
+            "reason": "stop_search_command",
+            "forced": False
+        }
+
     # ПРИОРИТЕТ 1: Принудительный поиск
     if forced_search:
         return {
@@ -195,27 +220,36 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
             "forced": True
         }
     
-    # Анализ контекста последних 3-5 сообщений
-    context_keywords = []
-    if chat_history and len(chat_history) > 0:
-        for role, content, _ in chat_history[-5:]:
-            if role == "user":
-                context_keywords.extend(content.lower().split())
+    message_lower = message_lower_pre
     
-    message_lower = user_message.lower().strip()
+    # ПРИОРИТЕТ 2: Явные фразы "посмотри/поищи в интернете/инете/сети"
+    EXPLICIT_SEARCH_PHRASES = [
+        "посмотри в инете", "посмотри в интернете", "посмотри в сети",
+        "поищи в инете", "поищи в интернете", "поищи в сети",
+        "загугли", "погугли", "найди в интернете", "найди в инете",
+        "поищи", "поищи информацию", "найди информацию",
+        "что пишут", "что пишет интернет", "что говорит интернет",
+        "загляни в интернет", "check online", "look it up",
+        "есть ли в интернете", "поищи онлайн", "найди онлайн",
+        "скажи что пишут", "посмотри что пишут",
+    ]
+    if any(phrase in message_lower for phrase in EXPLICIT_SEARCH_PHRASES):
+        return {
+            "requires_search": True,
+            "confidence": 1.0,
+            "reason": "explicit_search_request",
+            "forced": False
+        }
     
-    # Счётчики совпадений
+    # Счётчики совпадений (только по текущему сообщению, без истории)
     internet_score = 0
     no_internet_score = 0
     
-    # Проверяем ключевые слова для интернет-запросов
+    # Проверяем ключевые слова для интернет-запросов (только текущее сообщение)
     for category, keywords in INTERNET_REQUIRED_KEYWORDS.items():
         for keyword in keywords:
             if keyword in message_lower:
                 internet_score += 1
-            # Проверка в контексте
-            elif any(keyword in word for word in context_keywords):
-                internet_score += 0.5
     
     # Проверяем ключевые слова против интернета
     for category, keywords in NO_INTERNET_KEYWORDS.items():
@@ -239,10 +273,10 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
     if any(char in message_lower for char in ["=", "+", "-", "*", "/", "^"]):
         no_internet_score += 2
     
-    # Решение
+    # Решение: порог >= 2 чтобы избежать ложных срабатываний
     total_score = internet_score - no_internet_score
     
-    if total_score > 0:
+    if total_score >= 2:
         confidence = min(1.0, total_score / 5.0)
         return {
             "requires_search": True,
@@ -262,32 +296,60 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
 # Icon creation
 # -------------------------
 def create_app_icon():
-    """Создаёт иконку приложения"""
-    from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QPen
-    from PyQt6.QtCore import Qt, QRect
+    """Создаёт стеклянную иконку приложения"""
+    from PyQt6.QtGui import (QPixmap, QPainter, QColor, QRadialGradient,
+                              QLinearGradient, QPen, QBrush)
+    from PyQt6.QtCore import Qt, QRectF, QPointF
 
     size = 256
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
-
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    cx, cy, r = size/2, size/2, size/2 - 10
 
-    gradient = QtGui.QRadialGradient(size/2, size/2, size/2)
-    gradient.setColorAt(0, QColor("#667eea"))
-    gradient.setColorAt(1, QColor("#764ba2"))
+    base = QRadialGradient(cx, cy*1.2, r*1.1)
+    base.setColorAt(0.0, QColor(70,45,200,230)); base.setColorAt(0.5, QColor(40,20,140,210)); base.setColorAt(1.0, QColor(15,8,70,190))
+    painter.setBrush(QBrush(base)); painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
 
-    painter.setBrush(gradient)
+    col = QLinearGradient(cx-r, cy-r, cx+r*0.7, cy+r)
+    col.setColorAt(0.0, QColor(140,100,255,170)); col.setColorAt(0.4, QColor(80,170,255,130))
+    col.setColorAt(0.75, QColor(180,70,250,110)); col.setColorAt(1.0, QColor(50,30,180,60))
+    painter.setBrush(QBrush(col)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+
+    hi = QRadialGradient(cx-r*0.22, cy-r*0.35, r*0.62)
+    hi.setColorAt(0.0, QColor(255,255,255,155)); hi.setColorAt(0.45, QColor(255,255,255,45)); hi.setColorAt(1.0, QColor(255,255,255,0))
+    painter.setBrush(QBrush(hi)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+
+    lo = QRadialGradient(cx+r*0.25, cy+r*0.52, r*0.38)
+    lo.setColorAt(0.0, QColor(200,160,255,65)); lo.setColorAt(1.0, QColor(200,160,255,0))
+    painter.setBrush(QBrush(lo)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+
+    brdr = QLinearGradient(cx-r, cy-r, cx+r, cy+r)
+    brdr.setColorAt(0.0, QColor(255,255,255,130)); brdr.setColorAt(0.5, QColor(210,190,255,55)); brdr.setColorAt(1.0, QColor(120,100,220,35))
+    painter.setBrush(Qt.BrushStyle.NoBrush); painter.setPen(QPen(QBrush(brdr), 2.2))
+    painter.drawEllipse(QRectF(cx-r+1, cy-r+1, r*2-2, r*2-2))
+
+    # Нейронная иконка
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(10, 10, size-20, size-20)
-
-    painter.setPen(QPen(QColor("white"), 3))
-    font = QFont("Inter", 80, QFont.Weight.Bold)
-    painter.setFont(font)
-    painter.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "🤖")
-
+    nodes = [(cx, cy), (cx, cy-54), (cx-47, cy+31), (cx+47, cy+31)]
+    pen = QPen(QColor(255,255,255,110), 3.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    for nx, ny in nodes[1:]: painter.drawLine(QPointF(cx, cy), QPointF(nx, ny))
+    painter.setPen(Qt.PenStyle.NoPen)
+    cg = QRadialGradient(cx-4, cy-4, 16); cg.setColorAt(0, QColor(255,255,255,255)); cg.setColorAt(1, QColor(220,200,255,200))
+    painter.setBrush(QBrush(cg)); painter.drawEllipse(QRectF(cx-14, cy-14, 28, 28))
+    for nx, ny in nodes[1:]:
+        og = QRadialGradient(nx-3, ny-3, 11); og.setColorAt(0, QColor(255,255,255,240)); og.setColorAt(1, QColor(200,180,255,180))
+        painter.setBrush(QBrush(og)); painter.drawEllipse(QRectF(nx-10, ny-10, 20, 20))
+    painter.setBrush(QColor(255,255,255,150))
+    for nx, ny in nodes[1:]:
+        mx, my = (cx+nx)/2, (cy+ny)/2; painter.drawEllipse(QRectF(mx-5.5, my-5.5, 11, 11))
     painter.end()
     return pixmap
+
 
 def create_menu_icon(theme="light"):
     """Создаёт аккуратную иконку меню (три ровные горизонтальные линии)"""
@@ -498,6 +560,20 @@ SYSTEM_PROMPTS = {
 "Могу прочитать PDF, Word, Excel — даже несколько сразу. 'Сравни эти два договора' — без проблем. 
 Скинь фото задачи или прикрепи файл с примером — решу и объясню пошагово."
 
+📸 КОГДА ПОЛЬЗОВАТЕЛЬ ПРИСЫЛАЕТ ФАЙЛ/ФОТО:
+ВСЕГДА анализируй содержимое и давай осмысленный ответ!
+
+Примеры:
+• "как тебе фотка?" → Опиши ЧТО на фото, дай оценку
+• "вот дом" → "Красивый дом! Современная архитектура, большие окна. Где находится?"
+• просто прикрепил фото → "Вижу [описание]. Это [твоя оценка/комментарий]"
+• прикрепил документ → "Вижу документ о [тема]. Что именно тебя интересует?"
+
+❌ ПЛОХО: "Фотография отображает офисное здание..."
+✅ ХОРОШО: "Классный дом! Симметричный фасад, видно что архитектор постарался. Твой?"
+
+Отвечай ЕСТЕСТВЕННО, как будто обсуждаешь файл с другом. Не пиши сухие описания!
+
 
 
 ════════════════════════════════════════════════════════════════════
@@ -656,6 +732,13 @@ S = V×t = 5×10 = 50м
 ✅ Варьируй свои ответы, будь естественным
 ✅ Адаптируйся к стилю диалога и контексту
 ✅ Если пользователь не просит что-то конкретное - не задавай вопросов постоянно
+
+🚫 НИКОГДА НЕ ДЕЛАЙ ЭТОГО:
+❌ НЕ указывай пользователю что он повторяет слова или фразы
+❌ НЕ говори "ты уже спрашивал об этом", "это повтор", "ты повторяешься"
+❌ НЕ делай акцент на том что пользователь что-то повторил
+❌ НЕ упоминай прошлые темы если пользователь переключился на новую
+✅ Просто отвечай на текущий вопрос, даже если похожий был раньше
 
 🗣️ ОБРАБОТКА КОРОТКИХ МЕЖДОМЕТИЙ И СОКРАЩЕНИЙ:
 Когда пользователь пишет короткие неформальные сообщения - отвечай естественно и кратко:
@@ -895,6 +978,13 @@ S = V×t = 5×10 = 50м
 ✅ Варьируй свои ответы, будь естественным
 ✅ Адаптируйся к стилю диалога и контексту
 ✅ Если пользователь не просит что-то конкретное - не задавай вопросов постоянно
+
+🚫 НИКОГДА НЕ ДЕЛАЙ ЭТОГО:
+❌ НЕ указывай пользователю что он повторяет слова или фразы
+❌ НЕ говори "ты уже спрашивал об этом", "это повтор", "ты повторяешься"
+❌ НЕ делай акцент на том что пользователь что-то повторил
+❌ НЕ упоминай прошлые темы если пользователь переключился на новую
+✅ Просто отвечай на текущий вопрос, даже если похожий был раньше
 
 🗣️ ОБРАБОТКА КОРОТКИХ МЕЖДОМЕТИЙ И СОКРАЩЕНИЙ:
 Когда пользователь пишет короткие неформальные сообщения - отвечай естественно и кратко:
@@ -1441,11 +1531,16 @@ def selective_forget_memory(chat_id, target: str, context_mgr, chat_manager) -> 
         
         # Удаляем из истории сообщений
         messages_to_keep = []
-        for role, content, timestamp in chat_messages:
+        for msg_data in chat_messages:
+            role = msg_data[0]
+            content = msg_data[1]
+            files = msg_data[2] if len(msg_data) > 2 else None
+            timestamp = msg_data[3] if len(msg_data) > 3 else msg_data[2]
+            
             content_lower = content.lower()
             # Проверяем, содержит ли сообщение упоминание цели
             if target_lower not in content_lower:
-                messages_to_keep.append((role, content, timestamp))
+                messages_to_keep.append(msg_data)
             else:
                 print(f"[SELECTIVE_FORGET] Найдено в сообщениях: {content[:50]}...")
                 deleted_message_count += 1
@@ -1455,8 +1550,11 @@ def selective_forget_memory(chat_id, target: str, context_mgr, chat_manager) -> 
             # Очищаем все сообщения
             chat_manager.clear_chat_messages(chat_id)
             # Восстанавливаем только те, что не содержали target
-            for role, content, _ in messages_to_keep:
-                chat_manager.save_message(chat_id, role, content)
+            for msg_data in messages_to_keep:
+                role = msg_data[0]
+                content = msg_data[1]
+                files = msg_data[2] if len(msg_data) > 2 else None
+                chat_manager.save_message(chat_id, role, content, files)
             print(f"[SELECTIVE_FORGET] ✓ Удалено {deleted_message_count} сообщений")
         
         # Для контекстной памяти - придётся очистить всю, если нашли совпадения
@@ -2797,7 +2895,8 @@ def build_contextual_search_query(user_message: str, chat_manager, chat_id: int,
         context_parts = []
         
         for i in range(len(history) - 1, -1, -1):
-            role, content, _ = history[i]
+            row = history[i]
+            role, content = row[0], row[1]
             
             # Берём последний вопрос пользователя (не текущий)
             if role == "user" and content != user_message:
@@ -3255,8 +3354,11 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
             saved_memories = context_mgr.get_context_memory(chat_id, limit=20)
             
             if saved_memories:
+                # Разделяем по типам
                 user_memories = [content for ctx_type, content, _ in saved_memories if ctx_type == "user_memory"]
+                file_analyses = [content for ctx_type, content, _ in saved_memories if ctx_type == "file_analysis"]
                 
+                # Пользовательская память
                 if user_memories:
                     if detected_language == "russian":
                         memory_context = "\n\n📌 ВАЖНАЯ ИНФОРМАЦИЯ (пользователь просил запомнить):\n"
@@ -3268,6 +3370,20 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
                         for idx, mem in enumerate(user_memories, 1):
                             memory_context += f"{idx}. {mem}\n"
                         print(f"[MEMORY] ✓ Loaded {len(user_memories)} memory records")
+                
+                # КРИТИЧНО: Добавляем контекст файлов из памяти
+                # НО только если в ТЕКУЩЕМ запросе нет своих файлов
+                if file_analyses and not (file_paths and len(file_paths) > 0):
+                    # Берём последний анализ файлов (самый свежий)
+                    latest_file_context = file_analyses[-1]
+                    if detected_language == "russian":
+                        memory_context += f"\n\n📎 КОНТЕКСТ ИЗ ПРИКРЕПЛЁННЫХ ФАЙЛОВ:\n{latest_file_context}\n"
+                        memory_context += "\n(Используй этот контекст только если пользователь спрашивает о файлах. Не упоминай файлы если вопрос не связан с ними.)\n"
+                        print(f"[MEMORY] ✓ Загружен контекст файлов ({len(latest_file_context)} символов)")
+                    else:
+                        memory_context += f"\n\n📎 CONTEXT FROM ATTACHED FILES:\n{latest_file_context}\n"
+                        memory_context += "\n(Use this context only if the user asks about files. Don't mention files if the question is unrelated.)\n"
+                        print(f"[MEMORY] ✓ Loaded file context ({len(latest_file_context)} chars)")
         except Exception as e:
             print(f"[MEMORY] ✗ Ошибка загрузки памяти: {e}")
     
@@ -3306,11 +3422,11 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
         system_prompt = base_system + memory_context + math_prompt + role_instruction
 
     final_user_message = user_message
+    all_files_context = []  # Инициализируем заранее — используется позже вне блока if file_paths
     
     # Обрабатываем прикреплённые файлы
     if file_paths and len(file_paths) > 0:
         print(f"[GET_AI_RESPONSE] Обработка файлов: {len(file_paths)}")
-        all_files_context = []
         
         for file_path in file_paths:
             # УЛУЧШЕНИЕ: Нормализуем путь к файлу
@@ -3549,7 +3665,15 @@ For images use formats: .png, .jpg, .jpeg, .gif"""
 ИНСТРУКЦИЯ:
 {file_instruction}
 
-Вопрос пользователя: {user_message}"""
+Вопрос/сообщение пользователя: {user_message}
+
+ВАЖНО: 
+- Если пользователь просто прислал файл без вопроса (например "как тебе фотка?" или просто название файла), ОБЯЗАТЕЛЬНО:
+  1. Опиши ЧТО изображено/написано в файле
+  2. Дай свою оценку/комментарий
+  3. Задай уточняющий вопрос если нужно
+- Если есть конкретный вопрос - отвечай на него используя информацию из файла
+- Отвечай естественно, как будто видишь файл и обсуждаешь его с другом"""
             else:
                 final_user_message = f"""[User attached {len(file_paths)} file(s)]
 
@@ -3558,9 +3682,38 @@ For images use formats: .png, .jpg, .jpeg, .gif"""
 INSTRUCTION:
 {file_instruction}
 
-User's question: {user_message}"""
+User's question/message: {user_message}
+
+IMPORTANT:
+- If user just sent a file without specific question (e.g. "how's the photo?" or just filename), YOU MUST:
+  1. Describe WHAT is shown/written in the file
+  2. Give your assessment/comment
+  3. Ask clarifying question if needed
+- If there's a specific question - answer it using file information
+- Respond naturally, as if you're seeing the file and discussing it with a friend"""
             
             print(f"[GET_AI_RESPONSE] Все файлы добавлены в контекст")
+            
+            # ═══════════════════════════════════════════════════════════
+            # СОХРАНЕНИЕ КОНТЕКСТА ФАЙЛОВ В ПАМЯТЬ
+            # ═══════════════════════════════════════════════════════════
+            # КРИТИЧНО: Сохраняем результаты анализа файлов в историю
+            # чтобы AI помнил содержимое файлов в следующих сообщениях
+            if chat_id and all_files_context:
+                try:
+                    context_mgr = ContextMemoryManager()
+                    files_summary = "\n\n".join(all_files_context)
+                    
+                    # Сохраняем компактную версию для истории
+                    # Ограничиваем длину чтобы не засорять память
+                    max_length = 2000  # Максимум 2000 символов
+                    if len(files_summary) > max_length:
+                        files_summary = files_summary[:max_length] + "...[содержимое обрезано]"
+                    
+                    context_mgr.save_context_memory(chat_id, "file_analysis", files_summary)
+                    print(f"[GET_AI_RESPONSE] ✓ Контекст файлов сохранён в память ({len(files_summary)} символов)")
+                except Exception as e:
+                    print(f"[GET_AI_RESPONSE] ⚠️ Ошибка сохранения контекста файлов: {e}")
     
     print(f"[GET_AI_RESPONSE] Контекстная память добавлена в системный промпт")
 
@@ -3683,7 +3836,29 @@ Question: {user_message}
 
 Analyze the results and provide answer based on the information found. Write in your own words, briefly and clearly."""
         print(f"[GET_AI_RESPONSE] Контекст поиска добавлен. Длина: {len(search_context)} символов")
-        final_user_message = search_context
+        
+        # ИСПРАВЛЕНИЕ: Если есть файлы, добавляем их контекст К поисковым результатам
+        if all_files_context:
+            files_summary = "\n\n".join(all_files_context)
+            if detected_language == "russian":
+                final_user_message = f"""{search_context}
+
+[ДОПОЛНИТЕЛЬНО: Пользователь прикрепил {len(file_paths)} файл(ов)]
+
+{files_summary}
+
+Учитывай информацию из ОБЕИХ источников: результаты поиска И прикреплённые файлы."""
+            else:
+                final_user_message = f"""{search_context}
+
+[ADDITIONALLY: User attached {len(file_paths)} file(s)]
+
+{files_summary}
+
+Consider information from BOTH sources: search results AND attached files."""
+            print(f"[GET_AI_RESPONSE] ✓ Контекст файлов СОХРАНЁН при поиске")
+        else:
+            final_user_message = search_context
     else:
         print(f"[GET_AI_RESPONSE] Поиск НЕ активирован")
 
@@ -3706,7 +3881,13 @@ Analyze the results and provide answer based on the information found. Write in 
             print(f"[GET_AI_RESPONSE] Загружено сообщений из истории: {len(history)}")
         
         messages = [{"role": "system", "content": system_prompt}]
-        for role, content, _ in history:
+        for msg_data in history:
+            # Распаковываем с учётом что теперь 4 значения
+            if len(msg_data) == 4:
+                role, content, files, created = msg_data
+            else:
+                role, content, created = msg_data
+            
             # Пропускаем системные сообщения
             if role not in ["user", "assistant"]:
                 continue
@@ -3817,11 +3998,13 @@ Analyze the results and provide answer based on the information found. Write in 
             except Exception as e:
                 print(f"[GET_AI_RESPONSE] ✗ Ошибка перевода: {e}")
     
-    # ФИЛЬТРАЦИЯ ОТКЛЮЧЕНА: системный промпт достаточно строгий
-    # Агрессивная фильтрация может ломать нормальный текст
-    # if detected_language == "russian":
-    #     print(f"[GET_AI_RESPONSE] Фильтрация английских слов...")
-    #     response_text = remove_english_words_from_russian(response_text)
+    # ═══════════════════════════════════════════════════════════════
+    # ФИЛЬТРАЦИЯ АНГЛИЙСКИХ СЛОВ - ВКЛЮЧЕНА
+    # ═══════════════════════════════════════════════════════════════
+    # Используем расширенный словарь из forbidden_english_words.py
+    if detected_language == "russian":
+        print(f"[GET_AI_RESPONSE] Фильтрация английских слов...")
+        response_text = remove_english_words_from_russian(response_text)
     
     # ИСПРАВЛЕНО: НЕ сохраняем полный контекст поиска, чтобы избежать дублирования
     # Сохраняем только метаданные о том, что поиск был выполнен
@@ -4272,7 +4455,7 @@ class MessageWidget(QtWidgets.QWidget):
         message_container.setStyleSheet(f"""
             #messageContainer {{
                 background-color: {self.bubble_bg};
-                border: 1px solid {self.bubble_border};
+                border: 1.5px solid {self.bubble_border};
                 border-radius: 24px;
                 padding: 20px 26px;
             }}
@@ -4428,13 +4611,14 @@ class MessageWidget(QtWidgets.QWidget):
         else:
             controls_layout.setContentsMargins(0, 0, 0, 6)
 
-        # Кнопка копирования
+        # Кнопка копирования - ВСЕГДА видна для ИИ и пользователя
         copy_btn = QtWidgets.QPushButton()
         copy_btn.setText("📋")
         copy_btn.setToolTip("Копировать")
         copy_btn.setFixedSize(btn_size, btn_size)
         copy_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         copy_btn.clicked.connect(self.copy_text)
+        # ✅ ИСПРАВЛЕНИЕ: Кнопка копирования видна всегда (игнорируем short)
         copy_btn.setVisible(add_controls)
         copy_btn.setObjectName("floatingControl")
         copy_btn.setStyleSheet(f"""
@@ -4464,6 +4648,7 @@ class MessageWidget(QtWidgets.QWidget):
             edit_btn.setFixedSize(btn_size, btn_size)
             edit_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             edit_btn.clicked.connect(self.edit_message)
+            # ✅ Кнопка редактирования создаётся, но видимостью управляет add_message_widget
             edit_btn.setVisible(add_controls)
             edit_btn.setObjectName("floatingControl")
             edit_btn.setStyleSheet(f"""
@@ -4484,9 +4669,13 @@ class MessageWidget(QtWidgets.QWidget):
                 }}
             """)
             controls_layout.addWidget(edit_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+            # Сохраняем ссылку на кнопку редактирования
+            self.edit_button = edit_btn
+        else:
+            self.edit_button = None
 
         
-        # Кнопка перегенерации (только для ассистента)
+        # Кнопка перегенерации (только для ассистента) - ВСЕГДА видна
         if speaker != "Вы" and speaker != "Система" and add_controls:
             regenerate_btn = QtWidgets.QPushButton()
             regenerate_btn.setText("🔄")
@@ -4494,6 +4683,7 @@ class MessageWidget(QtWidgets.QWidget):
             regenerate_btn.setFixedSize(btn_size, btn_size)
             regenerate_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             regenerate_btn.clicked.connect(self.regenerate_response)
+            # ✅ ИСПРАВЛЕНИЕ: Кнопка перегенерации видна всегда (игнорируем short)
             regenerate_btn.setVisible(add_controls)
             regenerate_btn.setObjectName("floatingControl")
             regenerate_btn.setStyleSheet(f"""
@@ -4543,12 +4733,12 @@ class MessageWidget(QtWidgets.QWidget):
         if not IS_WINDOWS:
             # Создаём fade-in анимацию с идеальными параметрами
             self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
-            self.fade_in_animation.setDuration(800)  # 800ms - очень плавная и приятная анимация
+            self.fade_in_animation.setDuration(450)  # 450ms - быстрая и плавная анимация
             self.fade_in_animation.setStartValue(0.0)
             self.fade_in_animation.setEndValue(1.0)
-            # OutExpo - создаёт очень плавное замедление в конце
-            # Сообщение появляется быстро в начале, затем плавно "дотягивается" до полной видимости
-            self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutExpo)
+            # OutCubic - создаёт мягкое замедление в конце для естественного появления
+            # Сообщение появляется быстро и элегантно
+            self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
             
             # ✅ НЕ запускаем анимацию автоматически - она будет запущена из add_message_widget
             # после полного обновления layout
@@ -4562,8 +4752,8 @@ class MessageWidget(QtWidgets.QWidget):
         Запускает идеальную fade-in анимацию появления.
         
         Простая, надёжная, красивая анимация с оптимальными параметрами:
-        - 800ms длительность для очень плавного появления
-        - OutExpo кривая для естественного замедления
+        - 450ms длительность для быстрого и плавного появления
+        - OutCubic кривая для естественного замедления
         
         После завершения анимации graphicsEffect удаляется чтобы
         избежать искажения цветов.
@@ -4642,6 +4832,7 @@ class MessageWidget(QtWidgets.QWidget):
                 icon_color = "#a0a0b0"
                 hover_border_color = "rgba(102, 126, 234, 0.40)"
                 pressed_border_color = "rgba(102, 126, 234, 0.55)"
+                box_shadow = "none"  # Стекло без тени
             else:
                 # ТЁМНЫЙ МАТОВЫЙ (с чуть темнее border для depth)
                 bubble_bg = "rgb(43, 43, 48)"
@@ -4653,6 +4844,7 @@ class MessageWidget(QtWidgets.QWidget):
                 icon_color = "#a0a0b0"
                 hover_border_color = btn_border
                 pressed_border_color = btn_border
+                box_shadow = "0 2px 8px rgba(0, 0, 0, 0.3)"  # Матовый с тенью
         else:
             if liquid_glass:
                 # СВЕТЛОЕ СТЕКЛО
@@ -4665,6 +4857,7 @@ class MessageWidget(QtWidgets.QWidget):
                 icon_color = "#5a6aaa"
                 hover_border_color = "rgba(102, 126, 234, 0.40)"
                 pressed_border_color = "rgba(102, 126, 234, 0.55)"
+                box_shadow = "none"  # Стекло без тени
             else:
                 # СВЕТЛЫЙ МАТОВЫЙ (с чуть темнее border для depth)
                 bubble_bg = "rgb(242, 242, 245)"
@@ -4676,10 +4869,12 @@ class MessageWidget(QtWidgets.QWidget):
                 icon_color = "#5a6aaa"
                 hover_border_color = btn_border
                 pressed_border_color = btn_border
+                box_shadow = "0 2px 8px rgba(0, 0, 0, 0.15)"  # Матовый с тенью
         
         # Сохраняем новые стили
         self.bubble_bg = bubble_bg
         self.bubble_border = bubble_border
+        self.box_shadow = box_shadow  # ✅ ИСПРАВЛЕНИЕ: Добавлено сохранение box_shadow
         self.btn_bg = btn_bg
         self.btn_bg_hover = btn_bg_hover
         self.btn_border = btn_border
@@ -4690,10 +4885,11 @@ class MessageWidget(QtWidgets.QWidget):
         
         # Применяем стили к message_container
         if hasattr(self, 'message_container') and self.message_container:
+            # ✅ ИСПРАВЛЕНИЕ: Используем тот же стиль что и в __init__
             self.message_container.setStyleSheet(f"""
                 #messageContainer {{
                     background-color: {bubble_bg};
-                    border: 1px solid {bubble_border};
+                    border: 1.5px solid {bubble_border};
                     border-radius: 24px;
                     padding: 20px 26px;
                 }}
@@ -4985,6 +5181,28 @@ class AIWorker(QtCore.QRunnable):
 # -------------------------
 
 # ═══════════════════════════════════════════════════════════════════════════
+# БАЗОВЫЙ КЛАСС: NoFocusButton
+# Кнопка без focus ring — переопределяет paintEvent чтобы убрать системный
+# focus rect, который не убирается через QSS на всех платформах
+# ═══════════════════════════════════════════════════════════════════════════
+
+class NoFocusButton(QtWidgets.QPushButton):
+    """QPushButton без системного focus ring на всех платформах."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+    
+    def paintEvent(self, event):
+        opt = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(opt)
+        # Убираем флаг фокуса — Qt не нарисует focus rect
+        opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
+        painter = QtGui.QPainter(self)
+        self.style().drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, opt, painter, self)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # НОВЫЙ КОМПОНЕНТ 1: SCROLL TO BOTTOM BUTTON
 # Floating overlay кнопка "⬇ вниз" - НЕ участвует в layout
 # ═══════════════════════════════════════════════════════════════════════════
@@ -5213,23 +5431,21 @@ class SettingsView(QtWidgets.QWidget):
         """Инициализация UI"""
         
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(50, 50, 50, 50)
-        main_layout.setSpacing(35)
+        main_layout.setContentsMargins(40, 30, 40, 30)
+        main_layout.setSpacing(20)
         
         # Заголовок
         title = QtWidgets.QLabel("⚙️ Настройки")
         title.setObjectName("settingsTitle")
-        title.setFont(QtGui.QFont("Inter", 32, QtGui.QFont.Weight.Bold))
+        title.setFont(QtGui.QFont("Inter", 28, QtGui.QFont.Weight.Bold))
         title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
-        
-        main_layout.addSpacing(25)
         
         # Контейнер настроек
         settings_container = QtWidgets.QWidget()
         settings_container.setObjectName("settingsContainer")
         settings_layout = QtWidgets.QVBoxLayout(settings_container)
-        settings_layout.setSpacing(30)
+        settings_layout.setSpacing(16)
         
         # ═══════════════════════════════════════════════
         # НАСТРОЙКА 1: Тема
@@ -5260,9 +5476,27 @@ class SettingsView(QtWidgets.QWidget):
         settings_layout.addWidget(theme_group)
         
         # ═══════════════════════════════════════════════
-        # НАСТРОЙКА 2: Liquid Glass - УДАЛЕНО
-        # Liquid Glass теперь фиксированный, не редактируется
+        # НАСТРОЙКА 2: Liquid Glass
         # ═══════════════════════════════════════════════
+        glass_group = self.create_setting_group(
+            "Liquid Glass",
+            "Стеклянный эффект для элементов интерфейса"
+        )
+        glass_layout = QtWidgets.QHBoxLayout()
+        glass_layout.setSpacing(15)
+        self.glass_on_btn = QtWidgets.QPushButton("🪟 Включено")
+        self.glass_on_btn.setObjectName("glassOnBtn")
+        self.glass_on_btn.setCheckable(True)
+        self.glass_on_btn.setChecked(True)
+        self.glass_on_btn.clicked.connect(lambda: self.set_liquid_glass(True))
+        self.glass_off_btn = QtWidgets.QPushButton("🔲 Выключено")
+        self.glass_off_btn.setObjectName("glassOffBtn")
+        self.glass_off_btn.setCheckable(True)
+        self.glass_off_btn.clicked.connect(lambda: self.set_liquid_glass(False))
+        glass_layout.addWidget(self.glass_on_btn)
+        glass_layout.addWidget(self.glass_off_btn)
+        glass_group.layout().addLayout(glass_layout)
+        settings_layout.addWidget(glass_group)
         
         # ═══════════════════════════════════════════════
         # ОПАСНАЯ ЗОНА: Удаление всех чатов
@@ -5357,12 +5591,11 @@ class SettingsView(QtWidgets.QWidget):
         print(f"[SETTINGS] Выбрана тема: {theme} (pending, не применено)")
     
     def set_liquid_glass(self, enabled: bool):
-        """
-        Liquid Glass теперь фиксированный - метод сохранен для совместимости.
-        НЕ ИСПОЛЬЗУЕТСЯ.
-        """
-        # Заглушка - liquid_glass всегда True
-        pass
+        """Установить liquid glass (pending state)."""
+        self.pending_settings["liquid_glass"] = enabled
+        self.glass_on_btn.setChecked(enabled)
+        self.glass_off_btn.setChecked(not enabled)
+        print(f"[SETTINGS] Liquid Glass: {'вкл' if enabled else 'выкл'} (pending)")
     
     def load_settings(self):
         """Загрузить сохранённые настройки"""
@@ -5376,15 +5609,13 @@ class SettingsView(QtWidgets.QWidget):
         except Exception as e:
             print(f"[SETTINGS] Ошибка загрузки: {e}")
         
-        # LIQUID GLASS ФИКСИРОВАН - ВСЕГДА TRUE
-        self.current_settings["liquid_glass"] = True
-        self.pending_settings["liquid_glass"] = True
-        
         # Устанавливаем визуальное состояние кнопок согласно current settings
         theme = self.current_settings.get("theme", "light")
-        
+        liquid_glass = self.current_settings.get("liquid_glass", True)
         self.theme_light_btn.setChecked(theme == "light")
         self.theme_dark_btn.setChecked(theme == "dark")
+        self.glass_on_btn.setChecked(liquid_glass)
+        self.glass_off_btn.setChecked(not liquid_glass)
         
         # Применяем стили к самому окну настроек
         self.apply_settings_styles()
@@ -5491,7 +5722,7 @@ class SettingsView(QtWidgets.QWidget):
                     "text": "#f0f0f0",
                     "desc": "#c0c0c0",
                     "btn_bg": "rgb(48, 48, 52)",
-                    "btn_border": "rgba(68, 68, 72, 0.95)",
+                    "btn_border": "rgb(68, 68, 72)",
                     "btn_text": "#c0c0c0",
                     "btn_checked_bg_start": "rgba(139, 92, 246, 1.0)",
                     "btn_checked_bg_end": "rgba(124, 58, 237, 1.0)",
@@ -5526,7 +5757,7 @@ class SettingsView(QtWidgets.QWidget):
                     "text": "#222222",
                     "desc": "#5a5a5a",
                     "btn_bg": "rgba(255, 255, 255, 0.65)",
-                    "btn_border": "rgba(203, 213, 225, 0.55)",
+                    "btn_border": "rgb(200, 210, 222)",
                     "btn_text": "#3a3a3a",
                     "btn_checked_bg_start": "rgba(102, 126, 234, 0.80)",
                     "btn_checked_bg_end": "rgba(118, 75, 162, 0.80)",
@@ -5559,7 +5790,7 @@ class SettingsView(QtWidgets.QWidget):
                     "text": "#1a1a1a",
                     "desc": "#4a4a4a",
                     "btn_bg": "rgb(242, 242, 245)",
-                    "btn_border": "rgba(210, 210, 215, 0.95)",
+                    "btn_border": "rgb(210, 210, 215)",
                     "btn_text": "#2a2a2a",
                     "btn_checked_bg_start": "rgba(102, 126, 234, 1.0)",
                     "btn_checked_bg_end": "rgba(118, 75, 162, 1.0)",
@@ -5718,15 +5949,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.attached_files = []
         
         # ═══════════════════════════════════════════════════════════════
-        # СИСТЕМА ХРАНЕНИЯ ФАЙЛОВ ПО ЧАТАМ
+        # СИСТЕМА ХРАНЕНИЯ ФАЙЛОВ ОТКЛЮЧЕНА
         # ═══════════════════════════════════════════════════════════════
-        # Директория для хранения файлов чатов
-        self.chat_files_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_files")
-        if not os.path.exists(self.chat_files_dir):
-            os.makedirs(self.chat_files_dir)
-            print(f"[CHAT_FILES] ✓ Создана директория: {self.chat_files_dir}")
-        else:
-            print(f"[CHAT_FILES] ✓ Директория существует: {self.chat_files_dir}")
+        # Файлы больше не копируются и не сохраняются
+        # Используются только исходные пути для анализа AI
+        print(f"[CHAT_FILES] ℹ️ Система хранения файлов отключена")
         
         
         # ═══════════════════════════════════════════════════════════════
@@ -5786,9 +6013,10 @@ class MainWindow(QtWidgets.QMainWindow):
         sidebar_layout.setSpacing(0)
 
         # Кнопка "Новый чат"
-        new_chat_btn = QtWidgets.QPushButton("+ Новый чат")
+        new_chat_btn = NoFocusButton("+ Новый чат")
         new_chat_btn.setObjectName("newChatBtn")
         new_chat_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        new_chat_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         new_chat_btn.clicked.connect(self.create_new_chat)
         sidebar_layout.addWidget(new_chat_btn)
 
@@ -5798,14 +6026,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chats_list.itemClicked.connect(self.switch_chat)
         self.chats_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.chats_list.customContextMenuRequested.connect(self.show_delete_panel)
+        # Предотвращаем выход hover-фона за границы виджета
+        self.chats_list.setViewportMargins(6, 8, 6, 8)  # отступы со всех сторон — hover не вылезает
+        self.chats_list.viewport().setAutoFillBackground(False)
+        self.chats_list.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)  # убираем рамку QFrame
         sidebar_layout.addWidget(self.chats_list)
 
         # ═══════════════════════════════════════════════
         # НОВОЕ: Кнопка настроек (закреплена снизу sidebar)
         # ═══════════════════════════════════════════════
-        self.settings_btn = QtWidgets.QPushButton("⚙️ Настройки")
+        self.settings_btn = NoFocusButton("⚙️ Настройки")
         self.settings_btn.setObjectName("settingsBtn")
         self.settings_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.settings_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.settings_btn.clicked.connect(self.open_settings)
         sidebar_layout.addWidget(self.settings_btn)
 
@@ -5852,7 +6085,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout.setSpacing(15)
 
         # Кнопка меню (иконка трёх полосок)
-        self.menu_btn = QtWidgets.QPushButton()
+        self.menu_btn = NoFocusButton()
         self.menu_btn.setObjectName("menuBtn")
         self.menu_btn.setFixedSize(50, 50)
         self.menu_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -6053,12 +6286,13 @@ class MainWindow(QtWidgets.QMainWindow):
         input_layout.setSpacing(15)
 
         # Кнопка добавления файла
-        self.attach_btn = QtWidgets.QPushButton("+")
+        self.attach_btn = NoFocusButton("+")
         self.attach_btn.setObjectName("attachBtn")
         font_attach = QtGui.QFont("Inter", 26, QtGui.QFont.Weight.Bold)
         self.attach_btn.setFont(font_attach)
         self.attach_btn.setFixedSize(60, 60)
         self.attach_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.attach_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.attach_btn.clicked.connect(self.show_attach_menu)
         input_layout.addWidget(self.attach_btn)
 
@@ -6072,21 +6306,23 @@ class MainWindow(QtWidgets.QMainWindow):
         input_layout.addWidget(self.input_field, stretch=1)
         
         # Кнопка выбора режима AI (новая)
-        self.mode_btn = QtWidgets.QPushButton(self.ai_mode)
+        self.mode_btn = NoFocusButton(self.ai_mode)
         self.mode_btn.setObjectName("modeBtn")
         font_mode = QtGui.QFont("Inter", 12, QtGui.QFont.Weight.Medium)
         self.mode_btn.setFont(font_mode)
         self.mode_btn.setFixedSize(95, 60)
         self.mode_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.mode_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.mode_btn.clicked.connect(self.show_mode_menu)
         input_layout.addWidget(self.mode_btn)
 
-        self.send_btn = QtWidgets.QPushButton("→")
+        self.send_btn = NoFocusButton("→")
         self.send_btn.setObjectName("sendBtn")
         font_btn = QtGui.QFont("Inter", 22, QtGui.QFont.Weight.Bold)
         self.send_btn.setFont(font_btn)
         self.send_btn.setFixedSize(60, 60)
         self.send_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.send_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.send_btn.clicked.connect(self.send_message)
         input_layout.addWidget(self.send_btn)
 
@@ -6172,9 +6408,25 @@ class MainWindow(QtWidgets.QMainWindow):
         
         if not self._first_show_done:
             self._first_show_done = True
+            # Плавное появление всего окна при запуске
+            self._start_window_fade_in()
             # Откладываем финализацию на следующий цикл event loop
             # Это гарантирует что все виджеты полностью отрендерены
             QtCore.QTimer.singleShot(0, self._finalize_initial_layout)
+
+    def _start_window_fade_in(self):
+        """
+        Плавное появление всего окна при запуске.
+        Использует setWindowOpacity — без патчей и QGraphicsEffect.
+        """
+        self.setWindowOpacity(0.0)
+        
+        self._fade_in_anim = QtCore.QPropertyAnimation(self, b"windowOpacity")
+        self._fade_in_anim.setDuration(500)          # 500ms — мягко и быстро
+        self._fade_in_anim.setStartValue(0.0)
+        self._fade_in_anim.setEndValue(1.0)
+        self._fade_in_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._fade_in_anim.start()
     
     def _finalize_initial_layout(self):
         """
@@ -6262,18 +6514,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     
                     "btn_bg": "rgba(45, 45, 50, 0.55)",  # Тёмные полупрозрачные кнопки
                     "btn_bg_hover": "rgba(55, 55, 60, 0.65)",
-                    "btn_border": "rgba(60, 60, 65, 0.4)",
+                    "btn_border": "rgb(60, 60, 65)",
                     
-                    "input_bg_start": "rgba(35, 35, 40, 0.75)",  # Тёмные инпуты
-                    "input_bg_end": "rgba(28, 28, 32, 0.75)",
-                    "input_border": "rgba(55, 55, 60, 0.5)",
-                    "input_focus_border": "rgba(139, 92, 246, 0.4)",
+                    "input_bg_start": "rgba(38, 38, 44, 0.58)",  # Тёмные инпуты
+                    "input_bg_end": "rgba(38, 38, 44, 0.58)",
+                    "input_btn_bg": "rgba(30, 30, 35, 0.70)",    # Фон кнопок — одинаковый с шапкой
+                    "input_btn_bg_hover": "rgba(50, 50, 58, 0.80)",
+                    "input_border": "rgb(55, 55, 62)",
+                    "input_focus_border": "rgb(95, 62, 168)",
                     
                     "accent_primary": "rgba(139, 92, 246, 0.3)",  # Фиолетовый акцент
-                    "accent_hover": "rgba(139, 92, 246, 0.45)",
+                    "accent_hover": "rgb(124, 77, 236)",
                     
-                    "title_bg": "rgba(30, 30, 35, 0.65)",
-                    "title_border": "rgba(50, 50, 55, 0.4)",
+                    "title_bg": "rgba(30, 30, 35, 0.70)",
+                    "title_border": "rgb(50, 50, 55)",
                     
                     # Мягкая красная кнопка очистки для тёмной темы
                     "clear_btn_bg": "rgba(220, 85, 85, 0.15)",
@@ -6300,15 +6554,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     
                     "btn_bg": "rgb(48, 48, 52)",  # НЕПРОЗРАЧНЫЕ кнопки
                     "btn_bg_hover": "rgb(58, 58, 62)",
-                    "btn_border": "rgba(68, 68, 72, 0.95)",
+                    "btn_border": "rgb(68, 68, 72)",
                     
-                    "input_bg_start": "rgb(38, 38, 42)",  # НЕПРОЗРАЧНЫЕ инпуты
-                    "input_bg_end": "rgb(32, 32, 36)",
-                    "input_border": "rgba(58, 58, 62, 0.95)",
-                    "input_focus_border": "rgba(139, 92, 246, 0.7)",
+                    "input_bg_start": "rgba(42, 42, 46, 0.72)",
+                    "input_bg_end": "rgba(42, 42, 46, 0.72)",
+                    "input_btn_bg": "rgba(32, 32, 36, 0.90)",
+                    "input_btn_bg_hover": "rgba(50, 50, 56, 0.95)",
+                    "input_border": "rgb(58, 58, 62)",
+                    "input_focus_border": "rgb(95, 62, 168)",
                     
                     "accent_primary": "rgba(139, 92, 246, 0.45)",
-                    "accent_hover": "rgba(139, 92, 246, 0.65)",
+                    "accent_hover": "rgb(124, 77, 236)",
                     
                     "title_bg": "rgb(32, 32, 36)",
                     "title_border": "rgba(55, 55, 60, 0.9)",
@@ -6342,16 +6598,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     "btn_bg_hover": "rgba(255, 255, 255, 0.78)",
                     "btn_border": "rgba(255, 255, 255, 0.70)",
                     
-                    "input_bg_start": "rgba(248, 248, 250, 0.98)",
-                    "input_bg_end": "rgba(242, 242, 245, 0.98)",
-                    "input_border": "rgba(220, 220, 225, 0.80)",
-                    "input_focus_border": "rgba(102, 126, 234, 0.35)",
+                    "input_bg_start": "rgba(248, 248, 250, 0.70)",
+                    "input_bg_end": "rgba(242, 242, 245, 0.70)",
+                    "input_btn_bg": "rgba(255, 255, 255, 0.55)",
+                    "input_btn_bg_hover": "rgba(255, 255, 255, 0.72)",
+                    "input_border": "rgb(210, 210, 220)",
+                    "input_focus_border": "rgb(72, 94, 185)",
                     
                     "accent_primary": "rgba(102, 126, 234, 0.18)",
-                    "accent_hover": "rgba(102, 126, 234, 0.45)",
+                    "accent_hover": "rgb(82, 106, 214)",
                     
-                    "title_bg": "rgba(255, 255, 255, 0.52)",
-                    "title_border": "rgba(255, 255, 255, 0.72)",
+                    "title_bg": "rgba(255, 255, 255, 0.55)",
+                    "title_border": "rgb(210, 215, 225)",
                     
                     # Мягкая красная кнопка очистки для светлой темы
                     "clear_btn_bg": "rgba(220, 85, 85, 0.08)",
@@ -6378,18 +6636,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     
                     "btn_bg": "rgb(242, 242, 245)",  # НЕПРОЗРАЧНЫЕ кнопки
                     "btn_bg_hover": "rgb(235, 235, 240)",
-                    "btn_border": "rgba(210, 210, 215, 0.95)",
+                    "btn_border": "rgb(210, 210, 215)",
                     
-                    "input_bg_start": "rgb(248, 248, 250)",  # НЕПРОЗРАЧНЫЕ инпуты
-                    "input_bg_end": "rgb(242, 242, 245)",
-                    "input_border": "rgba(210, 210, 215, 0.95)",
-                    "input_focus_border": "rgba(102, 126, 234, 0.7)",
+                    "input_bg_start": "rgba(248, 248, 250, 0.75)",
+                    "input_bg_end": "rgba(242, 242, 245, 0.75)",
+                    "input_btn_bg": "rgba(252, 252, 254, 0.90)",
+                    "input_btn_bg_hover": "rgba(240, 240, 245, 0.95)",
+                    "input_border": "rgb(210, 210, 215)",
+                    "input_focus_border": "rgb(72, 94, 185)",
                     
                     "accent_primary": "rgba(102, 126, 234, 0.25)",
-                    "accent_hover": "rgba(102, 126, 234, 0.5)",
+                    "accent_hover": "rgb(82, 106, 214)",
                     
-                    "title_bg": "rgb(246, 246, 248)",
-                    "title_border": "rgba(210, 210, 215, 0.95)",
+                    "title_bg": "rgb(252, 252, 254)",
+                    "title_border": "rgb(210, 210, 215)",
                     
                     # Мягкая красная кнопка очистки для светлой темы
                     "clear_btn_bg": "rgba(220, 85, 85, 0.08)",
@@ -6402,6 +6662,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
         
         style = f"""
+        /* ═══════════════════════════════════════════════
+           GLOBAL — убираем focus ring у всех кнопок
+           ═══════════════════════════════════════════════ */
+        QPushButton {{
+            outline: none;
+        }}
+        QPushButton:focus {{
+            outline: none;
+        }}
+        QToolButton {{
+            outline: none;
+        }}
+        QToolButton:focus {{
+            outline: none;
+        }}
+
         /* ═══════════════════════════════════════════════
            BASE — основной фон
            ═══════════════════════════════════════════════ */
@@ -6422,7 +6698,7 @@ class MainWindow(QtWidgets.QMainWindow):
            ═══════════════════════════════════════════════ */
         #sidebar {{
             background: {colors["sidebar_bg"]};
-            border-right: 1px solid {colors["sidebar_border"]};
+            border-right: 1.5px solid {colors["sidebar_border"]};
             border-radius: 0px;
         }}
 
@@ -6430,7 +6706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #newChatBtn {{
             background: {colors["btn_bg"]};
             color: {colors["text_secondary"]};
-            border: 1px solid {colors["btn_border"]};
+            border: 1.5px solid {colors["btn_border"]};
             border-radius: 14px;
             padding: 18px 20px;
             margin: 12px 10px;
@@ -6440,7 +6716,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }}
         #newChatBtn:hover {{
             background: {colors["btn_bg_hover"]};
-            border: 1px solid {colors["accent_hover"]};
+            border: 1.5px solid {colors["accent_hover"]};
         }}
 
         /* ── Chat list ── */
@@ -6448,12 +6724,13 @@ class MainWindow(QtWidgets.QMainWindow):
             background: transparent;
             border: none;
             outline: none;
-            padding: 0px 10px;
+            padding: 0px;
+            border-radius: 12px;
         }}
         #chatsList::item {{
             padding: 12px 14px;
-            margin: 3px 0px;
-            border-radius: 12px;
+            margin: 2px 0px;
+            border-radius: 10px;
             border: none;
             color: {colors["text_secondary"]};
             font-size: 14px;
@@ -6462,6 +6739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }}
         #chatsList::item:hover {{
             background: {colors["btn_bg"]};
+            border-left: 2px solid transparent;
         }}
         #chatsList::item:selected {{
             background: {colors["accent_primary"]};
@@ -6474,7 +6752,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #settingsBtn {{
             background: {colors["btn_bg"]};
             color: {colors["text_secondary"]};
-            border: 1px solid {colors["btn_border"]};
+            border: 1.5px solid {colors["btn_border"]};
             border-radius: 14px;
             padding: 18px 20px;
             margin: 12px 10px;
@@ -6484,7 +6762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }}
         #settingsBtn:hover {{
             background: {colors["btn_bg_hover"]};
-            border: 1px solid {colors["accent_hover"]};
+            border: 1.5px solid {colors["accent_hover"]};
         }}
 
 
@@ -6521,20 +6799,28 @@ class MainWindow(QtWidgets.QMainWindow):
             background: transparent;
             color: {colors["text_secondary"]};
             border: none;
-            border-radius: 10px;
-            padding: 0;
-            margin: 0;
+            border-top-left-radius: 16px;
+            border-top-right-radius: 10px;
+            border-bottom-right-radius: 10px;
+            border-bottom-left-radius: 10px;
+            padding: 0px;
+            margin: 0px;
+            min-width: 50px;
+            max-width: 50px;
+            min-height: 50px;
+            max-height: 50px;
         }}
         #menuBtn:hover {{
             background: {colors["btn_bg"]};
         }}
         #menuBtn:pressed {{
             background: {colors["btn_bg_hover"]};
+            padding: 0px;
         }}
 
         #titleWidget {{
             background: {colors["title_bg"]};
-            border: 1px solid {colors["title_border"]};
+            border: 1.5px solid {colors["title_border"]};
             border-radius: 18px;
             margin: 10px 15px;
             padding-top: 12px;
@@ -6594,17 +6880,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         /* ── Input field ── */
         #inputField {{
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {colors["input_bg_start"]},
-                stop:1 {colors["input_bg_end"]});
+            background: {colors["input_btn_bg"]};
             color: {colors["text_primary"]};
-            border: 1px solid {colors["input_border"]};
+            border: 1.5px solid {colors["input_border"]};
             border-radius: 30px;
             padding: 18px 25px;
             font-size: 16px;
         }}
         #inputField:focus {{
-            border: 1px solid {colors["input_focus_border"]};
+            border: 1.5px solid {colors["input_focus_border"]};
+            background: {colors["input_btn_bg_hover"]};
         }}
         #inputField::placeholder {{
             color: {colors["text_tertiary"]};
@@ -6612,64 +6897,84 @@ class MainWindow(QtWidgets.QMainWindow):
 
         /* ── Attach button ── */
         #attachBtn {{
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {colors["input_bg_start"]},
-                stop:1 {colors["input_bg_end"]});
+            background: {colors["input_btn_bg"]};
             color: {colors["text_tertiary"]};
-            border: 1px solid {colors["input_border"]};
+            border: 1.5px solid {colors["input_border"]};
             border-radius: 30px;
             font-size: 28px;
             font-weight: bold;
             text-align: center;
             padding: 0px;
             line-height: 60px;
+            outline: none;
         }}
         #attachBtn:hover {{
-            border: 1px solid {colors["input_focus_border"]};
+            background: {colors["input_btn_bg_hover"]};
+            border: 1.5px solid {colors["input_focus_border"]};
+            outline: none;
+        }}
+        #attachBtn:focus {{
+            outline: none;
+            border: 1.5px solid {colors["input_border"]};
         }}
         #attachBtn:pressed {{
-            border: 1px solid {colors["accent_hover"]};
+            background: {colors["accent_primary"]};
+            border: 1.5px solid {colors["accent_hover"]};
+            outline: none;
         }}
 
         /* ── Send button ── */
         #sendBtn {{
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {colors["input_bg_start"]},
-                stop:1 {colors["input_bg_end"]});
+            background: {colors["input_btn_bg"]};
             color: {colors["text_tertiary"]};
-            border: 1px solid {colors["input_border"]};
+            border: 1.5px solid {colors["input_border"]};
             border-radius: 30px;
             font-size: 26px;
+            outline: none;
         }}
         #sendBtn:hover {{
-            border: 1px solid {colors["input_focus_border"]};
+            background: {colors["input_btn_bg_hover"]};
+            border: 1.5px solid {colors["input_focus_border"]};
+            outline: none;
+        }}
+        #sendBtn:focus {{
+            outline: none;
+            border: 1.5px solid {colors["input_border"]};
         }}
         #sendBtn:pressed {{
-            border: 1px solid {colors["accent_hover"]};
+            background: {colors["accent_primary"]};
+            border: 1.5px solid {colors["accent_hover"]};
+            outline: none;
         }}
         #sendBtn:disabled {{
             color: {colors["text_tertiary"]};
-            border: 1px solid {colors["input_border"]};
+            border: 1.5px solid {colors["input_border"]};
+            outline: none;
         }}
         
         /* ── Mode button ── */
         #modeBtn {{
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {colors["input_bg_start"]},
-                stop:1 {colors["input_bg_end"]});
+            background: {colors["input_btn_bg"]};
             color: {colors["text_tertiary"]};
-            border: 1px solid {colors["input_border"]};
+            border: 1.5px solid {colors["input_border"]};
             border-radius: 30px;
             font-size: 12px;
             font-weight: 600;
             text-align: center;
             padding: 0px 10px;
+            outline: none;
         }}
         #modeBtn:hover {{
-            border: 1px solid {colors["input_focus_border"]};
+            background: {colors["input_btn_bg_hover"]};
+            border: 1.5px solid {colors["input_focus_border"]};
         }}
         #modeBtn:pressed {{
-            border: 1px solid {colors["accent_hover"]};
+            background: {colors["accent_primary"]};
+            border: 1.5px solid {colors["accent_hover"]};
+        }}
+        #modeBtn:focus {{
+            outline: none;
+            border: 1.5px solid {colors["input_border"]};
         }}
 
         /* ── Status label ── */
@@ -7650,32 +7955,22 @@ class MainWindow(QtWidgets.QMainWindow):
             
             copied_path = self.copy_file_to_chat_dir(file_path, self.current_chat_id)
             
-            if copied_path:
-                # КРИТИЧНО: Проверяем что copied_path содержит chat_files
-                if 'chat_files' in copied_path and os.path.exists(copied_path):
-                    self.attached_files.append(copied_path)
-                    print(f"[ATTACH] ✅ Файл добавлен в attached_files:")
-                    print(f"[ATTACH]    Путь: {copied_path}")
-                    print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
-                else:
-                    print(f"[ATTACH] ✗ ОШИБКА: Неправильный путь или файл не существует!")
-                    print(f"[ATTACH]    Путь: {copied_path}")
-                    print(f"[ATTACH]    Содержит chat_files: {'chat_files' in copied_path}")
-                    print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
-                    QtWidgets.QMessageBox.warning(
-                        self,
-                        "Ошибка прикрепления",
-                        f"Не удалось прикрепить файл. Проверьте права доступа к директории chat_files.",
-                        QtWidgets.QMessageBox.StandardButton.Ok
-                    )
+            if copied_path and os.path.exists(copied_path):
+                # Проверяем что файл существует
+                self.attached_files.append(copied_path)
+                print(f"[ATTACH] ✅ Файл добавлен в attached_files:")
+                print(f"[ATTACH]    Путь: {copied_path}")
+                print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
             else:
-                # Если копирование не удалось - НЕ добавляем файл!
-                print(f"[ATTACH] ✗ ОШИБКА: Копирование не удалось!")
-                print(f"[ATTACH] Файл НЕ будет прикреплён")
+                # Если файл не найден
+                print(f"[ATTACH] ✗ ОШИБКА: Файл не найден!")
+                if copied_path:
+                    print(f"[ATTACH]    Путь: {copied_path}")
+                    print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
                 QtWidgets.QMessageBox.warning(
                     self,
-                    "Ошибка копирования",
-                    f"Не удалось скопировать файл в хранилище чата.\n\nПроверьте:\n1. Права доступа к файлу\n2. Доступ к директории chat_files\n3. Свободное место на диске",
+                    "Ошибка прикрепления",
+                    f"Не удалось прикрепить файл. Файл не найден или недоступен.",
                     QtWidgets.QMessageBox.StandardButton.Ok
                 )
             
@@ -7715,65 +8010,28 @@ class MainWindow(QtWidgets.QMainWindow):
     # ═══════════════════════════════════════════════════════════════
     
     def copy_file_to_chat_dir(self, source_path: str, chat_id: int) -> str:
-        """Копирует файл в директорию чата и возвращает новый путь (УЛУЧШЕНО: нормализация путей)"""
+        """ОТКЛЮЧЕНО: Возвращает исходный путь БЕЗ копирования"""
         print(f"[CHAT_FILES] ════════════════════════════════════════")
-        print(f"[CHAT_FILES] КОПИРОВАНИЕ ФАЙЛА")
-        print(f"[CHAT_FILES] Источник: {source_path}")
-        print(f"[CHAT_FILES] Chat ID: {chat_id}")
-        print(f"[CHAT_FILES] Директория хранилища: {self.chat_files_dir}")
+        print(f"[CHAT_FILES] КОПИРОВАНИЕ ОТКЛЮЧЕНО - используем исходный путь")
+        print(f"[CHAT_FILES] Файл: {source_path}")
         
         try:
-            # УЛУЧШЕНИЕ: Нормализуем исходный путь
-            source_path = os.path.normpath(source_path)
-            source_path = os.path.abspath(source_path)
-            print(f"[CHAT_FILES] Нормализованный источник: {source_path}")
+            # Нормализуем путь
+            source_path = os.path.normpath(os.path.abspath(source_path))
             
-            # Проверяем что источник существует
+            # Проверяем что файл существует
             if not os.path.exists(source_path):
-                print(f"[CHAT_FILES] ✗ ОШИБКА: Исходный файл не существует!")
-                return None
-            
-            # УЛУЧШЕНИЕ: Нормализуем директорию хранилища
-            chat_files_dir = os.path.normpath(os.path.abspath(self.chat_files_dir))
-            
-            # Создаём директорию для этого чата
-            chat_dir = os.path.join(chat_files_dir, f"chat_{chat_id}")
-            chat_dir = os.path.normpath(os.path.abspath(chat_dir))
-            print(f"[CHAT_FILES] Целевая директория чата: {chat_dir}")
-            
-            if not os.path.exists(chat_dir):
-                os.makedirs(chat_dir)
-                print(f"[CHAT_FILES] ✓ Создана директория чата")
-            else:
-                print(f"[CHAT_FILES] ✓ Директория чата уже существует")
-            
-            # Генерируем уникальное имя файла с timestamp
-            import time
-            timestamp = int(time.time() * 1000)
-            file_name = os.path.basename(source_path)
-            new_file_name = f"{timestamp}_{file_name}"
-            dest_path = os.path.join(chat_dir, new_file_name)
-            dest_path = os.path.normpath(os.path.abspath(dest_path))
-            
-            print(f"[CHAT_FILES] Целевой путь (АБСОЛЮТНЫЙ): {dest_path}")
-            
-            # Копируем файл
-            import shutil
-            shutil.copy2(source_path, dest_path)
-            
-            # Проверяем что файл скопирован
-            if os.path.exists(dest_path):
-                file_size = os.path.getsize(dest_path)
-                print(f"[CHAT_FILES] ✅ УСПЕШНО! Файл скопирован ({file_size} байт)")
-                print(f"[CHAT_FILES] ════════════════════════════════════════")
-                return dest_path
-            else:
-                print(f"[CHAT_FILES] ✗ ОШИБКА: Файл не появился после копирования!")
+                print(f"[CHAT_FILES] ✗ ОШИБКА: Файл не существует!")
                 print(f"[CHAT_FILES] ════════════════════════════════════════")
                 return None
-                
+            
+            # Возвращаем исходный путь БЕЗ копирования
+            print(f"[CHAT_FILES] ✅ Используем исходный путь: {source_path}")
+            print(f"[CHAT_FILES] ════════════════════════════════════════")
+            return source_path
+            
         except Exception as e:
-            print(f"[CHAT_FILES] ✗ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            print(f"[CHAT_FILES] ✗ ОШИБКА: {e}")
             import traceback
             traceback.print_exc()
             print(f"[CHAT_FILES] ════════════════════════════════════════")
@@ -8015,7 +8273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText("")
 
     def toggle_sidebar(self):
-        """Переключение боковой панели с плавной анимацией (УЛУЧШЕНО)"""
+        """Переключение боковой панели с плавной анимацией (БЕЗ ДЁРГАНИЙ)"""
         current_width = self.sidebar.width()
         target_width = 280 if current_width == 0 else 0
         is_opening = target_width > 0
@@ -8023,67 +8281,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Скрываем панель удаления при закрытии sidebar
         if target_width == 0:
             self.hide_delete_panel()
-        
-        # ═══════════════════════════════════════════════════════════════
-        # АНИМАЦИЯ КНОПКИ МЕНЮ (поворот)
-        # ═══════════════════════════════════════════════════════════════
-        if hasattr(self, 'menu_btn'):
-            # Создаём анимацию поворота иконки меню
-            if not hasattr(self, '_menu_btn_rotate_anim'):
-                self._menu_btn_rotate_anim = QtCore.QPropertyAnimation(self.menu_btn, b"rotation")
-            
-            # Поворачиваем иконку при открытии/закрытии
-            target_rotation = 90 if is_opening else 0
-            
-            self._menu_btn_rotate_anim.stop()
-            self._menu_btn_rotate_anim.setDuration(400)
-            self._menu_btn_rotate_anim.setStartValue(0 if not is_opening else 90)
-            self._menu_btn_rotate_anim.setEndValue(target_rotation)
-            self._menu_btn_rotate_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            
-            # Масштабирование кнопки при клике (bounce эффект)
-            if not hasattr(self, '_menu_btn_scale_anim'):
-                self._menu_btn_scale_anim = QtCore.QPropertyAnimation(self.menu_btn, b"geometry")
-            
-            original_geo = self.menu_btn.geometry()
-            center_x = original_geo.center().x()
-            center_y = original_geo.center().y()
-            
-            # Уменьшаем до 0.85 scale
-            scale_factor = 0.85
-            new_width = int(original_geo.width() * scale_factor)
-            new_height = int(original_geo.height() * scale_factor)
-            pressed_geo = QtCore.QRect(
-                center_x - new_width // 2,
-                center_y - new_height // 2,
-                new_width,
-                new_height
-            )
-            
-            # Быстрое сжатие
-            self._menu_btn_scale_anim.stop()
-            self._menu_btn_scale_anim.setDuration(120)
-            self._menu_btn_scale_anim.setStartValue(original_geo)
-            self._menu_btn_scale_anim.setEndValue(pressed_geo)
-            self._menu_btn_scale_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
-            
-            # После сжатия - возврат с bounce
-            def on_menu_press_finished():
-                if not hasattr(self, '_menu_btn_release_anim'):
-                    self._menu_btn_release_anim = QtCore.QPropertyAnimation(self.menu_btn, b"geometry")
-                
-                self._menu_btn_release_anim.setDuration(400)
-                self._menu_btn_release_anim.setStartValue(pressed_geo)
-                self._menu_btn_release_anim.setEndValue(original_geo)
-                self._menu_btn_release_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
-                self._menu_btn_release_anim.start()
-            
-            try:
-                self._menu_btn_scale_anim.finished.disconnect()
-            except:
-                pass
-            self._menu_btn_scale_anim.finished.connect(on_menu_press_finished)
-            self._menu_btn_scale_anim.start()
         
         # ═══════════════════════════════════════════════════════════════
         # АНИМАЦИЯ SIDEBAR (плавное выдвижение/скрытие)
@@ -8094,9 +8291,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'animation2') and self.animation2:
             self.animation2.stop()
         
-        # Более плавная и быстрая анимация
-        duration = 450   # ms - чуть дольше для более плавного эффекта
-        easing = QtCore.QEasingCurve.Type.OutCubic  # Более плавная кривая
+        # Плавная анимация sidebar
+        duration = 300   # ms
+        easing = QtCore.QEasingCurve.Type.InOutQuad  # Плавная кривая
         
         self.animation = QtCore.QPropertyAnimation(self.sidebar, b"minimumWidth")
         self.animation.setDuration(duration)
@@ -8889,7 +9086,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 messages = self.chat_manager.get_chat_messages(chat_id, limit=100)
                 
                 # Проверяем есть ли хотя бы одно сообщение от пользователя
-                has_user_messages = any(role == "user" for role, content, created in messages)
+                has_user_messages = any(msg[0] == "user" for msg in messages)
                 
                 if not has_user_messages:
                     # Удаляем пустой чат
@@ -8973,21 +9170,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         
         # ═══════════════════════════════════════════════════════════════
-        # ШАГ 2: ЗАГРУЗКА ФАЙЛОВ ДЛЯ ТЕКУЩЕГО ЧАТА
+        # ШАГ 2: ЗАГРУЗКА ФАЙЛОВ ОТКЛЮЧЕНА
         # ═══════════════════════════════════════════════════════════════
-        chat_files = self.load_chat_files(self.current_chat_id)
-        if chat_files:
-            print(f"[LOAD_CURRENT] 📁 Загружено {len(chat_files)} файлов для чата {self.current_chat_id}")
-            self.attached_files = chat_files
-            self.update_file_chips()
-        else:
-            print(f"[LOAD_CURRENT] ℹ️ Нет сохранённых файлов для чата {self.current_chat_id}")
+        # ИСПРАВЛЕНИЕ: НЕ загружаем файлы в поле прикрепления
+        # Файлы сохраняются только для контекста AI (через memory)
+        # но НЕ отображаются пользователю как прикреплённые
+        print(f"[LOAD_CURRENT] ℹ️ Загрузка файлов в UI отключена (файлы в памяти AI)")
         
         # Определяем какие сообщения показывать с анимацией (последние 2 для ускорения)
         total_messages = len(messages)
         
-        # Загружаем существующие сообщения
-        for idx, (role, content, created) in enumerate(messages):
+        # Загружаем существующие сообщения с файлами
+        for idx, msg_data in enumerate(messages):
+            # Распаковываем с учётом что теперь есть attached_files
+            if len(msg_data) == 4:
+                role, content, files, created = msg_data
+            else:
+                # Старый формат (для совместимости)
+                role, content, created = msg_data
+                files = None
+            
             speaker = "Вы" if role == "user" else ASSISTANT_NAME
             if role not in ["user", "assistant"]:
                 continue
@@ -8995,13 +9197,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # Проверяем, входит ли сообщение в последние 2 (оптимизировано)
             is_recent = (total_messages - idx) <= 2
             
-            # Создаём виджет БЕЗ анимации (для всех)
+            # Создаём виджет с файлами
             message_widget = MessageWidget(
                 speaker, content, add_controls=True,
                 language=self.current_language,
                 main_window=self,
                 parent=self.messages_widget,
-                thinking_time=0
+                thinking_time=0,
+                attached_files=files  # Передаём файлы!
             )
             
             # Для старых сообщений сразу убираем анимацию
@@ -9051,6 +9254,62 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.update_scroll_button_visibility()
         
         QtCore.QTimer.singleShot(350, scroll_to_bottom_delayed)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ШАГ 3: УПРАВЛЕНИЕ ВИДИМОСТЬЮ КНОПОК РЕГЕНЕРАЦИИ И РЕДАКТИРОВАНИЯ
+        # ═══════════════════════════════════════════════════════════════
+        # Показываем кнопки только у последних сообщений
+        def manage_regenerate_buttons():
+            # Находим последнее сообщение ассистента
+            last_assistant_widget = None
+            # Находим последнее сообщение пользователя
+            last_user_widget = None
+            
+            # Проходим в обратном порядке чтобы найти последние сообщения
+            for i in range(self.messages_layout.count() - 1, -1, -1):
+                item = self.messages_layout.itemAt(i)
+                if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                    widget = item.widget()
+                    
+                    # Ищем последнее сообщение ассистента (не "Вы" и не "Система")
+                    if last_assistant_widget is None and widget.speaker not in ["Вы", "Система"]:
+                        last_assistant_widget = widget
+                    
+                    # Ищем последнее сообщение пользователя
+                    if last_user_widget is None and widget.speaker == "Вы":
+                        last_user_widget = widget
+                    
+                    # Если нашли оба - можно остановиться
+                    if last_assistant_widget and last_user_widget:
+                        break
+            
+            # Скрываем все кнопки регенерации у сообщений ассистента
+            # Показываем только у последнего
+            for i in range(self.messages_layout.count()):
+                item = self.messages_layout.itemAt(i)
+                if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                    widget = item.widget()
+                    
+                    # Управление кнопкой регенерации (у сообщений ассистента)
+                    if widget.speaker not in ["Вы", "Система"]:
+                        if hasattr(widget, 'regenerate_button') and widget.regenerate_button:
+                            if widget == last_assistant_widget:
+                                widget.regenerate_button.setVisible(True)
+                            else:
+                                widget.regenerate_button.setVisible(False)
+                    
+                    # Управление кнопкой редактирования (у сообщений пользователя)
+                    if widget.speaker == "Вы":
+                        if hasattr(widget, 'edit_button') and widget.edit_button:
+                            if widget == last_user_widget:
+                                widget.edit_button.setVisible(True)
+                            else:
+                                widget.edit_button.setVisible(False)
+            
+            print(f"[LOAD_CURRENT] ✓ Управление кнопками завершено")
+        
+        # Запускаем управление кнопками с небольшой задержкой после загрузки
+        QtCore.QTimer.singleShot(400, manage_regenerate_buttons)
 
     def create_new_chat(self):
         """Создать новый чат (УЛУЧШЕНО: с плавной анимацией кнопки)"""
@@ -9141,6 +9400,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.startup_chat_has_messages = False
         
         self.load_chats_list()
+        
+        # Принудительно скрываем кнопку "вниз" ДО загрузки чата, чтобы
+        # add_message_widget внутри load_current_chat не успел её показать снова
+        if hasattr(self, 'scroll_to_bottom_btn'):
+            btn = self.scroll_to_bottom_btn
+            btn.fade_animation.stop()
+            btn.opacity_effect.setOpacity(0.0)
+            btn.hide()
+            btn._is_visible_animated = False
+        
         self.load_current_chat()
         
         # Закрываем sidebar после создания с небольшой задержкой для анимации
@@ -9221,15 +9490,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_current_chat()
         
         # ═══════════════════════════════════════════════════════════════
-        # ШАГ 3: ЗАГРУЗКА ФАЙЛОВ ДЛЯ НОВОГО ЧАТА
+        # ШАГ 3: ЗАГРУЗКА ФАЙЛОВ ОТКЛЮЧЕНА
         # ═══════════════════════════════════════════════════════════════
-        chat_files = self.load_chat_files(chat_id)
-        if chat_files:
-            print(f"[SWITCH_CHAT] 📁 Загружено {len(chat_files)} файлов для чата {chat_id}")
-            self.attached_files = chat_files
-            self.update_file_chips()
-        else:
-            print(f"[SWITCH_CHAT] ℹ️ Нет сохранённых файлов для чата {chat_id}")
+        # ИСПРАВЛЕНИЕ: НЕ загружаем файлы в поле прикрепления
+        # Файлы сохраняются только для контекста AI (через memory)
+        print(f"[SWITCH_CHAT] ℹ️ Загрузка файлов в UI отключена")
         
         print(f"[SWITCH_CHAT] ✅ Переключение завершено")
         print(f"[SWITCH_CHAT] ════════════════════════════════════════")
@@ -9370,30 +9635,47 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         
         # ═══════════════════════════════════════════════════════════════
-        # ШАГ 6: УПРАВЛЕНИЕ ВИДИМОСТЬЮ КНОПОК РЕГЕНЕРАЦИИ
-        # Показываем только у последнего сообщения ассистента
+        # ШАГ 6: УПРАВЛЕНИЕ ВИДИМОСТЬЮ КНОПОК РЕГЕНЕРАЦИИ И РЕДАКТИРОВАНИЯ
         # ═══════════════════════════════════════════════════════════════
-        if speaker != "Вы" and speaker != "Система":
+        # Показываем кнопку регенерации только у последнего сообщения ассистента
+        # Показываем кнопку редактирования только у последнего сообщения пользователя
+        if speaker != "Система":
             # Отложенное управление кнопками через 100ms (минимальная задержка)
-            def manage_regenerate_buttons():
-                # Скрываем кнопки регенерации у всех предыдущих сообщений
-                for i in range(self.messages_layout.count()):
-                    item = self.messages_layout.itemAt(i)
-                    if item and item.widget() and hasattr(item.widget(), 'speaker'):
-                        widget = item.widget()
-                        # Проверяем что это сообщение ассистента
-                        if widget.speaker != "Вы" and widget.speaker != "Система":
-                            # Если это не текущий виджет - скрываем кнопку
-                            if widget != message_widget and hasattr(widget, 'regenerate_button') and widget.regenerate_button:
-                                widget.regenerate_button.setVisible(False)
-                            # Если это текущий виджет - показываем кнопку
-                            elif widget == message_widget and hasattr(widget, 'regenerate_button') and widget.regenerate_button:
-                                widget.regenerate_button.setVisible(True)
+            def manage_buttons():
+                # РЕГЕНЕРАЦИЯ: Скрываем у всех ответов ИИ кроме последнего
+                if speaker != "Вы":
+                    for i in range(self.messages_layout.count()):
+                        item = self.messages_layout.itemAt(i)
+                        if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                            widget = item.widget()
+                            # Проверяем что это сообщение ассистента
+                            if widget.speaker != "Вы" and widget.speaker != "Система":
+                                # Если это не текущий виджет - скрываем кнопку
+                                if widget != message_widget and hasattr(widget, 'regenerate_button') and widget.regenerate_button:
+                                    widget.regenerate_button.setVisible(False)
+                                # Если это текущий виджет - показываем кнопку
+                                elif widget == message_widget and hasattr(widget, 'regenerate_button') and widget.regenerate_button:
+                                    widget.regenerate_button.setVisible(True)
                 
-                print(f"[ADD_MESSAGE] ✓ Управление кнопками регенерации завершено")
+                # РЕДАКТИРОВАНИЕ: Скрываем у всех сообщений пользователя кроме последнего
+                else:  # speaker == "Вы"
+                    for i in range(self.messages_layout.count()):
+                        item = self.messages_layout.itemAt(i)
+                        if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                            widget = item.widget()
+                            # Проверяем что это сообщение пользователя
+                            if widget.speaker == "Вы":
+                                # Если это не текущий виджет - скрываем кнопку редактирования
+                                if widget != message_widget and hasattr(widget, 'edit_button') and widget.edit_button:
+                                    widget.edit_button.setVisible(False)
+                                # Если это текущий виджет - показываем кнопку редактирования
+                                elif widget == message_widget and hasattr(widget, 'edit_button') and widget.edit_button:
+                                    widget.edit_button.setVisible(True)
+                
+                print(f"[ADD_MESSAGE] ✓ Управление кнопками завершено")
             
             # Запускаем управление кнопками отложенно
-            QtCore.QTimer.singleShot(100, manage_regenerate_buttons)
+            QtCore.QTimer.singleShot(100, manage_buttons)
     
     def send_message(self):
         """Отправка сообщения пользователя
@@ -9658,7 +9940,22 @@ class MainWindow(QtWidgets.QMainWindow):
             
             self.add_message_widget("Вы", user_text, add_controls=True,
                                      attached_files=[os.path.basename(f) for f in self.attached_files] if self.attached_files else None)
-            self.chat_manager.save_message(self.current_chat_id, "user", user_text)
+            
+            # Сохраняем сообщение с файлами в БД
+            files_to_save = [os.path.basename(f) for f in self.attached_files] if self.attached_files else None
+            self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
+            
+            # Сохраняем список файлов в контекстную память (для AI)
+            if self.attached_files:
+                try:
+                    from context_memory_manager import ContextMemoryManager
+                    context_mgr = ContextMemoryManager()
+                    files_list = [os.path.basename(f) for f in self.attached_files]
+                    files_info = f"📎 Файлы к сообщению '{user_text[:30]}...': {', '.join(files_list)}"
+                    context_mgr.save_context_memory(self.current_chat_id, "message_files", files_info)
+                    print(f"[SEND] ✓ Сохранена информация о {len(files_list)} файлах")
+                except Exception as e:
+                    print(f"[SEND] ⚠️ Ошибка сохранения информации о файлах: {e}")
             
             # ═══ ЛОГИКА СТАРТОВОГО ЧАТА ═══
             # Если это стартовый чат и первое сообщение - помечаем что он больше не пустой
@@ -9684,7 +9981,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.input_field.clear()
             self.add_message_widget("Вы", user_text, add_controls=True,
                                      attached_files=[os.path.basename(f) for f in self.attached_files] if self.attached_files else None)
-            self.chat_manager.save_message(self.current_chat_id, "user", user_text)
+            
+            # Сохраняем сообщение с файлами в БД
+            files_to_save = [os.path.basename(f) for f in self.attached_files] if self.attached_files else None
+            self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
+            
+            # Сохраняем список файлов в контекстную память (для AI)
+            if self.attached_files:
+                try:
+                    from context_memory_manager import ContextMemoryManager
+                    context_mgr = ContextMemoryManager()
+                    files_list = [os.path.basename(f) for f in self.attached_files]
+                    files_info = f"📎 Файлы к сообщению '{user_text[:30]}...': {', '.join(files_list)}"
+                    context_mgr.save_context_memory(self.current_chat_id, "message_files", files_info)
+                    print(f"[SEND] ✓ Сохранена информация о {len(files_list)} файлах (редактирование)")
+                except Exception as e:
+                    print(f"[SEND] ⚠️ Ошибка сохранения информации о файлах: {e}")
             
             # Запуск pipeline при регенерации
             # ✅ КРИТИЧНО: Очищаем перед установкой нового текста
@@ -9979,7 +10291,8 @@ class MainWindow(QtWidgets.QMainWindow):
         messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=50)
         
         last_user_msg = None
-        for role, content, _ in reversed(messages):
+        for msg_data in reversed(messages):
+            role, content = msg_data[0], msg_data[1]
             if role == "user":
                 last_user_msg = content
                 break
@@ -10160,7 +10473,8 @@ class MainWindow(QtWidgets.QMainWindow):
         messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=50)
         
         last_user_msg = None
-        for role, content, _ in reversed(messages):
+        for msg_data in reversed(messages):
+            role, content = msg_data[0], msg_data[1]
             if role == "user":
                 last_user_msg = content
                 break
@@ -10576,10 +10890,14 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("")
         dialog.setModal(True)
-        dialog.setFixedSize(450, 240)
+        dialog.setFixedSize(450, 210)
         
-        # Убираем рамку окна
-        dialog.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
+        # Убираем рамку окна и поднимаем поверх всего
+        dialog.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint |
+            QtCore.Qt.WindowType.Dialog |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
         if not IS_WINDOWS:
             dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         
@@ -10587,13 +10905,13 @@ class MainWindow(QtWidgets.QMainWindow):
         screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
         dialog.move(
             screen_geo.center().x() - 225,
-            screen_geo.center().y() - 120
+            screen_geo.center().y() - 110
         )
         
-        # Layout
+        # Layout без отступов — frame полностью заполняет диалог (нет прозрачных краёв)
         layout = QtWidgets.QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(20)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
         # Стеклянный контейнер
         frame = QtWidgets.QFrame()
@@ -10602,7 +10920,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if is_dark:
             frame.setStyleSheet("""
                 QFrame {
-                    background-color: rgba(30, 30, 35, 0.92);
+                    background-color: rgba(30, 30, 35, 0.97);
                     border: 1px solid rgba(60, 60, 70, 0.8);
                     border-radius: 20px;
                 }
@@ -10610,15 +10928,15 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             frame.setStyleSheet("""
                 QFrame {
-                    background-color: rgba(255, 255, 255, 0.90);
-                    border: 1px solid rgba(255, 255, 255, 0.95);
+                    background-color: rgba(255, 255, 255, 0.97);
+                    border: 1px solid rgba(200, 200, 210, 0.9);
                     border-radius: 20px;
                 }
             """)
         
         frame_layout = QtWidgets.QVBoxLayout(frame)
-        frame_layout.setContentsMargins(35, 35, 35, 35)
-        frame_layout.setSpacing(28)
+        frame_layout.setContentsMargins(30, 24, 30, 24)
+        frame_layout.setSpacing(0)
         
         # Заголовок
         title = QtWidgets.QLabel("⚠️ Удалить все чаты?")
@@ -10631,6 +10949,7 @@ class MainWindow(QtWidgets.QMainWindow):
             title.setStyleSheet("QLabel { color: #c85555; background-color: none; border: none; }")
         
         frame_layout.addWidget(title)
+        frame_layout.addSpacing(14)
         
         # Текст предупреждения
         warning = QtWidgets.QLabel("Это действие невозможно отменить.\nВсе чаты будут удалены безвозвратно.")
@@ -10644,6 +10963,7 @@ class MainWindow(QtWidgets.QMainWindow):
             warning.setStyleSheet("QLabel { color: #64748b; background-color: none; border: none; }")
         
         frame_layout.addWidget(warning)
+        frame_layout.addSpacing(14)
         
         # Кнопки
         buttons = QtWidgets.QHBoxLayout()
@@ -10713,6 +11033,8 @@ class MainWindow(QtWidgets.QMainWindow):
         yes_btn.clicked.connect(dialog.accept)
         
         print("[DELETE_ALL_CHATS] Показываю диалог...")
+        dialog.raise_()
+        dialog.activateWindow()
         result = dialog.exec()
         
         if result == QtWidgets.QDialog.DialogCode.Accepted:
@@ -10880,10 +11202,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         print(f"[DRAG-DROP] ════════════════════════════════════════")
                         print(f"[DRAG-DROP] Обработка файла: {file_path}")
                         
-                        # Копируем файл в хранилище чата
+                        # Получаем путь к файлу (без копирования)
                         copied_path = self.copy_file_to_chat_dir(file_path, self.current_chat_id)
                         
-                        if copied_path and 'chat_files' in copied_path and os.path.exists(copied_path):
+                        if copied_path and os.path.exists(copied_path):
                             if copied_path not in self.attached_files:
                                 self.attached_files.append(copied_path)
                                 print(f"[DRAG-DROP] ✅ Файл добавлен в attached_files:")
@@ -10892,16 +11214,15 @@ class MainWindow(QtWidgets.QMainWindow):
                             else:
                                 print(f"[DRAG-DROP] ⚠️ Файл уже прикреплён: {os.path.basename(file_path)}")
                         else:
-                            # Если копирование не удалось - НЕ добавляем файл!
-                            print(f"[DRAG-DROP] ✗ ОШИБКА: Копирование не удалось или неправильный путь!")
+                            # Если файл не найден
+                            print(f"[DRAG-DROP] ✗ ОШИБКА: Файл не найден!")
                             if copied_path:
                                 print(f"[DRAG-DROP]    Путь: {copied_path}")
-                                print(f"[DRAG-DROP]    Содержит chat_files: {'chat_files' in copied_path}")
                                 print(f"[DRAG-DROP]    Существует: {os.path.exists(copied_path)}")
                             QtWidgets.QMessageBox.warning(
                                 self,
                                 "Ошибка прикрепления",
-                                f"Не удалось прикрепить файл {os.path.basename(file_path)}.\n\nПроверьте права доступа.",
+                                f"Не удалось прикрепить файл {os.path.basename(file_path)}.\n\nФайл не найден или недоступен.",
                                 QtWidgets.QMessageBox.StandardButton.Ok
                             )
                         
@@ -10925,6 +11246,12 @@ def main():
     try:
         print("[MAIN] Инициализация базы данных...")
         init_db()
+        
+        # КРИТИЧНО: Инициализируем ChatManager для запуска миграции БД
+        print("[MAIN] Запуск миграции БД...")
+        from chat_manager import ChatManager
+        chat_mgr = ChatManager()
+        print("[MAIN] ✓ База данных готова")
         
         print("[MAIN] Создание приложения Qt...")
         app = QtWidgets.QApplication(sys.argv)

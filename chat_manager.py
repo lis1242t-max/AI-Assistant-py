@@ -43,6 +43,16 @@ class ChatManager:
         )
         """)
         
+        # МИГРАЦИЯ: Добавляем колонку attached_files если её нет
+        try:
+            cur.execute("ALTER TABLE chat_messages ADD COLUMN attached_files TEXT")
+            print("[DB_MIGRATION] ✓ Добавлена колонка attached_files")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                print("[DB_MIGRATION] ℹ️ Колонка attached_files уже существует")
+            else:
+                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции: {e}")
+        
         conn.commit()
         
         # Если нет чатов - создаём первый
@@ -117,15 +127,18 @@ class ChatManager:
         conn.commit()
         conn.close()
     
-    def save_message(self, chat_id: int, role: str, content: str):
-        """Сохранить сообщение в чат"""
+    def save_message(self, chat_id: int, role: str, content: str, attached_files: list = None):
+        """Сохранить сообщение в чат с прикреплёнными файлами"""
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
         now = datetime.utcnow().isoformat()
         
-        cur.execute("INSERT INTO chat_messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                   (chat_id, role, content, now))
+        # Сериализуем список файлов в JSON
+        files_json = json.dumps(attached_files) if attached_files else None
+        
+        cur.execute("INSERT INTO chat_messages (chat_id, role, content, attached_files, created_at) VALUES (?, ?, ?, ?, ?)",
+                   (chat_id, role, content, files_json, now))
         
         # Обновить время последнего обновления чата
         cur.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
@@ -134,12 +147,12 @@ class ChatManager:
         conn.close()
     
     def get_chat_messages(self, chat_id: int, limit: int = 50) -> List[Tuple]:
-        """Получить сообщения чата"""
+        """Получить сообщения чата с прикреплёнными файлами"""
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
         cur.execute("""
-        SELECT role, content, created_at 
+        SELECT role, content, attached_files, created_at 
         FROM chat_messages 
         WHERE chat_id = ? 
         ORDER BY id DESC 
@@ -149,7 +162,14 @@ class ChatManager:
         rows = cur.fetchall()
         conn.close()
         
-        return list(reversed(rows))
+        # Десериализуем файлы из JSON
+        result = []
+        for row in reversed(rows):
+            role, content, files_json, created_at = row
+            files = json.loads(files_json) if files_json else None
+            result.append((role, content, files, created_at))
+        
+        return result
     
     def clear_chat_messages(self, chat_id: int):
         """Очистить сообщения чата"""

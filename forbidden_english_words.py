@@ -3270,3 +3270,19 @@ FORBIDDEN_WORDS_DICT = {
     'I believe': 'я верю',
     'I suppose': 'я полагаю',
 }
+
+# ═══════════════════════════════════════════════════════════════
+# Автоматически созданные переменные для совместимости
+# ═══════════════════════════════════════════════════════════════
+
+# Создаём SET из ключей словаря для быстрого поиска
+FORBIDDEN_WORDS_SET = set(FORBIDDEN_WORDS_DICT.keys())
+
+# Топ самых частых запрещённых слов (для промпта)
+TOP_FORBIDDEN_FOR_PROMPT = [
+    'however', 'moreover', 'furthermore', 'therefore', 'essentially',
+    'basically', 'actually', 'specifically', 'particularly', 'generally',
+    'typically', 'primarily', 'ultimately', 'consequently', 'additionally'
+]
+
+print(f"[FORBIDDEN_WORDS] Загружено {len(FORBIDDEN_WORDS_DICT)} запрещённых слов")
