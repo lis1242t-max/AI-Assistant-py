@@ -1,4 +1,6 @@
 {
   "theme": "light",
-  "liquid_glass": true
+  "liquid_glass": true,
+  "ai_model_key": "llama3",
+  "first_launch_done": true
 }
