@@ -106,3 +106,18 @@ class ContextMemoryManager:
     def delete_chat_context(self, chat_id: int):
         """Удалить всю контекстную память чата (при удалении чата)"""
         self.clear_context_memory(chat_id)
+
+    def clear_all_context(self):
+        """Очистить контекстную память ВСЕХ чатов (при 'Удалить все чаты')"""
+        conn = sqlite3.connect(CONTEXT_DB)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM context_memory")
+        # Сбрасываем автоинкремент чтобы новые ID не совпадали со старыми записями
+        try:
+            cur.execute("DELETE FROM sqlite_sequence WHERE name='context_memory'")
+        except Exception:
+            pass
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        print(f"[CONTEXT_MEMORY] ✓ Очищена ВСЯ контекстная память ({deleted} записей)")
