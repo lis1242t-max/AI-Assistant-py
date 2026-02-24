@@ -1,0 +1,16 @@
+
+============================================================
+[2026-02-24 20:14:24] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 6625, in _start_appear_animation
+    self.fade_in_animation.finished.disconnect()
+TypeError: disconnect() failed between 'finished' and all its connections
+
+============================================================
+[2026-02-24 20:14:57] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 10896, in _animate_close
+    self._remove_menu_blur_effect()
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 11070, in _remove_menu_blur_effect
+    self._overlay_anim.finished.disconnect()
+TypeError: disconnect() failed between 'finished' and all its connections

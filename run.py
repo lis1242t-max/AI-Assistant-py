@@ -11,8 +11,14 @@ from datetime import datetime
 from PyQt6 import QtWidgets, QtGui, QtCore
 import requests
 import json
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from OpenGL.GL import *
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+    from OpenGL.GL import *
+    _OPENGL_AVAILABLE = True
+except ImportError:
+    _OPENGL_AVAILABLE = False
+    QOpenGLWidget = object  # заглушка чтобы не падали наследования
+    print("[IMPORT] ⚠️ PyOpenGL не установлен — OpenGL-функции недоступны")
 # Импорт менеджера чатов
 from chat_manager import ChatManager
 from context_memory_manager import ContextMemoryManager
@@ -128,6 +134,36 @@ except ImportError as _ve:
     def is_image_file(file_path):
         import os
         return os.path.splitext(file_path)[1].lower() in {".png",".jpg",".jpeg",".gif",".bmp",".webp"}
+
+# ── Диалоги скачивания/удаления моделей ────────────────────────────────
+from model_downloader import (
+    check_model_in_ollama,
+    get_ollama_models_dir,
+    set_ollama_models_env_and_restart,
+    delete_model_files_from_disk,
+    LlamaDownloadDialog,
+    DeepSeekDownloadDialog,
+)
+
+# ── Система проверок и самовосстановления ───────────────────────────────
+from attachment_manager import AttachmentMixin
+from error_handler import (
+    startup_checks,
+    check_ollama_health,
+    check_database_health,
+    check_settings_file,
+    check_disk_space,
+    install_global_exception_hook,
+    guarded,
+    safe_call,
+    safe_db_connect,
+    safe_json_load,
+    safe_json_save,
+    log_error,
+    load_settings,
+    save_settings,
+    build_fatal_error_message,
+)
 
 
 # Google / DuckDuckGo helper config
@@ -4543,40 +4579,75 @@ def build_contextual_search_query(user_message: str, chat_manager, chat_id: int,
 
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT,
-        content TEXT,
-        created_at TEXT)
-    """)
-    conn.commit()
-    conn.close()
+    """Инициализирует основную БД. При ошибке — чинит и пересоздаёт."""
+    try:
+        check_database_health(DB_FILE, required_tables=["messages"], auto_fix=True)
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT,
+            content TEXT,
+            created_at TEXT)
+        """)
+        conn.commit()
+        conn.close()
+        print("[DB] ✅ chat_memory.db готова")
+    except Exception as e:
+        log_error("INIT_DB", e)
+        # Последний шанс — создать пустую БД
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            conn.close()
+        except Exception:
+            pass
 
 def save_message(role: str, content: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO messages (role, content, created_at) VALUES (?, ?, ?)",
-                (role, content, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
+    conn = safe_db_connect(DB_FILE)
+    if conn is None:
+        print("[DB] ⚠️ save_message: нет соединения с БД")
+        return
+    try:
+        conn.execute(
+            "INSERT INTO messages (role, content, created_at) VALUES (?, ?, ?)",
+            (role, content, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+    except Exception as e:
+        log_error("SAVE_MSG", e)
+    finally:
+        conn.close()
 
 def load_history(limit=MAX_HISTORY_LOAD):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT ?", (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return list(reversed(rows))
+    conn = safe_db_connect(DB_FILE)
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cur.fetchall()
+        return list(reversed(rows))
+    except Exception as e:
+        log_error("LOAD_HISTORY", e)
+        return []
+    finally:
+        conn.close()
 
 def clear_messages():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM messages")
-    conn.commit()
-    conn.close()
+    conn = safe_db_connect(DB_FILE)
+    if conn is None:
+        return
+    try:
+        conn.execute("DELETE FROM messages")
+        conn.commit()
+    except Exception as e:
+        log_error("CLEAR_MSG", e)
+    finally:
+        conn.close()
 
 # -------------------------
 # Model-call helpers
@@ -6490,7 +6561,7 @@ class MessageWidget(QtWidgets.QWidget):
                 _p_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
                 def _src_cleanup(p=popup, e=_p_eff):
                     try: p.setGraphicsEffect(None)
-                    except: pass
+                    except RuntimeError: pass
                 _p_op.finished.connect(_src_cleanup)
                 _p_op.start()
                 _p_geo.start()
@@ -6553,7 +6624,7 @@ class MessageWidget(QtWidgets.QWidget):
             # Подключаем очистку эффекта после завершения анимации
             try:
                 self.fade_in_animation.finished.disconnect()
-            except:
+            except (RuntimeError, TypeError):
                 pass
             
             self.fade_in_animation.finished.connect(self._remove_graphics_effect_after_animation)
@@ -7019,12 +7090,17 @@ class NoFocusButton(QtWidgets.QPushButton):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
     
     def paintEvent(self, event):
-        opt = QtWidgets.QStyleOptionButton()
-        self.initStyleOption(opt)
-        # Убираем флаг фокуса — Qt не нарисует focus rect
-        opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
-        painter = QtGui.QPainter(self)
-        self.style().drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, opt, painter, self)
+        try:
+            opt = QtWidgets.QStyleOptionButton()
+            self.initStyleOption(opt)
+            opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
+            painter = QtGui.QPainter(self)
+            if not painter.isActive():
+                return
+            self.style().drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, opt, painter, self)
+            painter.end()
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -7202,7 +7278,7 @@ class ScrollToBottomButton(QtWidgets.QPushButton):
         # Отключаем старый обработчик если был
         try:
             self.fade_animation.finished.disconnect()
-        except:
+        except (RuntimeError, TypeError):
             pass
         
         self.fade_animation.finished.connect(on_fade_out_finished)
@@ -7912,607 +7988,7 @@ class SettingsView(QtWidgets.QWidget):
 
 
 
-def check_model_in_ollama(model_name: str) -> bool:
-    """
-    Проверяет, установлена ли модель в Ollama локально.
-    Делает запрос к /api/tags и ищет модель по имени.
-    """
-    try:
-        resp = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            models = data.get("models", [])
-            for m in models:
-                name = m.get("name", "")
-                # Сравниваем без тега :latest если нет явного тега
-                if name == model_name or name.startswith(model_name.split(":")[0] + ":"):
-                    return True
-        return False
-    except Exception:
-        return False
-
-
-class DeepSeekDownloadDialog(QtWidgets.QDialog):
-    """
-    Диалог скачивания DeepSeek LLM 7B Chat.
-    Адаптируется под тему (dark/light) через parent.current_theme.
-    """
-
-    download_finished = QtCore.pyqtSignal(bool, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Скачивание DeepSeek")
-        self.setFixedSize(520, 330)
-        self.setWindowFlags(
-            QtCore.Qt.WindowType.Dialog |
-            QtCore.Qt.WindowType.FramelessWindowHint
-        )
-        if not IS_WINDOWS:
-            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-
-        self._download_process = None
-        self._cancelled = False
-
-        # Определяем тему из parent
-        self._is_dark = True
-        if parent and hasattr(parent, 'current_theme'):
-            self._is_dark = parent.current_theme == "dark"
-
-        self._build_ui()
-        self.download_finished.connect(self._on_download_finished)
-
-    def _build_ui(self):
-        # ── Цвета по теме ──────────────────────────────────────────
-        if self._is_dark:
-            card_bg     = "rgba(22, 22, 32, 0.98)"
-            card_border = "rgba(75, 75, 105, 0.75)"
-            title_col   = "#e4e4f4"
-            desc_col    = "#8888aa"
-            status_col  = "#8899dd"
-            log_bg      = "rgba(12, 12, 20, 0.9)"
-            log_fg      = "#55cc55"
-            log_border  = "rgba(55, 55, 80, 0.6)"
-            pb_bg       = "rgba(40, 40, 60, 0.85)"
-            pb_border   = "rgba(70, 70, 100, 0.55)"
-            pb_text     = "#d0d0f0"
-        else:
-            card_bg     = "rgba(248, 248, 255, 0.99)"
-            card_border = "rgba(200, 205, 235, 0.90)"
-            title_col   = "#1a1a40"
-            desc_col    = "#6677aa"
-            status_col  = "#5566bb"
-            log_bg      = "rgba(235, 238, 250, 0.95)"
-            log_fg      = "#227722"
-            log_border  = "rgba(190, 200, 230, 0.70)"
-            pb_bg       = "rgba(225, 228, 248, 0.90)"
-            pb_border   = "rgba(180, 190, 225, 0.70)"
-            pb_text     = "#2a2a60"
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-
-        card = QtWidgets.QFrame()
-        card.setObjectName("dsCard")
-        card.setStyleSheet(f"""
-            QFrame#dsCard {{
-                background: {card_bg};
-                border: 1px solid {card_border};
-                border-radius: 20px;
-            }}
-        """)
-        card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.setContentsMargins(26, 22, 26, 22)
-        card_layout.setSpacing(12)
-        layout.addWidget(card)
-
-        # Заголовок
-        title = QtWidgets.QLabel("🧠  Скачивание DeepSeek")
-        title.setStyleSheet(
-            f"color: {title_col}; font-size: 17px; font-weight: 700; "
-            f"background: transparent; border: none;"
-        )
-        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        card_layout.addWidget(title)
-
-        # Описание
-        desc = QtWidgets.QLabel(
-            "DeepSeek LLM 7B Chat  (~4.1 GB)\n"
-            "Пожалуйста подождите — скачивание может занять несколько минут."
-        )
-        desc.setStyleSheet(
-            f"color: {desc_col}; font-size: 12px; background: transparent; border: none;"
-        )
-        desc.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        desc.setWordWrap(True)
-        card_layout.addWidget(desc)
-
-        # Прогресс-бар
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(22)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                background: {pb_bg};
-                border: 1px solid {pb_border};
-                border-radius: 8px;
-                color: {pb_text};
-                font-size: 11px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 7px;
-            }}
-        """)
-        card_layout.addWidget(self.progress_bar)
-
-        # Статус
-        self.status_label = QtWidgets.QLabel("Инициализация...")
-        self.status_label.setStyleSheet(
-            f"color: {status_col}; font-size: 12px; background: transparent; border: none;"
-        )
-        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setWordWrap(True)
-        card_layout.addWidget(self.status_label)
-
-        # Лог терминала
-        self.log_box = QtWidgets.QPlainTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(68)
-        self.log_box.setStyleSheet(f"""
-            QPlainTextEdit {{
-                background: {log_bg};
-                color: {log_fg};
-                font-family: monospace;
-                font-size: 11px;
-                border: 1px solid {log_border};
-                border-radius: 8px;
-                padding: 4px;
-            }}
-        """)
-        card_layout.addWidget(self.log_box)
-
-        # Кнопка отмены
-        self.cancel_btn = QtWidgets.QPushButton("✕  Отмена")
-        self.cancel_btn.setFixedHeight(40)
-        self.cancel_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.cancel_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        self.cancel_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(180, 55, 55, 0.65);
-                color: #f0f0f8;
-                border: 1px solid rgba(200, 75, 75, 0.5);
-                border-radius: 11px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover { background: rgba(205, 65, 65, 0.82); }
-        """)
-        self.cancel_btn.clicked.connect(self._cancel_download)
-        card_layout.addWidget(self.cancel_btn)
-
-    def start_download(self):
-        self._cancelled = False
-        self._thread = threading.Thread(target=self._download_thread, daemon=True)
-        self._thread.start()
-
-    def _download_thread(self):
-        try:
-            import re as _re
-            cmd = DEEPSEEK_OLLAMA_PULL
-            self._log(f"$ {cmd}")
-
-            self._download_process = subprocess.Popen(
-                cmd.split(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-
-            for line in self._download_process.stdout:
-                if self._cancelled:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-
-                self._log(line)
-
-                pct_match = _re.search(r'(\d+)%', line)
-                if pct_match:
-                    pct = int(pct_match.group(1))
-                    size_match  = _re.search(r'([\d.]+)\s*GB/([\d.]+)\s*GB', line)
-                    speed_match = _re.search(r'([\d.]+)\s*(MB|KB)/s', line)
-                    eta_match   = _re.search(r'(\d+m\d+s|\d+s)', line)
-
-                    parts = [f"{pct}% скачано"]
-                    if size_match:
-                        parts.append(f"({size_match.group(1)} / {size_match.group(2)} GB)")
-                    if speed_match:
-                        parts.append(f"— {speed_match.group(1)} {speed_match.group(2)}/s")
-                    if eta_match:
-                        parts.append(f"| ~{eta_match.group(1)} осталось")
-
-                    QtCore.QMetaObject.invokeMethod(
-                        self, "_update_progress",
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(int, pct),
-                        QtCore.Q_ARG(str, " ".join(parts))
-                    )
-                elif "success" in line.lower() or "done" in line.lower():
-                    QtCore.QMetaObject.invokeMethod(
-                        self, "_update_progress",
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(int, 100),
-                        QtCore.Q_ARG(str, "✅ Готово!")
-                    )
-
-            ret = self._download_process.wait()
-            if self._cancelled:
-                self.download_finished.emit(False, "Отменено пользователем")
-            elif ret == 0:
-                self.download_finished.emit(True, "DeepSeek успешно скачан!")
-            else:
-                self.download_finished.emit(False, f"Ошибка скачивания (код {ret})")
-
-        except FileNotFoundError:
-            self.download_finished.emit(False, "Ollama не найдена. Убедитесь что Ollama установлена и запущена.")
-        except Exception as e:
-            self.download_finished.emit(False, f"Ошибка: {e}")
-
-    def _log(self, text: str):
-        QtCore.QMetaObject.invokeMethod(
-            self.log_box, "appendPlainText",
-            QtCore.Qt.ConnectionType.QueuedConnection,
-            QtCore.Q_ARG(str, text)
-        )
-
-    @QtCore.pyqtSlot(int, str)
-    def _update_progress(self, value: int, status: str):
-        self.progress_bar.setValue(value)
-        self.status_label.setText(status)
-
-    def _cancel_download(self):
-        self._cancelled = True
-        if self._download_process:
-            try:
-                self._download_process.terminate()
-            except Exception:
-                pass
-        self.reject()
-
-    @QtCore.pyqtSlot(bool, str)
-    def _on_download_finished(self, success: bool, message: str):
-        if success:
-            self.progress_bar.setValue(100)
-            self.status_label.setText("✅ Скачивание завершено!")
-            self.cancel_btn.setText("✓  Готово")
-            self.cancel_btn.setStyleSheet("""
-                QPushButton {
-                    background: rgba(55, 155, 75, 0.72);
-                    color: #f0f8f0;
-                    border: 1px solid rgba(75, 175, 95, 0.55);
-                    border-radius: 11px;
-                    font-size: 13px;
-                    font-weight: 600;
-                }
-                QPushButton:hover { background: rgba(65, 170, 85, 0.88); }
-            """)
-            try:
-                self.cancel_btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.cancel_btn.clicked.connect(self.accept)
-
-            QtWidgets.QMessageBox.information(
-                self,
-                "DeepSeek готов",
-                "✅ DeepSeek успешно скачан!\n\nТеперь вы можете выбрать его как активную модель.",
-                QtWidgets.QMessageBox.StandardButton.Ok
-            )
-            self.accept()
-        else:
-            self.status_label.setText(f"❌ {message}")
-            self.cancel_btn.setText("✕  Закрыть")
-            try:
-                self.cancel_btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.cancel_btn.clicked.connect(self.reject)
-
-
-class LlamaDownloadDialog(QtWidgets.QDialog):
-    """
-    Диалог скачивания LLaMA 3 при первом запуске.
-    Показывается если llama3 не установлена в Ollama.
-    """
-
-    download_finished = QtCore.pyqtSignal(bool, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Скачивание LLaMA 3")
-        self.setFixedSize(520, 330)
-        self.setWindowFlags(
-            QtCore.Qt.WindowType.Dialog |
-            QtCore.Qt.WindowType.FramelessWindowHint
-        )
-        if not IS_WINDOWS:
-            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-
-        self._download_process = None
-        self._cancelled = False
-
-        self._is_dark = True
-        if parent and hasattr(parent, 'current_theme'):
-            self._is_dark = parent.current_theme == "dark"
-
-        self._build_ui()
-        self.download_finished.connect(self._on_download_finished)
-
-    def _build_ui(self):
-        if self._is_dark:
-            card_bg     = "rgba(22, 22, 32, 0.98)"
-            card_border = "rgba(75, 75, 105, 0.75)"
-            title_col   = "#e4e4f4"
-            desc_col    = "#8888aa"
-            status_col  = "#8899dd"
-            log_bg      = "rgba(12, 12, 20, 0.9)"
-            log_fg      = "#55cc55"
-            log_border  = "rgba(55, 55, 80, 0.6)"
-            pb_bg       = "rgba(40, 40, 60, 0.85)"
-            pb_border   = "rgba(70, 70, 100, 0.55)"
-            pb_text     = "#d0d0f0"
-        else:
-            card_bg     = "rgba(248, 248, 255, 0.99)"
-            card_border = "rgba(200, 205, 235, 0.90)"
-            title_col   = "#1a1a40"
-            desc_col    = "#6677aa"
-            status_col  = "#5566bb"
-            log_bg      = "rgba(235, 238, 250, 0.95)"
-            log_fg      = "#227722"
-            log_border  = "rgba(190, 200, 230, 0.70)"
-            pb_bg       = "rgba(225, 228, 248, 0.90)"
-            pb_border   = "rgba(180, 190, 225, 0.70)"
-            pb_text     = "#2a2a60"
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-
-        card = QtWidgets.QFrame()
-        card.setObjectName("llamaCard")
-        card.setStyleSheet(f"""
-            QFrame#llamaCard {{
-                background: {card_bg};
-                border: 1px solid {card_border};
-                border-radius: 20px;
-            }}
-        """)
-        card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.setContentsMargins(26, 22, 26, 22)
-        card_layout.setSpacing(12)
-        layout.addWidget(card)
-
-        title = QtWidgets.QLabel("🦙  Скачивание LLaMA 3")
-        title.setStyleSheet(
-            f"color: {title_col}; font-size: 17px; font-weight: 700; "
-            f"background: transparent; border: none;"
-        )
-        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        card_layout.addWidget(title)
-
-        desc = QtWidgets.QLabel(
-            "LLaMA 3  (~4.7 GB)\n"
-            "Пожалуйста подождите — скачивание может занять несколько минут."
-        )
-        desc.setStyleSheet(
-            f"color: {desc_col}; font-size: 12px; background: transparent; border: none;"
-        )
-        desc.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        desc.setWordWrap(True)
-        card_layout.addWidget(desc)
-
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(22)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                background: {pb_bg};
-                border: 1px solid {pb_border};
-                border-radius: 8px;
-                color: {pb_text};
-                font-size: 11px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 7px;
-            }}
-        """)
-        card_layout.addWidget(self.progress_bar)
-
-        self.status_label = QtWidgets.QLabel("Инициализация...")
-        self.status_label.setStyleSheet(
-            f"color: {status_col}; font-size: 12px; background: transparent; border: none;"
-        )
-        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setWordWrap(True)
-        card_layout.addWidget(self.status_label)
-
-        self.log_box = QtWidgets.QPlainTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(68)
-        self.log_box.setStyleSheet(f"""
-            QPlainTextEdit {{
-                background: {log_bg};
-                color: {log_fg};
-                font-family: monospace;
-                font-size: 11px;
-                border: 1px solid {log_border};
-                border-radius: 8px;
-                padding: 4px;
-            }}
-        """)
-        card_layout.addWidget(self.log_box)
-
-        self.cancel_btn = QtWidgets.QPushButton("✕  Пропустить")
-        self.cancel_btn.setFixedHeight(40)
-        self.cancel_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.cancel_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        self.cancel_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(180, 55, 55, 0.65);
-                color: #f0f0f8;
-                border: 1px solid rgba(200, 75, 75, 0.5);
-                border-radius: 11px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover { background: rgba(205, 65, 65, 0.82); }
-        """)
-        self.cancel_btn.clicked.connect(self._cancel_download)
-        card_layout.addWidget(self.cancel_btn)
-
-    def start_download(self):
-        self._cancelled = False
-        self._thread = threading.Thread(target=self._download_thread, daemon=True)
-        self._thread.start()
-
-    def _download_thread(self):
-        try:
-            import re as _re
-            cmd = "ollama pull llama3"
-            self._log(f"$ {cmd}")
-
-            self._download_process = subprocess.Popen(
-                cmd.split(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-
-            for line in self._download_process.stdout:
-                if self._cancelled:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-
-                self._log(line)
-
-                pct_match = _re.search(r'(\d+)%', line)
-                if pct_match:
-                    pct = int(pct_match.group(1))
-                    size_match  = _re.search(r'([\d.]+)\s*GB/([\d.]+)\s*GB', line)
-                    speed_match = _re.search(r'([\d.]+)\s*(MB|KB)/s', line)
-                    eta_match   = _re.search(r'(\d+m\d+s|\d+s)', line)
-
-                    parts = [f"{pct}% скачано"]
-                    if size_match:
-                        parts.append(f"({size_match.group(1)} / {size_match.group(2)} GB)")
-                    if speed_match:
-                        parts.append(f"— {speed_match.group(1)} {speed_match.group(2)}/s")
-                    if eta_match:
-                        parts.append(f"| ~{eta_match.group(1)} осталось")
-
-                    QtCore.QMetaObject.invokeMethod(
-                        self, "_update_progress",
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(int, pct),
-                        QtCore.Q_ARG(str, " ".join(parts))
-                    )
-                elif "success" in line.lower() or "done" in line.lower():
-                    QtCore.QMetaObject.invokeMethod(
-                        self, "_update_progress",
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(int, 100),
-                        QtCore.Q_ARG(str, "✅ Готово!")
-                    )
-
-            ret = self._download_process.wait()
-            if self._cancelled:
-                self.download_finished.emit(False, "Пропущено пользователем")
-            elif ret == 0:
-                self.download_finished.emit(True, "LLaMA 3 успешно скачан!")
-            else:
-                self.download_finished.emit(False, f"Ошибка скачивания (код {ret})")
-
-        except FileNotFoundError:
-            self.download_finished.emit(False, "Ollama не найдена. Убедитесь что Ollama установлена и запущена.")
-        except Exception as e:
-            self.download_finished.emit(False, f"Ошибка: {e}")
-
-    def _log(self, text: str):
-        QtCore.QMetaObject.invokeMethod(
-            self.log_box, "appendPlainText",
-            QtCore.Qt.ConnectionType.QueuedConnection,
-            QtCore.Q_ARG(str, text)
-        )
-
-    @QtCore.pyqtSlot(int, str)
-    def _update_progress(self, value: int, status: str):
-        self.progress_bar.setValue(value)
-        self.status_label.setText(status)
-
-    def _cancel_download(self):
-        self._cancelled = True
-        if self._download_process:
-            try:
-                self._download_process.terminate()
-            except Exception:
-                pass
-        self.reject()
-
-    @QtCore.pyqtSlot(bool, str)
-    def _on_download_finished(self, success: bool, message: str):
-        if success:
-            self.progress_bar.setValue(100)
-            self.status_label.setText("✅ Скачивание завершено!")
-            self.cancel_btn.setText("✓  Готово")
-            self.cancel_btn.setStyleSheet("""
-                QPushButton {
-                    background: rgba(55, 155, 75, 0.72);
-                    color: #f0f8f0;
-                    border: 1px solid rgba(75, 175, 95, 0.55);
-                    border-radius: 11px;
-                    font-size: 13px;
-                    font-weight: 600;
-                }
-                QPushButton:hover { background: rgba(65, 170, 85, 0.88); }
-            """)
-            try:
-                self.cancel_btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.cancel_btn.clicked.connect(self.accept)
-
-            QtWidgets.QMessageBox.information(
-                self,
-                "LLaMA 3 готова",
-                "✅ LLaMA 3 успешно скачана!\n\nМожете начинать общение.",
-                QtWidgets.QMessageBox.StandardButton.Ok
-            )
-            self.accept()
-        else:
-            self.status_label.setText(f"❌ {message}")
-            self.cancel_btn.setText("✕  Закрыть")
-            try:
-                self.cancel_btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.cancel_btn.clicked.connect(self.reject)
-
-
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         global CURRENT_LANGUAGE
@@ -9688,36 +9164,27 @@ class MainWindow(QtWidgets.QMainWindow):
     def _check_first_launch(self):
         """
         Проверяет первый запуск: если LLaMA 3 не установлена — предлагает скачать.
-        Запускается один раз; флаг first_launch_done сохраняется в app_settings.json.
+        Флаг first_launch_done сохраняется ТОЛЬКО после того как пользователь
+        согласился. Если нажал «Нет» — при следующем запуске снова предложит.
         """
-        # Проверяем флаг — если уже запускались, ничего не делаем
         try:
-            if os.path.exists("app_settings.json"):
-                with open("app_settings.json", "r", encoding="utf-8") as f:
-                    s = json.load(f)
-                    if s.get("first_launch_done", False):
-                        print("[FIRST_LAUNCH] Уже запускались ранее, пропускаем.")
-                        return
-        except Exception:
-            pass
+            s = load_settings()
+            if s.get("first_launch_done", False):
+                # Флаг стоит, но модели нет — сбрасываем
+                if not check_model_in_ollama("llama3"):
+                    print("[FIRST_LAUNCH] Флаг стоит, но LLaMA 3 не установлена — предлагаем снова.")
+                    save_settings({"first_launch_done": False})
+                else:
+                    print("[FIRST_LAUNCH] ✅ LLaMA 3 установлена, всё хорошо.")
+                    return
+        except Exception as e:
+            log_error("FIRST_LAUNCH_READ", e)
 
         print("[FIRST_LAUNCH] Первый запуск — проверяем наличие LLaMA 3...")
 
-        # Сохраняем флаг сразу, чтобы при повторном запуске не спрашивать снова
-        try:
-            settings = {}
-            if os.path.exists("app_settings.json"):
-                with open("app_settings.json", "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-            settings["first_launch_done"] = True
-            with open("app_settings.json", "w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[FIRST_LAUNCH] Не удалось сохранить флаг: {e}")
-
-        # Если LLaMA 3 уже установлена — всё хорошо
         if check_model_in_ollama("llama3"):
             print("[FIRST_LAUNCH] ✅ LLaMA 3 уже установлена.")
+            self._save_first_launch_flag()
             return
 
         print("[FIRST_LAUNCH] ⚠️ LLaMA 3 не найдена — показываем диалог скачивания.")
@@ -9731,35 +9198,32 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             dl_dialog = LlamaDownloadDialog(self)
-            dl_dialog.start_download()
             dl_dialog.exec()
+            self._save_first_launch_flag()
+
+    def _save_first_launch_flag(self):
+        """Сохраняет флаг first_launch_done = True."""
+        save_settings({"first_launch_done": True})
+        print("[FIRST_LAUNCH] ✅ Флаг first_launch_done сохранён")
 
     def _load_model_preference(self):
         """Загружает сохранённую модель из файла настроек."""
         try:
-            if os.path.exists("app_settings.json"):
-                with open("app_settings.json", "r", encoding="utf-8") as f:
-                    s = json.load(f)
-                    saved_key = s.get("ai_model_key", "llama3")
-                    if saved_key in SUPPORTED_MODELS:
-                        llama_handler.CURRENT_AI_MODEL_KEY = saved_key
-                        llama_handler.ASSISTANT_NAME = get_current_display_name()
-                        print(f"[MODEL] Загружена модель из настроек: {llama_handler.ASSISTANT_NAME}")
+            s = load_settings()
+            saved_key = s.get("ai_model_key", "llama3")
+            if saved_key in SUPPORTED_MODELS:
+                llama_handler.CURRENT_AI_MODEL_KEY = saved_key
+                llama_handler.ASSISTANT_NAME = get_current_display_name()
+                print(f"[MODEL] Загружена модель из настроек: {llama_handler.ASSISTANT_NAME}")
+            else:
+                print(f"[MODEL] Неизвестная модель в настройках '{saved_key}' → llama3")
+                llama_handler.CURRENT_AI_MODEL_KEY = "llama3"
         except Exception as e:
-            print(f"[MODEL] Не удалось загрузить настройки модели: {e}")
+            log_error("LOAD_MODEL_PREF", e)
 
     def _save_model_preference(self):
         """Сохраняет выбранную модель в файл настроек."""
-        try:
-            settings = {}
-            if os.path.exists("app_settings.json"):
-                with open("app_settings.json", "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-            settings["ai_model_key"] = llama_handler.CURRENT_AI_MODEL_KEY
-            with open("app_settings.json", "w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[MODEL] Не удалось сохранить настройки модели: {e}")
+        save_settings({"ai_model_key": llama_handler.CURRENT_AI_MODEL_KEY})
 
     def change_ai_model(self, model_key: str):
         """
@@ -10130,12 +9594,88 @@ class MainWindow(QtWidgets.QMainWindow):
         llama_installed    = check_model_in_ollama("llama3")
         deepseek_installed = check_model_in_ollama(DEEPSEEK_MODEL_NAME)
 
+        # ── Кнопка удаления модели ───────────────────────────────────
+        def _make_delete_btn(model_key, model_name, ollama_name, is_installed):
+            """Красная кнопка 🗑 — видна только если модель установлена."""
+            if not is_installed:
+                # Невидимый спейсер нужного размера
+                ph = QtWidgets.QWidget()
+                ph.setFixedSize(36, 74)
+                ph.setStyleSheet("background: transparent;")
+                return ph
+
+            btn = QtWidgets.QPushButton("🗑")
+            btn.setFixedSize(36, 36)
+            btn.setToolTip(f"Удалить {model_name} с диска")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            if is_dark:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(200,60,60,0.12);
+                        border: 1px solid rgba(200,70,70,0.30);
+                        border-radius: 9px; font-size: 15px;
+                        color: rgba(220,90,90,0.70);
+                    }
+                    QPushButton:hover {
+                        background: rgba(200,55,55,0.28);
+                        border: 1px solid rgba(220,80,80,0.65);
+                        color: #ee5555;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(200,60,60,0.07);
+                        border: 1px solid rgba(200,70,70,0.25);
+                        border-radius: 9px; font-size: 15px;
+                        color: rgba(190,60,60,0.65);
+                    }
+                    QPushButton:hover {
+                        background: rgba(200,55,55,0.18);
+                        border: 1px solid rgba(200,60,60,0.55);
+                        color: #cc2222;
+                    }
+                """)
+
+            def _on_delete_clicked():
+                reply = QtWidgets.QMessageBox.question(
+                    dialog,
+                    f"Удалить {model_name}?",
+                    f"⚠️ Вы уверены, что хотите удалить {model_name} с диска?\n\n"
+                    f"Это освободит ~{('4.7' if model_key == 'llama3' else '4.1')} GB, "
+                    f"но потом придётся скачивать заново.",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No
+                )
+                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                    dialog.accept()
+                    self._delete_model(model_key, model_name, ollama_name)
+
+            btn.clicked.connect(_on_delete_clicked)
+
+            # Обёртка для выравнивания по центру строки 74px
+            wrap = QtWidgets.QWidget()
+            wrap.setFixedSize(40, 74)
+            wrap.setStyleSheet("background: transparent;")
+            wl = QtWidgets.QVBoxLayout(wrap)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignHCenter)
+            wl.addWidget(btn)
+            return wrap
+
+        # ── Карточки моделей с кнопками удаления ───────────────────
         llama_btn = make_model_card(
             "🦙", "LLaMA 3",
             "Универсальная · быстрая · поддержка поиска",
             "8B", llama_handler.CURRENT_AI_MODEL_KEY == "llama3", llama_installed
         )
-        cl.addWidget(llama_btn)
+        llama_row = QtWidgets.QHBoxLayout()
+        llama_row.setContentsMargins(0, 0, 0, 0)
+        llama_row.setSpacing(6)
+        llama_row.addWidget(llama_btn)
+        llama_row.addWidget(_make_delete_btn("llama3", "LLaMA 3", "llama3", llama_installed))
+        cl.addLayout(llama_row)
         cl.addSpacing(10)
 
         deepseek_btn = make_model_card(
@@ -10143,7 +9683,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "Аналитика · математика · код",
             "7B", llama_handler.CURRENT_AI_MODEL_KEY == "deepseek", deepseek_installed
         )
-        cl.addWidget(deepseek_btn)
+        deepseek_row = QtWidgets.QHBoxLayout()
+        deepseek_row.setContentsMargins(0, 0, 0, 0)
+        deepseek_row.setSpacing(6)
+        deepseek_row.addWidget(deepseek_btn)
+        deepseek_row.addWidget(_make_delete_btn("deepseek", "DeepSeek", DEEPSEEK_MODEL_NAME, deepseek_installed))
+        cl.addLayout(deepseek_row)
 
         cl.addSpacing(16)
 
@@ -10276,7 +9821,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # ── Выбор LLaMA ─────────────────────────────────────────────
         def _select_llama():
             def _after():
-                if llama_handler.CURRENT_AI_MODEL_KEY != "llama3":
+                if not llama_installed:
+                    # LLaMA не скачана — предлагаем скачать
+                    reply = QtWidgets.QMessageBox.question(
+                        self,
+                        "LLaMA 3 не установлена",
+                        "⚠️ LLaMA 3 ещё не скачана (~4.7 GB).\n\nХотите скачать её сейчас?\nМожно выбрать диск для сохранения.",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        dl_dialog = LlamaDownloadDialog(self)
+                        dl_dialog.download_finished.connect(
+                            lambda ok, msg: (
+                                self.change_ai_model("llama3"),
+                                self._save_first_launch_flag()
+                            ) if ok else None
+                        )
+                        dl_dialog.exec()
+                elif llama_handler.CURRENT_AI_MODEL_KEY != "llama3":
                     self.change_ai_model("llama3")
             _fade_and_close(_after)
 
@@ -10310,7 +9873,8 @@ class MainWindow(QtWidgets.QMainWindow):
         dl_dialog.download_finished.connect(
             lambda success, msg: self._on_deepseek_downloaded(success, msg)
         )
-        dl_dialog.start_download()
+        # НЕ вызываем start_download() автоматически —
+        # пользователь сам выбирает папку/диск и нажимает «Начать»
         dl_dialog.exec()
 
     def _on_deepseek_downloaded(self, success: bool, message: str):
@@ -10319,6 +9883,128 @@ class MainWindow(QtWidgets.QMainWindow):
             self.change_ai_model("deepseek")
         else:
             print(f"[MODEL] Скачивание DeepSeek не удалось: {message}")
+
+    # ─────────────────────────────────────────────────────────────────
+    def _delete_model(self, model_key: str, model_name: str, ollama_name: str):
+        """
+        Удаляет модель ФИЗИЧЕСКИ С ДИСКА:
+          1. Находит реальную папку с файлами Ollama
+          2. Запускает «ollama rm» (удаляет из реестра)
+          3. Дополнительно вручную удаляет manifest и blob-файлы
+        """
+        print(f"[DELETE] Удаляем {model_name} (ollama: {ollama_name}) …")
+
+        prog = QtWidgets.QProgressDialog(
+            f"Удаление {model_name}…", None, 0, 0, self
+        )
+        prog.setWindowTitle("Удаление модели")
+        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        if IS_WINDOWS:
+            prog.setWindowFlags(
+                QtCore.Qt.WindowType.Dialog |
+                QtCore.Qt.WindowType.WindowTitleHint
+            )
+        prog.show()
+        QtWidgets.QApplication.processEvents()
+
+        err = ""
+        rm_ok = False
+
+        # ── 1. Запускаем ollama rm ──────────────────────────────────
+        try:
+            kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if IS_WINDOWS:
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            proc = subprocess.run(
+                ["ollama", "rm", ollama_name], timeout=60, **kwargs
+            )
+            rm_ok = (proc.returncode == 0)
+            if not rm_ok:
+                err = (proc.stdout or "").strip() or f"Код {proc.returncode}"
+                print(f"[DELETE] ollama rm вернул ошибку: {err}")
+        except FileNotFoundError:
+            err = "Ollama не найдена."
+        except subprocess.TimeoutExpired:
+            err = "Тайм-аут команды ollama rm"
+        except Exception as e:
+            err = str(e)
+
+        # ── 2. Физически удаляем файлы с диска ─────────────────────
+        #    (делаем даже если ollama rm упал — вдруг файлы всё равно остались)
+        models_dir = get_ollama_models_dir()
+        bytes_freed, deleted = delete_model_files_from_disk(ollama_name, models_dir)
+        print(f"[DELETE] Удалено файлов: {len(deleted)}, "
+              f"освобождено: {bytes_freed / 1024**3:.2f} GB")
+        print(f"[DELETE] Папка моделей: {models_dir}")
+
+        prog.close()
+
+        # ── 3. Итог ─────────────────────────────────────────────────
+        fully_ok = rm_ok or (len(deleted) > 0)
+        if not fully_ok:
+            QtWidgets.QMessageBox.critical(
+                self, "Ошибка удаления",
+                f"❌ Не удалось удалить {model_name}.\n\n{err}\n\n"
+                f"Проверьте что Ollama запущена и попробуйте снова.",
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+            return
+
+        was_active = (llama_handler.CURRENT_AI_MODEL_KEY == model_key)
+
+        ALL_MODELS = {
+            "llama3":   ("llama3",           "LLaMA 3"),
+            "deepseek": (DEEPSEEK_MODEL_NAME, "DeepSeek"),
+        }
+        remaining = {
+            k: dname
+            for k, (oname, dname) in ALL_MODELS.items()
+            if k != model_key and check_model_in_ollama(oname)
+        }
+
+        freed_str = f"\n\nОсвобождено: {bytes_freed / 1024**3:.1f} GB" if bytes_freed > 0 else ""
+
+        if not remaining:
+            QtWidgets.QMessageBox.warning(
+                self, "⚠️ Модели не установлены",
+                f"✅ {model_name} удалена с диска.{freed_str}\n\n"
+                "⚠️ У вас не установлено ни одной модели ИИ.\n\n"
+                "Без модели пользоваться ассистентом невозможно.\n"
+                "Откройте «Выбор модели» и скачайте любую модель.",
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+            save_settings({"first_launch_done": False})
+        else:
+            other_key  = list(remaining.keys())[0]
+            other_name = remaining[other_key]
+            msg = f"✅ {model_name} успешно удалена с диска.{freed_str}"
+            if was_active:
+                msg += f"\n\nПрограмма переключена на {other_name}."
+            QtWidgets.QMessageBox.information(
+                self, "Модель удалена", msg,
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+            if was_active:
+                self.change_ai_model(other_key)
+
+        self._refresh_model_ui()
+
+    def _refresh_model_ui(self):
+        """Обновляет UI-элементы, зависящие от текущей активной модели."""
+        try:
+            # Пробуем обновить заголовок/лейбл если они есть
+            for attr in ("model_label", "ai_name_label", "header_model_lbl",
+                         "current_model_label", "model_name_lbl"):
+                w = getattr(self, attr, None)
+                if w and hasattr(w, "setText"):
+                    try:
+                        w.setText(get_current_display_name())
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[MODEL_UI] _refresh_model_ui: {e}")
 
     def animate_mode_change(self, new_mode: str):
         """Плавная смена режима: fade-out → смена текста → fade-in."""
@@ -10648,7 +10334,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     menu_width,
                     new_height
                 )
-            except:
+            except RuntimeError:
                 pass
         
         scale_animator.valueChanged.connect(update_menu_scale)
@@ -11109,7 +10795,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     menu_width,
                     new_height
                 )
-            except:
+            except RuntimeError:
                 pass
         
         scale_anim.valueChanged.connect(update_menu_scale)
@@ -11388,7 +11074,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Отключаем предыдущие коллбэки
             try:
                 self._overlay_anim.finished.disconnect()
-            except:
+            except (RuntimeError, TypeError):
                 pass
             
             self._overlay_anim.finished.connect(cleanup_overlay)
@@ -11449,321 +11135,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
         print("[BLUR] Кнопка + восстановлена")
     
-    def attach_file(self):
-        """Выбрать и прикрепить файл (любой тип, включая изображения)"""
-        # Проверяем лимит файлов
-        if len(self.attached_files) >= 5:
-            print("[ATTACH] Достигнут лимит файлов (5)")
-            return
-        
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Выбрать файл",
-            "",
-            "Все файлы (*.*);;Изображения (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;Текстовые файлы (*.txt *.md *.py *.js *.json)"
-        )
-        
-        # Возвращаем фокус в приложение
-        self.activateWindow()
-        self.raise_()
-        
-        if file_path:
-            # Добавляем файл в список
-            # Копируем файл в директорию чата
-            print(f"[ATTACH] ════════════════════════════════════════")
-            print(f"[ATTACH] Прикрепление файла через диалог")
-            print(f"[ATTACH] Оригинальный путь: {file_path}")
-            
-            copied_path = self.copy_file_to_chat_dir(file_path, self.current_chat_id)
-            
-            if copied_path and os.path.exists(copied_path):
-                # Проверяем что файл существует
-                self.attached_files.append(copied_path)
-                print(f"[ATTACH] ✅ Файл добавлен в attached_files:")
-                print(f"[ATTACH]    Путь: {copied_path}")
-                print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
-            else:
-                # Если файл не найден
-                print(f"[ATTACH] ✗ ОШИБКА: Файл не найден!")
-                if copied_path:
-                    print(f"[ATTACH]    Путь: {copied_path}")
-                    print(f"[ATTACH]    Существует: {os.path.exists(copied_path)}")
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Ошибка прикрепления",
-                    f"Не удалось прикрепить файл. Файл не найден или недоступен.",
-                    QtWidgets.QMessageBox.StandardButton.Ok
-                )
-            
-            print(f"[ATTACH] Всего файлов в attached_files: {len(self.attached_files)}")
-            for idx, f in enumerate(self.attached_files, 1):
-                print(f"[ATTACH]    {idx}. {f}")
-            print(f"[ATTACH] ════════════════════════════════════════")
-            
-            self.update_file_chips()
-            
-        # Возвращаем фокус на поле ввода
-        self.input_field.setFocus()
-    
-    def clear_attached_file(self, file_path=None):
-        """Очистить прикреплённый файл и обновить чипы
-        
-        Args:
-            file_path: Путь к файлу для удаления. Если None, удаляются все файлы.
-        """
-        if file_path is None:
-            # Удаляем все файлы
-            self.attached_files = []
-        else:
-            # Удаляем конкретный файл
-            if file_path in self.attached_files:
-                self.attached_files.remove(file_path)
-        
-        # Обновляем отображение
-        self.update_file_chips()
-        
-        # Возвращаем фокус на поле ввода
-        self.input_field.setFocus()
-    
 
     # ═══════════════════════════════════════════════════════════════
     # МЕТОДЫ УПРАВЛЕНИЯ ФАЙЛАМИ ЧАТОВ
     # ═══════════════════════════════════════════════════════════════
-    
-    def copy_file_to_chat_dir(self, source_path: str, chat_id: int) -> str:
-        """ОТКЛЮЧЕНО: Возвращает исходный путь БЕЗ копирования"""
-        print(f"[CHAT_FILES] ════════════════════════════════════════")
-        print(f"[CHAT_FILES] КОПИРОВАНИЕ ОТКЛЮЧЕНО - используем исходный путь")
-        print(f"[CHAT_FILES] Файл: {source_path}")
-        
-        try:
-            # Нормализуем путь
-            source_path = os.path.normpath(os.path.abspath(source_path))
-            
-            # Проверяем что файл существует
-            if not os.path.exists(source_path):
-                print(f"[CHAT_FILES] ✗ ОШИБКА: Файл не существует!")
-                print(f"[CHAT_FILES] ════════════════════════════════════════")
-                return None
-            
-            # Возвращаем исходный путь БЕЗ копирования
-            print(f"[CHAT_FILES] ✅ Используем исходный путь: {source_path}")
-            print(f"[CHAT_FILES] ════════════════════════════════════════")
-            return source_path
-            
-        except Exception as e:
-            print(f"[CHAT_FILES] ✗ ОШИБКА: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"[CHAT_FILES] ════════════════════════════════════════")
-            return None
-    
-    def load_chat_files(self, chat_id: int):
-        """Загружает файлы для указанного чата (УЛУЧШЕНО: детальное логирование)"""
-        print(f"[LOAD_CHAT_FILES] ════════════════════════════════════════")
-        print(f"[LOAD_CHAT_FILES] Загрузка файлов для чата {chat_id}")
-        
-        try:
-            chat_files_dir = os.path.normpath(os.path.abspath(self.chat_files_dir))
-            chat_dir = os.path.join(chat_files_dir, f"chat_{chat_id}")
-            chat_dir = os.path.normpath(os.path.abspath(chat_dir))
-            
-            print(f"[LOAD_CHAT_FILES] Директория чата: {chat_dir}")
-            print(f"[LOAD_CHAT_FILES] Существует: {os.path.exists(chat_dir)}")
-            
-            if os.path.exists(chat_dir):
-                files = []
-                for file_name in os.listdir(chat_dir):
-                    file_path = os.path.join(chat_dir, file_name)
-                    file_path = os.path.normpath(os.path.abspath(file_path))
-                    
-                    if os.path.isfile(file_path):
-                        files.append(file_path)
-                        print(f"[LOAD_CHAT_FILES]   Найден файл: {file_path}")
-                        print(f"[LOAD_CHAT_FILES]   Существует: {os.path.exists(file_path)}")
-                
-                print(f"[LOAD_CHAT_FILES] ✅ Загружено {len(files)} файлов для чата {chat_id}")
-                print(f"[LOAD_CHAT_FILES] ════════════════════════════════════════")
-                return files
-            else:
-                print(f"[LOAD_CHAT_FILES] ℹ️ Директория чата {chat_id} не существует")
-                print(f"[LOAD_CHAT_FILES] ════════════════════════════════════════")
-                return []
-        except Exception as e:
-            print(f"[LOAD_CHAT_FILES] ✗ Ошибка загрузки файлов: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"[LOAD_CHAT_FILES] ════════════════════════════════════════")
-            return []
-    
-    def clear_chat_files(self, chat_id: int):
-        """Удаляет все файлы чата"""
-        try:
-            chat_dir = os.path.join(self.chat_files_dir, f"chat_{chat_id}")
-            if os.path.exists(chat_dir):
-                import shutil
-                shutil.rmtree(chat_dir)
-                print(f"[CHAT_FILES] ✓ Удалена директория чата {chat_id}")
-                return True
-            else:
-                print(f"[CHAT_FILES] ℹ️ Директория чата {chat_id} не существует")
-                return False
-        except Exception as e:
-            print(f"[CHAT_FILES] ✗ Ошибка удаления файлов: {e}")
-            return False
-    
-    def clear_all_chat_files(self):
-        """Удаляет файлы всех чатов"""
-        try:
-            if os.path.exists(self.chat_files_dir):
-                import shutil
-                for item in os.listdir(self.chat_files_dir):
-                    item_path = os.path.join(self.chat_files_dir, item)
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                print(f"[CHAT_FILES] ✓ Удалены файлы всех чатов")
-                return True
-        except Exception as e:
-            print(f"[CHAT_FILES] ✗ Ошибка удаления всех файлов: {e}")
-            return False
-
-    def update_file_chips(self):
-        """Обновить отображение файловых чипов"""
-        if not hasattr(self, 'file_chip_container'):
-            return
-        
-        # Очищаем контейнер
-        layout = self.file_chip_container.layout()
-        if layout:
-            while layout.count():
-                item = layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            # Удаляем старый layout
-            QtWidgets.QWidget().setLayout(layout)
-        
-        # Если файлов нет - скрываем контейнер
-        if not self.attached_files:
-            self.file_chip_container.hide()
-            self.input_field.setPlaceholderText("Введите сообщение...")
-            return
-        
-        # Показываем контейнер
-        self.file_chip_container.show()
-        self.input_field.setPlaceholderText("Введите вопрос...")
-        
-        # Получаем текущую тему
-        is_dark = getattr(self, 'current_theme', 'light') == 'dark'
-        
-        # Создаем новый grid layout для wrapping
-        grid_layout = QtWidgets.QGridLayout(self.file_chip_container)
-        grid_layout.setContentsMargins(25, 4, 25, 4)
-        grid_layout.setSpacing(8)
-        
-        # Размещаем чипы в сетке (максимум 3 в строке)
-        MAX_CHIPS_PER_ROW = 3
-        row = 0
-        col = 0
-        
-        # Создаем чип для каждого файла
-        for file_path in self.attached_files:
-            file_name = os.path.basename(file_path)
-            file_ext = os.path.splitext(file_path)[1].lower()
-            
-            # Выбираем эмодзи в зависимости от типа файла
-            if is_image_file(file_path):
-                emoji = "🖼️"
-            else:
-                emoji = "📎"
-            
-            # Создаем чип
-            chip = QtWidgets.QWidget()
-            chip.setObjectName("fileChip")
-            
-            # Стили для чипа в зависимости от темы
-            if is_dark:
-                chip.setStyleSheet("""
-                    #fileChip {
-                        background: rgba(102, 126, 234, 0.20);
-                        border: 1px solid rgba(102, 126, 234, 0.40);
-                        border-radius: 14px;
-                        padding: 2px 6px;
-                    }
-                """)
-            else:
-                chip.setStyleSheet("""
-                    #fileChip {
-                        background: rgba(102, 126, 234, 0.15);
-                        border: 1px solid rgba(102, 126, 234, 0.35);
-                        border-radius: 14px;
-                        padding: 2px 6px;
-                    }
-                """)
-            
-            chip_layout = QtWidgets.QHBoxLayout(chip)
-            chip_layout.setContentsMargins(10, 4, 6, 4)
-            chip_layout.setSpacing(6)
-            
-            # Лейбл с названием файла
-            display_name = file_name if len(file_name) <= 20 else file_name[:17] + "…"
-            label = QtWidgets.QLabel(f"{emoji} {display_name}")
-            label.setFont(QtGui.QFont("Inter", 11))
-            
-            if is_dark:
-                label.setStyleSheet("color: #8fa3f5; background: transparent; border: none;")
-            else:
-                label.setStyleSheet("color: #667eea; background: transparent; border: none;")
-            
-            chip_layout.addWidget(label)
-            
-            # Кнопка удаления
-            remove_btn = QtWidgets.QPushButton("✕")
-            remove_btn.setFixedSize(22, 22)
-            remove_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-            remove_btn.setFont(QtGui.QFont("Inter", 10, QtGui.QFont.Weight.Bold))
-            
-            if is_dark:
-                remove_btn.setStyleSheet("""
-                    QPushButton {
-                        background: rgba(102, 126, 234, 0.25);
-                        color: #8fa3f5;
-                        border: none;
-                        border-radius: 11px;
-                    }
-                    QPushButton:hover {
-                        background: rgba(239, 68, 68, 0.30);
-                        color: #f87171;
-                    }
-                """)
-            else:
-                remove_btn.setStyleSheet("""
-                    QPushButton {
-                        background: rgba(102, 126, 234, 0.2);
-                        color: #667eea;
-                        border: none;
-                        border-radius: 11px;
-                    }
-                    QPushButton:hover {
-                        background: rgba(239, 68, 68, 0.25);
-                        color: #ef4444;
-                    }
-                """)
-            
-            # Замыкание для передачи пути файла
-            remove_btn.clicked.connect(lambda checked, fp=file_path: self.clear_attached_file(fp))
-            chip_layout.addWidget(remove_btn)
-            
-            # Добавляем чип в grid layout
-            grid_layout.addWidget(chip, row, col)
-            
-            # Переходим к следующей позиции
-            col += 1
-            if col >= MAX_CHIPS_PER_ROW:
-                col = 0
-                row += 1
-        
-        # Добавляем stretch в конце последнего ряда
-        grid_layout.setColumnStretch(MAX_CHIPS_PER_ROW, 1)
     
     def start_status_animation(self):
         """Запуск анимации точек в статусе"""
@@ -11878,7 +11253,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Отключаем старый обработчик если был
         try:
             self._scroll_animation.finished.disconnect()
-        except:
+        except (RuntimeError, TypeError):
             pass
         
         self._scroll_animation.finished.connect(on_scroll_finished)
@@ -11976,7 +11351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'menu_btn'):
             try:
                 self.menu_btn.clicked.disconnect()
-            except:
+            except (RuntimeError, TypeError):
                 pass
             self.menu_btn.clicked.connect(self.close_settings)
         
@@ -12059,7 +11434,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     self.menu_btn.clicked.disconnect()
                     print("[SETTINGS] Отключил старый обработчик menu_btn")
-                except:
+                except RuntimeError:
                     pass
                 self.menu_btn.clicked.connect(self.close_settings)
                 print("[SETTINGS] Подключил close_settings к menu_btn")
@@ -12088,7 +11463,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'animation') and self.animation:
                 try:
                     self.animation.finished.disconnect()
-                except:
+                except (RuntimeError, TypeError):
                     pass
                 self.animation.finished.connect(on_sidebar_closed)
                 print("[SETTINGS] Callback подключен к анимации sidebar")
@@ -12120,7 +11495,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'menu_btn'):
                 try:
                     self.menu_btn.clicked.disconnect()
-                except:
+                except (RuntimeError, TypeError):
                     pass
                 self.menu_btn.clicked.connect(self.close_settings)
             
@@ -12141,7 +11516,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'animation') and self.animation:
                 try:
                     self.animation.finished.disconnect()
-                except:
+                except (RuntimeError, TypeError):
                     pass
                 self.animation.finished.connect(on_sidebar_closed)
             
@@ -12167,7 +11542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'menu_btn'):
             try:
                 self.menu_btn.clicked.disconnect()
-            except:
+            except (RuntimeError, TypeError):
                 pass
             self.menu_btn.clicked.connect(self.toggle_sidebar)
         
@@ -12252,7 +11627,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if hasattr(self, '_stack_overlay') and self._stack_overlay:
                     self._stack_overlay.deleteLater()
                     self._stack_overlay = None
-            except:
+            except RuntimeError:
                 pass
 
         # Снимок текущего состояния (страницы from_index)
@@ -12935,7 +12310,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             try:
                 self._new_chat_btn_press_anim.finished.disconnect()
-            except:
+            except (RuntimeError, TypeError):
                 pass
             self._new_chat_btn_press_anim.finished.connect(on_new_chat_press_finished)
             self._new_chat_btn_press_anim.start()
@@ -14523,7 +13898,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.messages_layout.removeWidget(widget)
                 widget.deleteLater()
                 # Layout обновится автоматически
-            except:
+            except RuntimeError:
                 pass
     
     
@@ -14894,170 +14269,115 @@ class MainWindow(QtWidgets.QMainWindow):
     # DRAG-AND-DROP: Обработка перетаскивания файлов
     # ═══════════════════════════════════════════════════════════════
     
-    def dragEnterEvent(self, event):
-        """Обработка входа файла в окно (при перетаскивании)"""
-        if event.mimeData().hasUrls():
-            # Проверяем что это файлы
-            urls = event.mimeData().urls()
-            has_files = any(url.isLocalFile() for url in urls)
-            
-            if has_files:
-                event.acceptProposedAction()
-                print(f"[DRAG-DROP] ▶ Файлы вошли в зону: {len(urls)} шт.")
-                
-                # Визуальная подсказка - меняем курсор или подсвечиваем
-                self.setStyleSheet(self.styleSheet() + """
-                    QMainWindow {
-                        border: 3px dashed #667eea;
-                    }
-                """)
-            else:
-                event.ignore()
-        else:
-            event.ignore()
-    
-    def dragMoveEvent(self, event):
-        """Обработка движения файла над окном"""
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-    
-    def dragLeaveEvent(self, event):
-        """Обработка выхода файла из окна"""
-        print("[DRAG-DROP] ✗ Файлы покинули зону")
-        # Убираем визуальную подсказку
-        self.apply_styles(self.current_theme, self.current_liquid_glass)
-    
-    def dropEvent(self, event):
-        """Обработка сброса файлов в окно"""
-        print("[DRAG-DROP] ✓ Файлы сброшены!")
-        
-        # Убираем визуальную подсказку
-        self.apply_styles(self.current_theme, self.current_liquid_glass)
-        
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            dropped_files = []
-            
-            for url in urls:
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    dropped_files.append(file_path)
-                    print(f"[DRAG-DROP] Файл: {file_path}")
-            
-            if dropped_files:
-                # Добавляем файлы в список прикреплённых
-                for file_path in dropped_files:
-                    # Проверяем лимит (максимум 5 файлов)
-                    if len(self.attached_files) >= 5:
-                        print(f"[DRAG-DROP] ⚠️ Достигнут лимит (5 файлов)")
-                        # Показываем уведомление
-                        QtWidgets.QMessageBox.warning(
-                            self,
-                            "Лимит файлов",
-                            "Можно прикрепить максимум 5 файлов одновременно.",
-                            QtWidgets.QMessageBox.StandardButton.Ok
-                        )
-                        break
-                    
-                    # Проверяем что файл существует
-                    if os.path.exists(file_path):
-                        print(f"[DRAG-DROP] ════════════════════════════════════════")
-                        print(f"[DRAG-DROP] Обработка файла: {file_path}")
-                        
-                        # Получаем путь к файлу (без копирования)
-                        copied_path = self.copy_file_to_chat_dir(file_path, self.current_chat_id)
-                        
-                        if copied_path and os.path.exists(copied_path):
-                            if copied_path not in self.attached_files:
-                                self.attached_files.append(copied_path)
-                                print(f"[DRAG-DROP] ✅ Файл добавлен в attached_files:")
-                                print(f"[DRAG-DROP]    Путь: {copied_path}")
-                                print(f"[DRAG-DROP]    Существует: {os.path.exists(copied_path)}")
-                            else:
-                                print(f"[DRAG-DROP] ⚠️ Файл уже прикреплён: {os.path.basename(file_path)}")
-                        else:
-                            # Если файл не найден
-                            print(f"[DRAG-DROP] ✗ ОШИБКА: Файл не найден!")
-                            if copied_path:
-                                print(f"[DRAG-DROP]    Путь: {copied_path}")
-                                print(f"[DRAG-DROP]    Существует: {os.path.exists(copied_path)}")
-                            QtWidgets.QMessageBox.warning(
-                                self,
-                                "Ошибка прикрепления",
-                                f"Не удалось прикрепить файл {os.path.basename(file_path)}.\n\nФайл не найден или недоступен.",
-                                QtWidgets.QMessageBox.StandardButton.Ok
-                            )
-                        
-                        print(f"[DRAG-DROP] ════════════════════════════════════════")
-                    else:
-                        print(f"[DRAG-DROP] ✗ Файл не найден: {file_path}")
-                
-                # Обновляем UI - показываем прикреплённые файлы
-                if self.attached_files:
-                    self.update_file_chips()
-                    print(f"[DRAG-DROP] ✅ Прикреплено файлов: {len(self.attached_files)}")
-                
-                event.acceptProposedAction()
-            else:
-                event.ignore()
-        else:
-            event.ignore()
 
 def main():
-    """Главная функция запуска приложения с обработкой ошибок"""
+    """Главная функция запуска с полной диагностикой и самовосстановлением."""
+
+    # ── Шаг 1: базовая инициализация Qt (нужна раньше всего для диалогов) ──
+    try:
+        app = QtWidgets.QApplication(sys.argv)
+    except Exception as e:
+        print(f"[MAIN] ❌ Не удалось создать QApplication: {e}")
+        sys.exit(1)
+
+    if IS_WINDOWS:
+        app.setStyle("Fusion")
+
+    # ── Шаг 2: запуск всех проверок ───────────────────────────────────────
+    print("[MAIN] Запуск диагностики...")
+    report = startup_checks(
+        check_ollama   = True,
+        check_dbs      = ["chats.db", "chat_memory.db", "deepseek_memory.db"],
+        check_packages = True,
+        check_space    = True,
+        check_files    = True,
+        check_settings = True,
+        auto_fix       = True,
+        qt_app         = app,
+    )
+
+    # ── Шаг 3: фатальные ошибки — показываем и выходим ────────────────────
+    if report["fatal"]:
+        error_msg = build_fatal_error_message(report)
+        QtWidgets.QMessageBox.critical(
+            None,
+            "❌ Ошибка запуска",
+            error_msg,
+            QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        sys.exit(1)
+
+    # ── Шаг 4: предупреждения — показываем и продолжаем ───────────────────
+    if report["warnings"]:
+        ollama_warns = [w for w in report["warnings"] if "ollama" in w.lower()]
+        other_warns  = [w for w in report["warnings"] if "ollama" not in w.lower()]
+        if other_warns:
+            detail = "\n".join(other_warns)
+            QtWidgets.QMessageBox.warning(
+                None,
+                "⚠️ Предупреждения при запуске",
+                f"Приложение запущено с предупреждениями:\n\n{detail}\n\n"
+                "Программа продолжит работу, но некоторые функции могут быть ограничены.",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+
+    # ── Шаг 5: инициализация БД приложения ────────────────────────────────
     try:
         print("[MAIN] Инициализация базы данных...")
         init_db()
-        
-        # КРИТИЧНО: Инициализируем ChatManager для запуска миграции БД
-        print("[MAIN] Запуск миграции БД...")
+
+        print("[MAIN] Запуск миграции ChatManager...")
         from chat_manager import ChatManager
         chat_mgr = ChatManager()
         print("[MAIN] ✓ База данных готова")
-        
-        print("[MAIN] Создание приложения Qt...")
-        app = QtWidgets.QApplication(sys.argv)
-        
-        # Для Windows - устанавливаем явно стиль
-        if IS_WINDOWS:
-            print("[MAIN] Применение стиля для Windows...")
-            app.setStyle('Fusion')
-        
+    except Exception as e:
+        log_error("MAIN_DB_INIT", e)
+        QtWidgets.QMessageBox.critical(
+            None,
+            "❌ Ошибка БД",
+            f"Не удалось инициализировать базу данных:\n{e}\n\n"
+            "Попробуйте удалить файлы .db и перезапустить программу.",
+            QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        sys.exit(1)
+
+    # ── Шаг 6: создаём главное окно ───────────────────────────────────────
+    try:
         print("[MAIN] Создание иконки приложения...")
         app_icon = create_app_icon()
         app.setWindowIcon(QtGui.QIcon(app_icon))
-        
+
         print("[MAIN] Создание главного окна...")
         window = MainWindow()
-        
-        print("[MAIN] Отображение окна...")
         window.show()
 
         # Проверка первого запуска — после того как окно появилось
         QtCore.QTimer.singleShot(600, window._check_first_launch)
-        
-        print("[MAIN] Запуск главного цикла...")
+
+        # Если Ollama была недоступна — повторно проверяем через 5 сек
+        # (она могла запуститься пока открывалось окно)
+        ollama_result = report["checks"].get("ollama", {})
+        if not ollama_result.get("reachable", True):
+            def _recheck_ollama():
+                r = check_ollama_health(auto_fix=False)
+                if r["reachable"]:
+                    print("[MAIN] ✅ Ollama появилась после запуска окна")
+                else:
+                    print("[MAIN] ⚠️ Ollama всё ещё недоступна")
+            QtCore.QTimer.singleShot(5000, _recheck_ollama)
+
+        print("[MAIN] ✅ Запуск главного цикла...")
         sys.exit(app.exec())
-        
+
     except Exception as e:
-        print(f"[MAIN] КРИТИЧЕСКАЯ ОШИБКА при запуске: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Пытаемся показать сообщение об ошибке
-        try:
-            error_app = QtWidgets.QApplication(sys.argv)
-            QtWidgets.QMessageBox.critical(
-                None,
-                "Ошибка запуска",
-                f"Не удалось запустить приложение:\n\n{str(e)}\n\nПроверьте:\n1. Установлены ли все зависимости\n2. Доступна ли база данных\n3. Запущена ли Ollama",
-                QtWidgets.QMessageBox.StandardButton.Ok
-            )
-        except:
-            pass
-        
+        log_error("MAIN_WINDOW", e)
+        QtWidgets.QMessageBox.critical(
+            None,
+            "❌ Ошибка запуска",
+            f"Не удалось создать главное окно:\n\n{e}\n\n"
+            "Проверьте файл errors.log для подробностей.",
+            QtWidgets.QMessageBox.StandardButton.Ok,
+        )
         sys.exit(1)
 
 if __name__ == "__main__":
