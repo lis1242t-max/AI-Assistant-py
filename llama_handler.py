@@ -1109,3 +1109,96 @@ def warm_up_model(model_key: str = None):
     threading.Thread(target=_do_warm_up, daemon=True).start()
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ПЕРЕГЕНЕРАЦИЯ: одной или другой моделью
+# ═══════════════════════════════════════════════════════════════════
+
+# Варианты меню кнопки "Перегенерировать"
+REGEN_SAME_MODEL  = "same"    # Перегенерировать той же моделью
+REGEN_OTHER_MODEL = "other"   # Перегенерировать другой моделью
+
+
+def get_other_model_key(current_model_key: str = None) -> str:
+    """
+    Возвращает ключ ДРУГОЙ модели относительно текущей.
+    Если текущая deepseek → вернёт llama3, и наоборот.
+
+    Используется для пункта меню «Перегенерировать другой моделью».
+    """
+    _mk = current_model_key if current_model_key is not None else CURRENT_AI_MODEL_KEY
+    keys = list(SUPPORTED_MODELS.keys())
+    # Найти следующую модель по кругу (поддерживает >2 модели)
+    if _mk in keys:
+        idx = keys.index(_mk)
+        other_idx = (idx + 1) % len(keys)
+        return keys[other_idx]
+    return "llama3"
+
+
+def get_regen_menu_labels(current_model_key: str = None) -> dict:
+    """
+    Возвращает словарь с подписями для меню перегенерации.
+    Пример:
+        {
+            "same":  "🔄 Перегенерировать (DeepSeek)",
+            "other": "🔀 Перегенерировать через LLaMA 3",
+        }
+    Используется в run.py для отображения контекстного меню кнопки регена.
+    """
+    _mk = current_model_key if current_model_key is not None else CURRENT_AI_MODEL_KEY
+    current_display = SUPPORTED_MODELS.get(_mk, SUPPORTED_MODELS["llama3"])[1]
+    other_key       = get_other_model_key(_mk)
+    other_display   = SUPPORTED_MODELS.get(other_key, SUPPORTED_MODELS["llama3"])[1]
+    return {
+        REGEN_SAME_MODEL:  f"🔄 Перегенерировать ({current_display})",
+        REGEN_OTHER_MODEL: f"🔀 Перегенерировать через {other_display}",
+    }
+
+
+def regenerate_response(
+    messages: list,
+    regen_mode: str = REGEN_SAME_MODEL,
+    current_model_key: str = None,
+    max_tokens: int = 800,
+    timeout: int = 60,
+) -> tuple:
+    """
+    Перегенерирует последний ответ ИИ.
+
+    Параметры:
+        messages         — история чата (список dict {role, content})
+        regen_mode       — REGEN_SAME_MODEL или REGEN_OTHER_MODEL
+        current_model_key — ключ текущей модели (если None — берёт глобал)
+        max_tokens, timeout — параметры запроса
+
+    Возвращает:
+        (response_text: str, used_model_key: str)
+        used_model_key — какая модель реально ответила (нужно для отображения)
+
+    Пример использования в run.py:
+        text, model_key = regenerate_response(
+            messages=chat_messages,
+            regen_mode=REGEN_OTHER_MODEL,
+            current_model_key=llama_handler.CURRENT_AI_MODEL_KEY,
+        )
+        # Если regen_mode == REGEN_OTHER_MODEL — обязательно показать плашку
+        # "Ответ от <display_name>" под сообщением
+    """
+    _mk = current_model_key if current_model_key is not None else CURRENT_AI_MODEL_KEY
+
+    if regen_mode == REGEN_OTHER_MODEL:
+        target_key = get_other_model_key(_mk)
+        target_display = SUPPORTED_MODELS.get(target_key, SUPPORTED_MODELS["llama3"])[1]
+        print(f"[REGEN] 🔀 Перегенерация другой моделью: {target_display} (key={target_key})")
+    else:
+        target_key = _mk
+        target_display = SUPPORTED_MODELS.get(_mk, SUPPORTED_MODELS["llama3"])[1]
+        print(f"[REGEN] 🔄 Перегенерация той же моделью: {target_display} (key={target_key})")
+
+    response = call_ollama_chat(
+        messages=messages,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        model_key=target_key,
+    )
+    return response, target_key

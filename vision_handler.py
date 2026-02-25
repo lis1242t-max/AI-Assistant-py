@@ -231,6 +231,20 @@ def build_vision_prompt(file_name: str, user_message: str,
     _ru = (language == "russian")
     lang_hint = "Отвечай на русском языке." if _ru else "Answer in English."
 
+    # Антигаллюцинационное предупреждение
+    if _ru:
+        _no_hallucinate = (
+            "\n⚠️ СТРОГО: Описывай ТОЛЬКО то, что реально видишь на изображении. "
+            "НЕ придумывай детали, НЕ угадывай временной контекст, НЕ сравнивай с другими эпохами. "
+            "Если что-то неясно — скажи 'не видно' вместо домыслов."
+        )
+    else:
+        _no_hallucinate = (
+            "\n⚠️ STRICT: Describe ONLY what you actually see in the image. "
+            "Do NOT invent details, do NOT guess time periods, do NOT compare to other eras. "
+            "If something is unclear — say 'unclear' instead of guessing."
+        )
+
     # ── 1. OCR: читаем текст ─────────────────────────────────────────
     if any(kw in msg for kw in _KW_TEXT):
         if _ru:
@@ -281,25 +295,26 @@ def build_vision_prompt(file_name: str, user_message: str,
         return (
             f"{user_message_stripped}\n\n"
             f"(Это вопрос об изображении '{file_name}'.) {lang_hint}"
+            f"{_no_hallucinate}"
         )
 
     # ── 4. Описание по режиму (по умолчанию) ────────────────────────
     if ai_mode == _MODE_FAST:
         if _ru:
-            return f"Кратко опиши что на изображении '{file_name}'. {lang_hint}"
-        return f"Briefly describe what's in the image '{file_name}'. {lang_hint}"
+            return f"Кратко опиши что на изображении '{file_name}'. {lang_hint}{_no_hallucinate}"
+        return f"Briefly describe what's in the image '{file_name}'. {lang_hint}{_no_hallucinate}"
 
     if ai_mode == _MODE_THINKING:
         if _ru:
             return (
                 f"Подробно проанализируй изображение '{file_name}'. "
                 f"Опиши все важные детали, объекты, текст (если есть), цвета, композицию. "
-                f"{lang_hint}"
+                f"{lang_hint}{_no_hallucinate}"
             )
         return (
             f"Analyze the image '{file_name}' in detail. "
             f"Describe all important details, objects, text (if any), colors, composition. "
-            f"{lang_hint}"
+            f"{lang_hint}{_no_hallucinate}"
         )
 
     # PRO
@@ -312,7 +327,7 @@ def build_vision_prompt(file_name: str, user_message: str,
             f"4. Цветовая схема и освещение\n"
             f"5. Контекст и возможное назначение\n"
             f"6. Любые необычные или важные детали\n"
-            f"{lang_hint}"
+            f"{lang_hint}{_no_hallucinate}"
         )
     return (
         f"Maximum detailed analysis of image '{file_name}':\n"
@@ -322,7 +337,7 @@ def build_vision_prompt(file_name: str, user_message: str,
         f"4. Color scheme and lighting\n"
         f"5. Context and possible purpose\n"
         f"6. Any unusual or important details\n"
-        f"{lang_hint}"
+        f"{lang_hint}{_no_hallucinate}"
     )
 
 

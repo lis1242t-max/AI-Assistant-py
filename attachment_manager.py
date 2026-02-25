@@ -27,6 +27,17 @@ except ImportError:
             ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"
         }
 
+# Расширения текстовых файлов для предпросмотра
+_TEXT_EXTENSIONS_AM = {
+    '.txt', '.md', '.py', '.js', '.ts', '.html', '.css', '.json', '.xml',
+    '.csv', '.log', '.yaml', '.yml', '.ini', '.cfg', '.toml', '.sh',
+    '.bat', '.c', '.cpp', '.h', '.java', '.rs', '.go', '.php', '.rb',
+    '.swift', '.kt', '.sql', '.env', '.gitignore',
+}
+
+def is_text_file(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _TEXT_EXTENSIONS_AM
+
 MAX_ATTACHED_FILES = 5
 
 
@@ -221,7 +232,7 @@ class AttachmentMixin:
 
         for file_path in self.attached_files:
             file_name = os.path.basename(file_path)
-            emoji = "🖼️" if is_image_file(file_path) else "📎"
+            emoji = "🖼️" if is_image_file(file_path) else ("📄" if is_text_file(file_path) else "📎")
 
             chip = QtWidgets.QWidget()
             chip.setObjectName("fileChip")
@@ -263,6 +274,18 @@ class AttachmentMixin:
             """)
             rb.clicked.connect(lambda checked, p=file_path: self.clear_attached_file(p))
             cl.addWidget(rb)
+
+            # Клик по чипу (не по кнопке удаления) — открывает предпросмотр
+            _fp = file_path
+            chip.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            chip.mousePressEvent = lambda event, p=_fp: (
+                self._preview_file(p)
+                if event.button() == QtCore.Qt.MouseButton.LeftButton else None
+            )
+            lbl.mousePressEvent = lambda event, p=_fp: (
+                self._preview_file(p)
+                if event.button() == QtCore.Qt.MouseButton.LeftButton else None
+            )
 
             grid_layout.addWidget(chip, row, col)
             col += 1

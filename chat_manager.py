@@ -62,6 +62,16 @@ class ChatManager:
                 print("[DB_MIGRATION] ℹ️ Колонка sources уже существует")
             else:
                 print(f"[DB_MIGRATION] ⚠️ Ошибка миграции sources: {e}")
+
+        # МИГРАЦИЯ: Добавляем колонку speaker_name если её нет
+        try:
+            cur.execute("ALTER TABLE chat_messages ADD COLUMN speaker_name TEXT")
+            print("[DB_MIGRATION] ✓ Добавлена колонка speaker_name")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                print("[DB_MIGRATION] ℹ️ Колонка speaker_name уже существует")
+            else:
+                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции speaker_name: {e}")
         
         conn.commit()
         
@@ -137,8 +147,8 @@ class ChatManager:
         conn.commit()
         conn.close()
     
-    def save_message(self, chat_id: int, role: str, content: str, attached_files: list = None, sources: list = None):
-        """Сохранить сообщение в чат с прикреплёнными файлами и источниками"""
+    def save_message(self, chat_id: int, role: str, content: str, attached_files: list = None, sources: list = None, speaker_name: str = None):
+        """Сохранить сообщение в чат с прикреплёнными файлами, источниками и именем ИИ"""
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
@@ -149,8 +159,8 @@ class ChatManager:
         # Сериализуем источники [(title, url), ...] в JSON
         sources_json = json.dumps(sources) if sources else None
         
-        cur.execute("INSERT INTO chat_messages (chat_id, role, content, attached_files, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                   (chat_id, role, content, files_json, sources_json, now))
+        cur.execute("INSERT INTO chat_messages (chat_id, role, content, attached_files, sources, created_at, speaker_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (chat_id, role, content, files_json, sources_json, now, speaker_name))
         
         # Обновить время последнего обновления чата
         cur.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
@@ -164,7 +174,7 @@ class ChatManager:
         cur = conn.cursor()
         
         cur.execute("""
-        SELECT role, content, attached_files, sources, created_at 
+        SELECT role, content, attached_files, sources, created_at, speaker_name 
         FROM chat_messages 
         WHERE chat_id = ? 
         ORDER BY id DESC 
@@ -177,12 +187,12 @@ class ChatManager:
         # Десериализуем файлы и источники из JSON
         result = []
         for row in reversed(rows):
-            role, content, files_json, sources_json, created_at = row
+            role, content, files_json, sources_json, created_at, speaker_name = row
             files = json.loads(files_json) if files_json else None
             sources = json.loads(sources_json) if sources_json else []
             # sources хранится как list of lists [[title, url], ...], конвертируем в list of tuples
             sources = [tuple(s) for s in sources] if sources else []
-            result.append((role, content, files, sources, created_at))
+            result.append((role, content, files, sources, created_at, speaker_name))
         
         return result
     

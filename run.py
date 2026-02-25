@@ -66,6 +66,31 @@ except Exception as e:
 # -------------------------
 IS_WINDOWS = sys.platform == "win32"
 
+# ═══════════════════════════════════════════════════════════════
+# Apple-style Font System для Windows
+# На Windows: Segoe UI Variable (Win11) / Segoe UI (Win10) —
+# ближайший аналог SF Pro, с субпиксельным рендерингом.
+# ═══════════════════════════════════════════════════════════════
+def _apple_font(size: int, weight=None):
+    """Шрифт в стиле Apple: Segoe UI Variable на Windows, Inter на других."""
+    from PyQt6 import QtGui
+    if IS_WINDOWS:
+        candidates = ["Segoe UI Variable", "Segoe UI", "Inter"]
+        db = QtGui.QFontDatabase()
+        chosen = next((n for n in candidates if n in db.families()), "Segoe UI")
+        font = QtGui.QFont(chosen, size)
+        font.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
+        font.setStyleStrategy(
+            QtGui.QFont.StyleStrategy.PreferAntialias |
+            QtGui.QFont.StyleStrategy.PreferQuality
+        )
+    else:
+        font = QtGui.QFont("Inter", size)
+    if weight is not None:
+        font.setWeight(weight)
+    return font
+
+
 # ── LLaMA-слой вынесен в llama_handler.py ──────────────────────────────
 import llama_handler
 from llama_handler import (
@@ -1285,25 +1310,60 @@ def format_text_with_markdown_and_math(text: str) -> str:
 
 def remove_english_words_from_russian(text: str) -> str:
     """
-    Агрессивно удаляет латинские слова из русского текста.
-    Убирает ЛЮБЫЕ латинские слова (английские, испанские, итальянские и т.д.)
-    которые не являются известными брендами/аббревиатурами.
+    Удаляет лишние латинские слова из русского текста.
+    ЗАЩИЩАЕТ: блоки кода, инлайн-код, технические ответы.
     """
+    import re as _re_eng
 
-    # Проверяем, не является ли весь текст английским
-    cyrillic_count = sum(1 for char in text if '\u0400' <= char <= '\u04FF')
-    latin_count = sum(1 for char in text if 'a' <= char.lower() <= 'z')
+    # ── 0. Удаляем CJK-символы ─────────────────────────────────────────
+    # Только 4-значные \u эскейпы — они всегда корректны в Python regex
+    _cjk_re = _re_eng.compile(
+        '[\u4e00-\u9fff'
+        '\u3400-\u4dbf'
+        '\uf900-\ufaff'
+        '\u3000-\u303f'
+        '\u30a0-\u30ff'
+        '\u3040-\u309f'
+        '\uac00-\ud7af]+'
+    )
+    if _cjk_re.search(text):
+        text = _cjk_re.sub('', text)
+        text = _re_eng.sub(r'  +', ' ', text).strip()
+        print("[CJK_FILTER] \u26a0\ufe0f Удалены CJK-символы из ответа")
 
-    # Если текст полностью на английском - переводим целиком
+    # ── 1. Если в тексте есть код — не трогаем ─────────────────────────
+    code_keywords = [
+        'def ', 'class ', 'import ', 'from ', 'return ', 'FastAPI', 'app =',
+        'function ', 'const ', 'let ', 'var ', '#!/', 'SELECT ', 'INSERT ',
+        '=> {', '() =>', '.get(', '.post(', '.put(', '.delete(',
+        '@app.', '@router.', 'async def', 'await ',
+    ]
+    has_code_block   = '```' in text
+    has_code_content = any(kw in text for kw in code_keywords)
+
+    if has_code_block or has_code_content:
+        print("[ENGLISH_FILTER] \u2139\ufe0f Обнаружен код — фильтрация отключена")
+        return text
+
+    # ── 2. Считаем кириллицу vs латиницу ───────────────────────────────
+    cyrillic_count = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
+    latin_count    = sum(1 for c in text if 'a' <= c.lower() <= 'z')
+
+    # Мало кириллицы — технический текст, не трогаем
+    if cyrillic_count < 10:
+        print("[ENGLISH_FILTER] \u2139\ufe0f Мало кириллицы — пропускаем фильтрацию")
+        return text
+
+    # Полностью латинский длинный текст — пробуем перевести
     if latin_count > cyrillic_count and latin_count > 50:
-        print(f"[ENGLISH_FILTER] ⚠️ ОБНАРУЖЕН ПОЛНОСТЬЮ АНГЛИЙСКИЙ ТЕКСТ! Переводим...")
+        print("[ENGLISH_FILTER] \u26a0\ufe0f ОБНАРУЖЕН ПОЛНОСТЬЮ АНГЛИЙСКИЙ ТЕКСТ! Переводим...")
         try:
             from deep_translator import GoogleTranslator
             translator = GoogleTranslator(source='en', target='ru')
             max_chunk = 4500
             if len(text) <= max_chunk:
                 translated = translator.translate(text)
-                print(f"[ENGLISH_FILTER] ✓ Текст полностью переведён на русский")
+                print("[ENGLISH_FILTER] \u2713 Текст полностью переведён на русский")
                 return translated
             else:
                 sentences = text.split('. ')
@@ -1319,12 +1379,12 @@ def remove_english_words_from_russian(text: str) -> str:
                 if current_chunk:
                     translated_parts.append(translator.translate(current_chunk))
                 translated = " ".join(translated_parts)
-                print(f"[ENGLISH_FILTER] ✓ Большой текст полностью переведён на русский")
+                print("[ENGLISH_FILTER] \u2713 Большой текст полностью переведён на русский")
                 return translated
         except Exception as e:
-            print(f"[ENGLISH_FILTER] ✗ Ошибка перевода: {e}")
+            print(f"[ENGLISH_FILTER] \u2717 Ошибка перевода: {e}")
 
-    # Используем словарь из внешнего файла или создаём базовый
+    # ── 3. Пословная фильтрация запрещённых латинских слов ──────────────
     if FORBIDDEN_WORDS_DICT and len(FORBIDDEN_WORDS_DICT) > 0:
         replacements = FORBIDDEN_WORDS_DICT
         print(f"[ENGLISH_FILTER] Используется расширенный словарь ({len(replacements)} слов)")
@@ -1332,14 +1392,11 @@ def remove_english_words_from_russian(text: str) -> str:
         replacements = {
             'however': 'однако', 'moreover': 'более того', 'therefore': 'поэтому',
             'essentially': 'по сути', 'basically': 'в основном',
-            'arrives': 'прибывает', 'becomes': 'становится', 'provides': 'предоставляет',
-            'situation': 'ситуация', 'important': 'важный'
         }
         print(f"[ENGLISH_FILTER] Используется базовый словарь ({len(replacements)} слов)")
 
-    # Известные бренды/аббревиатуры/технические термины которые НЕ трогаем
     ALLOWED_LATIN = {
-        'ai', 'ok', 'ok', 'api', 'url', 'http', 'https', 'html', 'css', 'js',
+        'ai', 'ok', 'api', 'url', 'http', 'https', 'html', 'css', 'js',
         'python', 'java', 'sql', 'gpu', 'cpu', 'ram', 'rom', 'usb', 'hdmi',
         'pdf', 'jpg', 'png', 'gif', 'mp3', 'mp4', 'wifi', 'lan', 'vpn',
         'google', 'apple', 'microsoft', 'samsung', 'huawei', 'xiaomi', 'sony',
@@ -1353,57 +1410,42 @@ def remove_english_words_from_russian(text: str) -> str:
     replaced_count = 0
 
     for word in words:
-        # Очищаем от знаков препинания для проверки
-        clean_word = ''.join(char for char in word if char.isalnum()).lower()
+        clean_word = ''.join(c for c in word if c.isalnum()).lower()
 
         if not clean_word:
             cleaned_words.append(word)
             continue
 
-        # Проверяем, является ли слово латинским (нет кириллицы)
         has_cyrillic = any('\u0400' <= c <= '\u04FF' for c in clean_word)
-        has_latin = any('a' <= c <= 'z' for c in clean_word)
+        has_latin    = any('a' <= c <= 'z' for c in clean_word)
 
-        # Если слово не содержит латиницы — оставляем как есть
         if not has_latin:
             cleaned_words.append(word)
             continue
 
-        # Если слово смешанное (кириллица + латиница) — оставляем как есть (возможно технический термин)
         if has_cyrillic and has_latin:
             cleaned_words.append(word)
             continue
 
-        # Слово полностью латинское — проверяем исключения
         if clean_word in ALLOWED_LATIN:
             cleaned_words.append(word)
             continue
 
-        # Пробуем заменить через словарь
         if clean_word in replacements:
-            replacement = replacements[clean_word]
-            # Восстанавливаем знаки препинания в конце
-            suffix = ''
-            for char in word:
-                if not char.isalnum():
-                    suffix += char
-            cleaned_words.append(replacement + suffix)
+            suffix = ''.join(c for c in word if not c.isalnum())
+            cleaned_words.append(replacements[clean_word] + suffix)
             replaced_count += 1
-            print(f"[ENGLISH_FILTER] Заменено: '{word}' → '{replacement}'")
+            print(f"[ENGLISH_FILTER] Заменено: '{word}' → '{replacements[clean_word]}'")
         else:
-            # Слово латинское и не в словаре — удаляем
-            # (это поймает turno, your, turn и любые другие иностранные слова)
             replaced_count += 1
             print(f"[ENGLISH_FILTER] Удалено латинское слово: '{word}'")
 
     if replaced_count > 0:
-        print(f"[ENGLISH_FILTER] ✓ Заменено/удалено латинских слов: {replaced_count}")
+        print(f"[ENGLISH_FILTER] \u2713 Заменено/удалено: {replaced_count}")
 
     result = ' '.join(cleaned_words)
-    # Убираем двойные пробелы которые могли появиться после удаления слов
     result = re.sub(r'  +', ' ', result).strip()
     return result
-
 
 
 def check_spelling_and_suggest(text: str, language: str = "russian") -> dict:
@@ -5533,7 +5575,11 @@ Consider information from BOTH sources: search results AND attached files."""
     # ═══════════════════════════════════════════════════════════════
     if _mk == "deepseek" and response_text and not response_text.startswith("❌"):
         # ШАГ 1: Проверяем на мусор (scss-блоки, выдуманные формулы и т.п.)
-        if is_math_problem and is_garbage_math_response(response_text):
+        # Расширено: проверяем мусор даже если is_math_problem=False, но в запросе есть арифметика
+        _should_check_garbage = is_math_problem
+        if not _should_check_garbage and re.search(r'\d+\s*[\+\-\*\/\%\^]\s*\d+', user_message):
+            _should_check_garbage = True
+        if _should_check_garbage and is_garbage_math_response(response_text):
             print(f"[GET_AI_RESPONSE] [DeepSeek] ⚠️ Обнаружен мусорный мат. ответ — заменяю!")
             response_text = sanitize_deepseek_math(response_text, user_message, detected_language)
         # ШАГ 2: Очищаем LaTeX из оставшегося ответа
@@ -5541,8 +5587,20 @@ Consider information from BOTH sources: search results AND attached files."""
         print(f"[GET_AI_RESPONSE] [DeepSeek] LaTeX-разметка очищена")
     
     # ═══════════════════════════════════════════════════════════════
-    # ФИЛЬТРАЦИЯ АНГЛИЙСКИХ СЛОВ - ВКЛЮЧЕНА
+    # ФИЛЬТРАЦИЯ CJK + АНГЛИЙСКИХ СЛОВ
     # ═══════════════════════════════════════════════════════════════
+    # CJK (китайский/японский/корейский) фильтруем ВСЕГДА для deepseek
+    if _mk == "deepseek" and response_text:
+        import re as _re_cjk_check
+        _cjk = _re_cjk_check.compile(
+            '[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+            '\u3000-\u303f\u30a0-\u30ff\u3040-\u309f\uac00-\ud7af]+'
+        )
+        if _cjk.search(response_text):
+            response_text = _cjk.sub('', response_text)
+            response_text = re.sub(r'  +', ' ', response_text).strip()
+            print("[GET_AI_RESPONSE] [DeepSeek] ⚠️ CJK-символы удалены из ответа")
+            print(f"[GET_AI_RESPONSE] [DeepSeek] ⚠️ CJK-символы удалены из ответа")
     # Используем расширенный словарь из forbidden_english_words.py
     if detected_language == "russian":
         print(f"[GET_AI_RESPONSE] Фильтрация английских слов...")
@@ -5848,6 +5906,7 @@ class MessageWidget(QtWidgets.QWidget):
         self.thinking_time = thinking_time  # Время обдумывания в секундах
         self.action_history = action_history or []  # История действий
         self.is_acknowledgment = is_acknowledgment  # Быстрый ответ без AI (нет регенерации)
+        self.attached_files = list(attached_files) if attached_files else []  # Файлы для восстановления при отмене
         
         # Создаём эффект прозрачности для анимации
         self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
@@ -5988,13 +6047,13 @@ class MessageWidget(QtWidgets.QWidget):
         # Для симметрии: сообщения пользователя сдвигаем вправо, ИИ влево
         if align == QtCore.Qt.AlignmentFlag.AlignRight:
             # Сообщения пользователя - ближе к правому краю
-            main_layout.setContentsMargins(80, 8, 6, 8)
+            main_layout.setContentsMargins(80, 11, 6, 11)
         elif align == QtCore.Qt.AlignmentFlag.AlignLeft:
             # Сообщения ИИ - ближе к левому краю
-            main_layout.setContentsMargins(6, 8, 80, 8)
+            main_layout.setContentsMargins(6, 11, 80, 11)
         else:
             # Системные сообщения - по центру сверху с равными отступами
-            main_layout.setContentsMargins(80, 8, 80, 8)
+            main_layout.setContentsMargins(80, 11, 80, 11)
         main_layout.setSpacing(6)
         if align == QtCore.Qt.AlignmentFlag.AlignRight:
             main_layout.addStretch()
@@ -6043,7 +6102,7 @@ class MessageWidget(QtWidgets.QWidget):
                 background-color: {self.bubble_bg};
                 border: 1.5px solid {self.bubble_border};
                 border-radius: 24px;
-                padding: 20px 26px;
+                padding: {'28px 44px' if speaker == 'Система' else '26px 34px'};
             }}
         """)
         
@@ -6076,20 +6135,25 @@ class MessageWidget(QtWidgets.QWidget):
             files_grid.setContentsMargins(0, 0, 0, 0)
             
             # Показываем бейдж для каждого файла (максимум 3 в строке)
-            for idx, file_name in enumerate(attached_files):
+            for idx, file_path_or_name in enumerate(attached_files):
                 row = idx // 3  # Строка
                 col = idx % 3   # Столбец
                 
-                if is_image_file(file_name):
+                # Поддерживаем как полные пути так и просто имена файлов
+                display_name_full = os.path.basename(file_path_or_name) if os.sep in file_path_or_name or '/' in file_path_or_name else file_path_or_name
+                
+                if is_image_file(file_path_or_name):
                     file_emoji = "🖼️"
+                elif is_text_file(file_path_or_name):
+                    file_emoji = "📄"
                 else:
                     file_emoji = "📎"
-                display_name = file_name if len(file_name) <= 30 else file_name[:27] + "…"
+                display_name = display_name_full if len(display_name_full) <= 30 else display_name_full[:27] + "…"
                 # ═══════════════════════════════════════════════════════════════
                 # КЛИКАБЕЛЬНАЯ КНОПКА вместо обычного Label
                 # ═══════════════════════════════════════════════════════════════
                 file_badge = QtWidgets.QPushButton(f"{file_emoji} {display_name}")
-                file_badge.setFont(QtGui.QFont("Inter", 11))
+                file_badge.setFont(_apple_font(11))
                 file_badge.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
                 file_badge.setStyleSheet(f"""
                     QPushButton {{
@@ -6109,9 +6173,9 @@ class MessageWidget(QtWidgets.QWidget):
                     }}
                 """)
                 
-                # Сохраняем file_name как атрибут кнопки для открытия
-                file_badge.setProperty("file_name", file_name)
-                file_badge.clicked.connect(lambda checked=False, fn=file_name: self.open_attached_file(fn))
+                # Сохраняем полный путь как атрибут кнопки для открытия
+                file_badge.setProperty("file_name", file_path_or_name)
+                file_badge.clicked.connect(lambda checked=False, fn=file_path_or_name: self.open_attached_file(fn))
                 
                 files_grid.addWidget(file_badge, row, col)
             
@@ -6134,7 +6198,7 @@ class MessageWidget(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Minimum
         )
         
-        font = QtGui.QFont("Inter", 18)
+        font = _apple_font(18)
         message_label.setFont(font)
         message_label.setStyleSheet(f"""
             QLabel {{
@@ -6751,7 +6815,7 @@ class MessageWidget(QtWidgets.QWidget):
                     background-color: {bubble_bg};
                     border: 1.5px solid {bubble_border};
                     border-radius: 24px;
-                    padding: 20px 26px;
+                    padding: 26px 34px;
                 }}
             """)
         
@@ -6926,11 +6990,99 @@ class MessageWidget(QtWidgets.QWidget):
 
 
     def regenerate_response(self):
-        """Перегенерировать ответ ассистента"""
-        # Отправляем сигнал родительскому окну
+        """Перегенерировать ответ ассистента — показывает меню выбора модели"""
         parent_window = self.window()
-        if hasattr(parent_window, 'regenerate_last_response'):
+        if not hasattr(parent_window, 'regenerate_last_response'):
+            return
+
+        # ── Определяем текущую и другую модель ──────────────────────
+        current_key  = llama_handler.CURRENT_AI_MODEL_KEY
+        current_name = llama_handler.SUPPORTED_MODELS.get(current_key, ("", "LLaMA 3"))[1]
+        other_key    = "deepseek" if current_key == "llama3" else "llama3"
+        other_name   = llama_handler.SUPPORTED_MODELS.get(other_key, ("", "DeepSeek"))[1]
+
+        # ── Создаём контекстное меню ─────────────────────────────────
+        menu = QtWidgets.QMenu(self)
+        menu.setWindowFlags(
+            QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint
+        )
+        if not IS_WINDOWS:
+            menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        is_dark = getattr(parent_window, 'current_theme', 'dark') == 'dark'
+
+        if is_dark:
+            menu.setStyleSheet("""
+                QMenu {
+                    background: rgba(28, 28, 32, 0.98);
+                    border: 1px solid rgba(60, 60, 70, 0.8);
+                    border-radius: 10px;
+                    padding: 4px;
+                }
+                QMenu::item {
+                    padding: 7px 16px;
+                    border-radius: 7px;
+                    color: #e0e0e0;
+                    font-size: 13px;
+                    font-weight: 500;
+                    margin: 1px;
+                    background: transparent;
+                }
+                QMenu::item:selected {
+                    background: rgba(60, 60, 75, 0.9);
+                    color: #ffffff;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background: rgba(80, 80, 100, 0.4);
+                    margin: 2px 8px;
+                }
+            """)
+        else:
+            menu.setStyleSheet("""
+                QMenu {
+                    background: rgba(255, 255, 255, 0.98);
+                    border: 1px solid rgba(200, 200, 215, 0.9);
+                    border-radius: 10px;
+                    padding: 4px;
+                }
+                QMenu::item {
+                    padding: 7px 16px;
+                    border-radius: 7px;
+                    color: #1a202c;
+                    font-size: 13px;
+                    font-weight: 500;
+                    margin: 1px;
+                    background: transparent;
+                }
+                QMenu::item:selected {
+                    background: rgba(230, 230, 245, 0.95);
+                    color: #0f172a;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background: rgba(180, 185, 200, 0.5);
+                    margin: 2px 8px;
+                }
+            """)
+
+        act_same  = menu.addAction(f"🔄  Перегенерировать  ({current_name})")
+        menu.addSeparator()
+        act_other = menu.addAction(f"🔀  Перегенерировать через  {other_name}")
+
+        # ── Показываем меню рядом с кнопкой ─────────────────────────
+        btn = self.regenerate_button
+        if btn:
+            pos = btn.mapToGlobal(QtCore.QPoint(0, btn.height() + 4))
+        else:
+            pos = QtGui.QCursor.pos()
+
+        chosen = menu.exec(pos)
+
+        if chosen == act_same:
             parent_window.regenerate_last_response()
+        elif chosen == act_other:
+            parent_window.regenerate_last_response(force_model_key=other_key)
     
     def edit_message(self):
         """Редактировать сообщение пользователя"""
@@ -6944,80 +7096,350 @@ class MessageWidget(QtWidgets.QWidget):
 # -------------------------
 
     def open_attached_file(self, file_name):
-        """Открыть прикреплённый файл при клике (УЛУЧШЕНО: обработка пробелов в путях)"""
-        print(f"[FILE_OPEN] Попытка открыть файл: {file_name}")
+        """Открыть прикреплённый файл при клике.
         
-        # Пытаемся найти полный путь к файлу
-        file_path = None
-        
-        # Проверяем main_window.attached_files
-        if self.main_window and hasattr(self.main_window, 'attached_files'):
-            for full_path in self.main_window.attached_files:
-                if os.path.basename(full_path) == file_name:
-                    file_path = full_path
-                    break
-        
-        # Если не нашли, возможно это уже полный путь
-        if not file_path:
+        Если передан полный путь — используем его напрямую.
+        Если только имя файла (старые сообщения из БД) — ищем по имени в known paths.
+        Для изображений показывает мини-просмотрщик внутри приложения.
+        """
+        print(f"[FILE_OPEN] Клик по файлу: {file_name}")
+
+        # ── 1. Определяем реальный путь ────────────────────────────────
+        # Если это уже абсолютный путь — используем как есть
+        if os.path.isabs(file_name) and os.path.exists(file_name):
             file_path = file_name
-        
-        # ИСПРАВЛЕНИЕ: Нормализуем путь для корректной работы с пробелами
+        else:
+            # Старые записи из БД содержат только basename — ищем в текущих attached_files
+            file_path = None
+            if self.main_window and hasattr(self.main_window, 'attached_files'):
+                for fp in self.main_window.attached_files:
+                    if os.path.basename(fp) == os.path.basename(file_name):
+                        file_path = fp
+                        break
+            # Последняя попытка — относительный путь как есть
+            if not file_path:
+                file_path = os.path.abspath(file_name)
+
         file_path = os.path.normpath(file_path)
-        # Преобразуем в абсолютный путь
-        file_path = os.path.abspath(file_path)
-        
-        print(f"[FILE_OPEN] Нормализованный путь: {file_path}")
-        
-        # Проверяем существование файла
+        print(f"[FILE_OPEN] Путь: {file_path}")
+
+        # ── 2. Проверяем существование ──────────────────────────────────
         if not os.path.exists(file_path):
-            print(f"[FILE_OPEN] ✗ Файл не найден: {file_path}")
+            print(f"[FILE_OPEN] ✗ Не найден: {file_path}")
             QtWidgets.QMessageBox.warning(
-                self,
-                "Файл не найден",
-                f"Файл не найден:\n{file_path}",
+                self, "Файл не найден",
+                f"Файл не найден по пути:\n{file_path}\n\n"
+                f"Возможно, файл был перемещён или удалён.",
                 QtWidgets.QMessageBox.StandardButton.Ok
             )
             return
-        
-        # Открываем файл системным приложением
-        print(f"[FILE_OPEN] ✓ Открываю файл: {file_path}")
-        
+
+        # ── 3. Изображения — показываем мини-просмотрщик ───────────────
+        if is_image_file(file_path):
+            print(f"[FILE_OPEN] Открываю изображение в просмотрщике")
+            self._show_image_viewer(file_path)
+            return
+
+        # ── 4. Текстовые файлы — мини-просмотрщик внутри приложения ──────
+        if is_text_file(file_path):
+            print(f"[FILE_OPEN] Открываю текстовый файл в просмотрщике")
+            self._show_text_viewer(file_path)
+            return
+
+        # ── 5. Остальные файлы — системное приложение ──────────────────
+        print(f"[FILE_OPEN] ✓ Открываю в системном приложении: {file_path}")
         try:
-            # ИСПРАВЛЕНИЕ: Используем абсолютные пути для надёжного открытия
-            if sys.platform == 'darwin':  # macOS
-                # Для macOS используем абсолютный путь
+            if sys.platform == 'darwin':
                 subprocess.run(['open', file_path], check=True)
-            elif sys.platform == 'win32':  # Windows
-                # os.startfile автоматически обрабатывает пробелы
+            elif sys.platform == 'win32':
                 os.startfile(file_path)
-            else:  # Linux
-                # Для Linux используем абсолютный путь
+            else:
                 subprocess.run(['xdg-open', file_path], check=True)
-            
-            print(f"[FILE_OPEN] ✅ Файл открыт успешно")
-        except subprocess.CalledProcessError as e:
-            print(f"[FILE_OPEN] ✗ Ошибка subprocess: {e}")
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Ошибка открытия",
-                f"Не удалось открыть файл:\n{file_path}\n\nПопробуйте открыть файл вручную.",
-                QtWidgets.QMessageBox.StandardButton.Ok
-            )
+            print(f"[FILE_OPEN] ✅ Открыт успешно")
         except Exception as e:
-            print(f"[FILE_OPEN] ✗ Ошибка открытия: {e}")
+            print(f"[FILE_OPEN] ✗ Ошибка: {e}")
             QtWidgets.QMessageBox.warning(
-                self,
-                "Ошибка открытия",
-                f"Не удалось открыть файл:\n{e}",
+                self, "Ошибка открытия",
+                f"Не удалось открыть файл:\n{file_path}\n\n{e}",
                 QtWidgets.QMessageBox.StandardButton.Ok
             )
+
+    def _show_image_viewer(self, file_path: str):
+        """Мини-просмотрщик изображений — показывает фото в окошке внутри приложения."""
+        viewer = _ImageViewerDialog(file_path, parent=self)
+        viewer.exec()
+
+    def _show_text_viewer(self, file_path: str):
+        """Мини-просмотрщик текстовых файлов."""
+        viewer = _TextViewerDialog(file_path, parent=self)
+        viewer.exec()
+
+    def _preview_file(self, file_path: str):
+        """Открывает предпросмотр файла: изображение или текст."""
+        if is_image_file(file_path):
+            self._show_image_viewer(file_path)
+        elif is_text_file(file_path):
+            self._show_text_viewer(file_path)
+        else:
+            self.open_file(file_path)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# МИНИ-ПРОСМОТРЩИК ИЗОБРАЖЕНИЙ
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _ImageViewerDialog(QtWidgets.QDialog):
+    """Мини-окно для просмотра изображений с zoom/pan."""
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.setWindowTitle(os.path.basename(file_path))
+        self.setModal(True)
+        self.setMinimumSize(400, 300)
+        self.resize(800, 600)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._pixmap_orig = QtGui.QPixmap(file_path)
+        if self._pixmap_orig.isNull():
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось загрузить изображение.")
+            QtCore.QTimer.singleShot(0, self.close)
+            return
+        self._build_ui()
+        QtCore.QTimer.singleShot(50, self._fit_to_window)
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._canvas = _ImageCanvas(self._pixmap_orig, self)
+        layout.addWidget(self._canvas, stretch=1)
+
+        bar = QtWidgets.QWidget()
+        bar.setStyleSheet("background:#1a1b2e;border-top:1px solid rgba(102,126,234,0.25);")
+        bar.setFixedHeight(48)
+        bl = QtWidgets.QHBoxLayout(bar)
+        bl.setContentsMargins(16, 0, 16, 0)
+        bl.setSpacing(10)
+
+        path_lbl = QtWidgets.QLabel(self.file_path)
+        path_lbl.setStyleSheet("color:rgba(180,185,220,0.7);font-size:11px;")
+        bl.addWidget(path_lbl, stretch=1)
+
+        btn_style = ("QPushButton{color:white;background:rgba(102,126,234,0.25);"
+                     "border:1px solid rgba(102,126,234,0.4);border-radius:8px;"
+                     "padding:5px 14px;font-size:13px;}"
+                     "QPushButton:hover{background:rgba(102,126,234,0.45);}"
+                     "QPushButton:pressed{background:rgba(102,126,234,0.6);}")
+
+        for label, slot in [("⊡ По размеру", self._fit_to_window),
+                             ("↗ В приложении", self._open_external),
+                             ("✕ Закрыть", self.close)]:
+            btn = QtWidgets.QPushButton(label)
+            btn.setStyleSheet(btn_style)
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.clicked.connect(slot)
+            bl.addWidget(btn)
+
+        layout.addWidget(bar)
+        self._canvas.request_fit = self._fit_to_window
+        self.setStyleSheet("QDialog{background:#0d0e1a;}")
+
+    def _fit_to_window(self):
+        if self._pixmap_orig.isNull():
+            return
+        cw, ch = self._canvas.width(), self._canvas.height()
+        pw, ph = self._pixmap_orig.width(), self._pixmap_orig.height()
+        if pw == 0 or ph == 0 or cw == 0 or ch == 0:
+            return
+        scale = min(cw / pw, ch / ph) * 0.95
+        self._canvas.set_transform(scale, QtCore.QPointF(0, 0))
+
+    def _open_external(self):
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", self.file_path], check=True)
+            elif sys.platform == "win32":
+                os.startfile(self.file_path)
+            else:
+                subprocess.run(["xdg-open", self.file_path], check=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось открыть:\n{e}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QtCore.QTimer.singleShot(0, self._fit_to_window)
+
+
+class _ImageCanvas(QtWidgets.QWidget):
+    """Холст с zoom (колесо мыши) и pan (перетаскивание)."""
+
+    def __init__(self, pixmap: QtGui.QPixmap, parent=None):
+        super().__init__(parent)
+        self._pixmap = pixmap
+        self._scale = 1.0
+        self._offset = QtCore.QPointF(0, 0)
+        self._drag_start = None
+        self._drag_offset_start = None
+        self.request_fit = None
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor))
+
+    def set_transform(self, scale: float, offset: QtCore.QPointF):
+        self._scale = scale
+        self._offset = offset
+        self.update()
+
+    def paintEvent(self, event):
+        if self._pixmap.isNull():
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        cx = self.width() / 2 + self._offset.x()
+        cy = self.height() / 2 + self._offset.y()
+        w = self._pixmap.width() * self._scale
+        h = self._pixmap.height() * self._scale
+        rect = QtCore.QRectF(cx - w / 2, cy - h / 2, w, h)
+        painter.drawPixmap(rect, self._pixmap, QtCore.QRectF(self._pixmap.rect()))
+        painter.end()
+
+    def wheelEvent(self, event):
+        factor = 1.12 if event.angleDelta().y() > 0 else 1 / 1.12
+        self._scale = max(0.05, min(self._scale * factor, 20.0))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._drag_start = event.position()
+            self._drag_offset_start = QtCore.QPointF(self._offset)
+            self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.ClosedHandCursor))
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None:
+            delta = event.position() - self._drag_start
+            self._offset = self._drag_offset_start + delta
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor))
+
+    def mouseDoubleClickEvent(self, event):
+        if self.request_fit:
+            self.request_fit()
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# МИНИ-ПРОСМОТРЩИК ТЕКСТОВЫХ ФАЙЛОВ
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TEXT_EXTENSIONS = {
+    '.txt', '.md', '.py', '.js', '.ts', '.html', '.css', '.json', '.xml',
+    '.csv', '.log', '.yaml', '.yml', '.ini', '.cfg', '.toml', '.sh',
+    '.bat', '.c', '.cpp', '.h', '.java', '.rs', '.go', '.php', '.rb',
+    '.swift', '.kt', '.sql', '.env', '.gitignore',
+}
+
+def is_text_file(file_path: str) -> bool:
+    """Возвращает True если файл — текстовый (по расширению)."""
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in _TEXT_EXTENSIONS
+
+
+class _TextViewerDialog(QtWidgets.QDialog):
+    """Мини-окно для просмотра текстовых файлов."""
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.setWindowTitle(os.path.basename(file_path))
+        self.setModal(True)
+        self.setMinimumSize(500, 400)
+        self.resize(800, 600)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._build_ui()
+        self._load_content()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._text_edit = QtWidgets.QPlainTextEdit()
+        self._text_edit.setReadOnly(True)
+        self._text_edit.setFont((QtGui.QFont("Cascadia Code", 12) if IS_WINDOWS else QtGui.QFont("Menlo", 12)))
+        self._text_edit.setStyleSheet(
+            "QPlainTextEdit { background:#0d0e1a; color:#c8d0e7; "
+            "border:none; padding:12px; }"
+        )
+        layout.addWidget(self._text_edit, stretch=1)
+
+        bar = QtWidgets.QWidget()
+        bar.setStyleSheet("background:#1a1b2e;border-top:1px solid rgba(102,126,234,0.25);")
+        bar.setFixedHeight(48)
+        bl = QtWidgets.QHBoxLayout(bar)
+        bl.setContentsMargins(16, 0, 16, 0)
+        bl.setSpacing(10)
+
+        path_lbl = QtWidgets.QLabel(self.file_path)
+        path_lbl.setStyleSheet("color:rgba(180,185,220,0.7);font-size:11px;")
+        bl.addWidget(path_lbl, stretch=1)
+
+        btn_style = (
+            "QPushButton{color:white;background:rgba(102,126,234,0.25);"
+            "border:1px solid rgba(102,126,234,0.4);border-radius:8px;"
+            "padding:5px 14px;font-size:13px;}"
+            "QPushButton:hover{background:rgba(102,126,234,0.45);}"
+            "QPushButton:pressed{background:rgba(102,126,234,0.6);}"
+        )
+        for label, slot in [("↗ В приложении", self._open_external),
+                              ("✕ Закрыть", self.close)]:
+            btn = QtWidgets.QPushButton(label)
+            btn.setStyleSheet(btn_style)
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.clicked.connect(slot)
+            bl.addWidget(btn)
+
+        layout.addWidget(bar)
+        self.setStyleSheet("QDialog{background:#0d0e1a;}")
+
+    def _load_content(self):
+        try:
+            for enc in ("utf-8", "cp1251", "latin-1"):
+                try:
+                    with open(self.file_path, "r", encoding=enc) as f:
+                        text = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                text = "[Не удалось прочитать файл — неизвестная кодировка]"
+            # Ограничиваем до 200 КБ для производительности
+            if len(text) > 200_000:
+                text = text[:200_000] + "\n\n[... файл обрезан до 200 КБ ...]"
+            self._text_edit.setPlainText(text)
+        except Exception as e:
+            self._text_edit.setPlainText(f"[Ошибка чтения файла: {e}]")
+
+    def _open_external(self):
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", self.file_path], check=True)
+            elif sys.platform == "win32":
+                os.startfile(self.file_path)
+            else:
+                subprocess.run(["xdg-open", self.file_path], check=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось открыть:\n{e}")
+
 
 class WorkerSignals(QtCore.QObject):
     # (response_text, list of (title, url) source tuples)
     finished = QtCore.pyqtSignal(str, list)
 
 class AIWorker(QtCore.QRunnable):
-    def __init__(self, user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST):
+    def __init__(self, user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key_override: str = None):
         super().__init__()
         self.user_message = user_message
         self.current_language = current_language
@@ -7032,10 +7454,9 @@ class AIWorker(QtCore.QRunnable):
         # Уникальный ID запроса — для защиты от "призраков" после стопа
         self.request_id = id(self)
         self.signals = WorkerSignals()
-        # ▼ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: снимаем модель в main thread прямо сейчас
-        # Это гарантирует что воркер использует ту модель, которая была выбрана
-        # в момент отправки сообщения, независимо от глобала в потоке
-        self.model_key = llama_handler.CURRENT_AI_MODEL_KEY
+        # model_key_override — явная модель для перегенерации другой моделью
+        # Если не передан — берём текущую активную модель из глобала
+        self.model_key = model_key_override if model_key_override is not None else llama_handler.CURRENT_AI_MODEL_KEY
 
     @QtCore.pyqtSlot()
     def run(self):
@@ -7338,7 +7759,7 @@ class SettingsView(QtWidgets.QWidget):
         # Заголовок
         title = QtWidgets.QLabel("⚙️ Настройки")
         title.setObjectName("settingsTitle")
-        title.setFont(QtGui.QFont("Inter", 28, QtGui.QFont.Weight.Bold))
+        title.setFont(_apple_font(28, weight=QtGui.QFont.Weight.Bold))
         title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
         
@@ -7437,7 +7858,7 @@ class SettingsView(QtWidgets.QWidget):
         
         self.delete_all_chats_btn = QtWidgets.QPushButton("🗑️ Удалить все чаты")
         self.delete_all_chats_btn.setObjectName("deleteAllChatsBtn")
-        self.delete_all_chats_btn.setFont(QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Medium))
+        self.delete_all_chats_btn.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Medium))
         self.delete_all_chats_btn.setMinimumHeight(45)
         self.delete_all_chats_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.delete_all_chats_btn.clicked.connect(self.request_delete_all_chats)
@@ -7469,14 +7890,14 @@ class SettingsView(QtWidgets.QWidget):
         
         back_btn = QtWidgets.QPushButton("← Назад к чату")
         back_btn.setObjectName("settingsBackBtn")
-        back_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Medium))
+        back_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
         back_btn.setMinimumHeight(50)
         back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         back_btn.clicked.connect(self.close_requested.emit)
         
         apply_btn = QtWidgets.QPushButton("✓ Применить")
         apply_btn.setObjectName("settingsApplyBtn")
-        apply_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Bold))
+        apply_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Bold))
         apply_btn.setMinimumHeight(50)
         apply_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         apply_btn.clicked.connect(self.apply_settings)
@@ -7498,12 +7919,12 @@ class SettingsView(QtWidgets.QWidget):
         layout.setSpacing(12)
         
         title_label = QtWidgets.QLabel(title)
-        title_label.setFont(QtGui.QFont("Inter", 18, QtGui.QFont.Weight.Bold))
+        title_label.setFont(_apple_font(18, weight=QtGui.QFont.Weight.Bold))
         layout.addWidget(title_label)
         
         desc_label = QtWidgets.QLabel(description)
         desc_label.setObjectName("descLabel")
-        desc_label.setFont(QtGui.QFont("Inter", 13))
+        desc_label.setFont(_apple_font(13))
         desc_label.setStyleSheet("color: #475569;")
         layout.addWidget(desc_label)
         
@@ -7530,7 +7951,7 @@ class SettingsView(QtWidgets.QWidget):
         # Подпись
         lbl = QtWidgets.QLabel(label)
         lbl.setObjectName("previewColLabel")
-        lbl.setFont(QtGui.QFont("Inter", 11))
+        lbl.setFont(_apple_font(11))
         lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         outer_layout.addWidget(lbl)
 
@@ -7555,14 +7976,14 @@ class SettingsView(QtWidgets.QWidget):
         # Имя спикера
         name_lbl = QtWidgets.QLabel("LLaMA 3:")
         name_lbl.setObjectName(f"preview{prefix}Name")
-        name_lbl.setFont(QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Bold))
+        name_lbl.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Bold))
         bubble_layout.addWidget(name_lbl)
 
         # Текст
         msg_text = "Привет! Это стеклянный стиль." if liquid_glass else "Привет! Это матовый стиль."
         msg_lbl = QtWidgets.QLabel(msg_text)
         msg_lbl.setObjectName(f"preview{prefix}Text")
-        msg_lbl.setFont(QtGui.QFont("Inter", 13))
+        msg_lbl.setFont(_apple_font(13))
         msg_lbl.setWordWrap(True)
         bubble_layout.addWidget(msg_lbl)
 
@@ -8171,7 +8592,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         title_label.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         title_label.mousePressEvent = lambda event: self.show_model_info()
         title_label.setObjectName("titleLabel")
-        font_title = QtGui.QFont("Inter", 22, QtGui.QFont.Weight.Bold)
+        font_title = _apple_font(22, weight=QtGui.QFont.Weight.Bold)
         title_label.setFont(font_title)
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         title_layout.addWidget(title_label, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
@@ -8202,7 +8623,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         self.clear_btn = ClearButtonWithTooltip("🗑️ Очистить")
         self.clear_btn.setObjectName("clearBtn")
-        font_clear = QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Bold)
+        font_clear = _apple_font(13, weight=QtGui.QFont.Weight.Bold)
         self.clear_btn.setFont(font_clear)
         self.clear_btn.setFixedSize(120, 44)
         self.clear_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -8360,7 +8781,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Кнопка добавления файла
         self.attach_btn = NoFocusButton("+")
         self.attach_btn.setObjectName("attachBtn")
-        font_attach = QtGui.QFont("Inter", 26, QtGui.QFont.Weight.Bold)
+        font_attach = _apple_font(26, weight=QtGui.QFont.Weight.Bold)
         self.attach_btn.setFont(font_attach)
         self.attach_btn.setFixedSize(60, 60)
         self.attach_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -8371,7 +8792,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.input_field = QtWidgets.QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
         self.input_field.setObjectName("inputField")
-        font_input = QtGui.QFont("Inter", 14)
+        font_input = _apple_font(14)
         self.input_field.setFont(font_input)
         self.input_field.setMinimumHeight(60)
         self.input_field.returnPressed.connect(self.send_message)
@@ -8380,7 +8801,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Кнопка выбора режима AI (новая)
         self.mode_btn = NoFocusButton(self.ai_mode)
         self.mode_btn.setObjectName("modeBtn")
-        font_mode = QtGui.QFont("Inter", 12, QtGui.QFont.Weight.Medium)
+        font_mode = _apple_font(12, weight=QtGui.QFont.Weight.Medium)
         self.mode_btn.setFont(font_mode)
         self.mode_btn.setFixedSize(95, 60)
         self.mode_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -8390,7 +8811,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         self.send_btn = NoFocusButton("→")
         self.send_btn.setObjectName("sendBtn")
-        font_btn = QtGui.QFont("Inter", 22, QtGui.QFont.Weight.Bold)
+        font_btn = _apple_font(22, weight=QtGui.QFont.Weight.Bold)
         self.send_btn.setFont(font_btn)
         self.send_btn.setFixedSize(60, 60)
         self.send_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -8407,10 +8828,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Статус - fixed at bottom
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setObjectName("statusLabel")
-        font_status = QtGui.QFont("Inter", 11)
+        font_status = _apple_font(11)
         self.status_label.setFont(font_status)
         self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         self.status_label.setContentsMargins(30, 0, 30, 10)
+        # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: фиксированная высота предотвращает
+        # пересчёт layout при смене текста (анимация точек "...")
+        self.status_label.setFixedHeight(24)
         main_layout.addWidget(self.status_label)
 
 
@@ -9399,7 +9823,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Иконка слева (декоративная)
         header_icon = QtWidgets.QLabel("🤖")
         header_icon.setStyleSheet(
-            "background: transparent; border: none; font-size: 20px;"
+            ("background: transparent; border: none; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; font-size: 20px;" if IS_WINDOWS else "background: transparent; border: none; font-size: 20px;")
         )
         header_row.addWidget(header_icon)
         header_row.addStretch()
@@ -9515,7 +9939,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             icon_inner = QtWidgets.QVBoxLayout(icon_frame)
             icon_inner.setContentsMargins(0, 0, 0, 0)
             emoji_lbl = QtWidgets.QLabel(emoji)
-            emoji_lbl.setStyleSheet("background: transparent; border: none; font-size: 20px;")
+            emoji_lbl.setStyleSheet(("background: transparent; border: none; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; font-size: 20px;" if IS_WINDOWS else "background: transparent; border: none; font-size: 20px;"))
             emoji_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             emoji_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             icon_inner.addWidget(emoji_lbl)
@@ -10063,75 +10487,71 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Получаем текущую тему
         is_dark = self.current_theme == "dark"
         
-        # Прозрачное меню
+        # Прозрачное меню (работает на Windows и macOS/Linux)
         menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
-        if not IS_WINDOWS:
-            menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         
         # Адаптивные стили в зависимости от темы
         if is_dark:
             # Тёмная тема
             menu.setStyleSheet("""
                 QMenu {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(30, 30, 35, 0.92),
-                        stop:1 rgba(25, 25, 30, 0.95));
-                    border: 1px solid rgba(60, 60, 70, 0.8);
+                    background: rgba(30, 30, 35, 245);
+                    border: 1px solid rgba(60, 60, 70, 200);
                     border-radius: 16px;
                     padding: 10px;
                 }
                 QMenu::item {
-                    padding: 14px 45px;
+                    padding: 14px 30px;
                     border-radius: 12px;
                     color: #e0e0e0;
+                    font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
                     font-size: 15px;
                     font-weight: 600;
                     margin: 4px;
                     background: transparent;
                 }
                 QMenu::item:selected {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(60, 60, 70, 0.85),
-                        stop:1 rgba(50, 50, 60, 0.88));
+                    background: rgba(60, 60, 70, 210);
                     color: #ffffff;
                 }
                 QMenu::separator {
                     height: 1px;
-                    background: rgba(80, 80, 100, 0.4);
+                    background: rgba(80, 80, 100, 100);
                     margin: 4px 12px;
                 }
+                QMenu::indicator { width: 0px; height: 0px; }
             """)
         else:
             # Светлая тема
             menu.setStyleSheet("""
                 QMenu {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(255, 255, 255, 0.92),
-                        stop:1 rgba(250, 250, 252, 0.95));
-                    border: 1px solid rgba(255, 255, 255, 0.95);
+                    background: rgba(255, 255, 255, 245);
+                    border: 1px solid rgba(220, 220, 230, 200);
                     border-radius: 16px;
                     padding: 10px;
                 }
                 QMenu::item {
-                    padding: 14px 45px;
+                    padding: 14px 30px;
                     border-radius: 12px;
                     color: #1a202c;
+                    font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
                     font-size: 15px;
                     font-weight: 600;
                     margin: 4px;
                     background: transparent;
                 }
                 QMenu::item:selected {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(255, 255, 255, 0.85),
-                        stop:1 rgba(245, 245, 250, 0.88));
+                    background: rgba(235, 235, 245, 210);
                     color: #0f172a;
                 }
                 QMenu::separator {
                     height: 1px;
-                    background: rgba(180, 185, 200, 0.5);
+                    background: rgba(180, 185, 200, 130);
                     margin: 4px 12px;
                 }
+                QMenu::indicator { width: 0px; height: 0px; }
             """)
         
         # ── Карточка модели через QWidgetAction (кликабельная!) ──
@@ -10219,18 +10639,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu.addAction(_model_widget_action)
         menu.addSeparator()
 
-        # Создаём действия для каждого режима
-        fast_action = menu.addAction("⚡ Быстрый")
-        fast_action.setCheckable(True)
-        fast_action.setChecked(self.ai_mode == AI_MODE_FAST)
-        
-        thinking_action = menu.addAction("🧠 Думающий")
-        thinking_action.setCheckable(True)
-        thinking_action.setChecked(self.ai_mode == AI_MODE_THINKING)
-        
-        pro_action = menu.addAction("🚀 Про")
-        pro_action.setCheckable(True)
-        pro_action.setChecked(self.ai_mode == AI_MODE_PRO)
+        # Создаём действия — галочка встроена в текст (без setCheckable, чтобы не вылезала наружу)
+        _chk = "✓  "
+        _emp = "     "
+        fast_action     = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_FAST     else _emp}⚡  Быстрый")
+        thinking_action = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_THINKING else _emp}🧠  Думающий")
+        pro_action      = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_PRO      else _emp}🚀  Про")
         
         # Получаем позицию кнопки
         button_rect = self.mode_btn.rect()
@@ -10534,9 +10948,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.messages_layout.activate()
         self.messages_widget.updateGeometry()
         
-        # Синхронная отрисовка
-        self.scroll_area.viewport().repaint()
-        QtWidgets.QApplication.processEvents()
+        # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: update() вместо repaint() + processEvents()
+        self.scroll_area.viewport().update()
         
         # Восстанавливаем позицию скролла
         scrollbar.setValue(current_value)
@@ -10594,21 +11007,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Получаем текущую тему
         is_dark = self.current_theme == "dark"
         
-        # Прозрачное меню без артефактов
+        # Прозрачное меню без артефактов (работает на Windows и macOS/Linux)
         menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
-        # Прозрачность работает плохо на Windows
-        if not IS_WINDOWS:
-            menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         
         # Адаптивные стили в зависимости от темы
         if is_dark:
             # Тёмная тема - стеклянный эффект
             menu.setStyleSheet("""
                 QMenu {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(30, 30, 35, 0.92),
-                        stop:1 rgba(25, 25, 30, 0.95));
-                    border: 1px solid rgba(60, 60, 70, 0.8);
+                    background: rgba(30, 30, 35, 245);
+                    border: 1px solid rgba(60, 60, 70, 200);
                     border-radius: 20px;
                     padding: 12px;
                 }
@@ -10624,14 +11034,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     max-width: 190px;
                 }
                 QMenu::item:selected {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(60, 60, 70, 0.85),
-                        stop:1 rgba(50, 50, 60, 0.88));
+                    background: rgba(60, 60, 70, 210);
                     color: #ffffff;
                 }
                 QMenu::separator {
                     height: 1px;
-                    background: rgba(80, 80, 90, 0.50);
+                    background: rgba(80, 80, 90, 128);
                     margin: 8px 20px;
                 }
             """)
@@ -10639,10 +11047,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Светлая тема - стеклянный эффект
             menu.setStyleSheet("""
                 QMenu {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(255, 255, 255, 0.92),
-                        stop:1 rgba(250, 250, 252, 0.95));
-                    border: 1px solid rgba(255, 255, 255, 0.95);
+                    background: rgba(255, 255, 255, 245);
+                    border: 1px solid rgba(220, 220, 230, 200);
                     border-radius: 20px;
                     padding: 12px;
                 }
@@ -10658,14 +11064,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     max-width: 190px;
                 }
                 QMenu::item:selected {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(255, 255, 255, 0.85),
-                        stop:1 rgba(245, 245, 250, 0.88));
+                    background: rgba(235, 235, 245, 210);
                     color: #0f172a;
                 }
                 QMenu::separator {
                     height: 1px;
-                    background: rgba(200, 200, 210, 0.60);
+                    background: rgba(200, 200, 210, 153);
                     margin: 8px 20px;
                 }
             """)
@@ -11228,8 +11632,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.messages_layout.invalidate()
         self.messages_layout.activate()
         self.messages_widget.updateGeometry()
-        self.scroll_area.viewport().repaint()
-        QtWidgets.QApplication.processEvents()
+        # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: update() вместо repaint() + processEvents()
+        self.scroll_area.viewport().update()
         
         # ═══════════════════════════════════════════════════════════════
         # ПЛАВНЫЙ СКРОЛЛ ВНИЗ
@@ -12131,8 +12535,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             content = msg_data[1]
             files   = msg_data[2] if len(msg_data) > 2 else None
             sources = msg_data[3] if len(msg_data) > 3 else []
+            # speaker_name сохранён в БД — используем его, иначе текущий ИИ
+            stored_speaker = msg_data[5] if len(msg_data) > 5 else None
             
-            speaker = "Вы" if role == "user" else llama_handler.ASSISTANT_NAME
+            if role == "user":
+                speaker = "Вы"
+            else:
+                speaker = stored_speaker if stored_speaker else llama_handler.ASSISTANT_NAME
             if role not in ["user", "assistant"]:
                 continue
             
@@ -12179,7 +12588,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.messages_layout.invalidate()
         self.messages_layout.activate()
         self.messages_widget.updateGeometry()
-        QtWidgets.QApplication.processEvents()
+        # ✅ processEvents убран — используем delayed scroll через QTimer
         
         # Скроллим вниз с задержкой 350ms:
         # - последние 2 сообщения запускают анимацию в 60ms и 210ms
@@ -12189,7 +12598,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.messages_layout.invalidate()
             self.messages_layout.activate()
             self.messages_widget.updateGeometry()
-            QtWidgets.QApplication.processEvents()
+            # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: убрали processEvents() — он вызывал
+            # принудительную синхронную перерисовку всего окна включая нижнюю панель
             scrollbar = self.scroll_area.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
             # Обновляем видимость кнопки "вниз"
@@ -12253,6 +12663,50 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         # Запускаем управление кнопками с небольшой задержкой после загрузки
         QtCore.QTimer.singleShot(400, manage_regenerate_buttons)
+
+    # ─── Просмотрщики файлов (вызываются из attachment_manager через self) ───
+
+    def _show_image_viewer(self, file_path: str):
+        """Мини-просмотрщик изображений внутри приложения."""
+        viewer = _ImageViewerDialog(file_path, parent=self)
+        viewer.exec()
+
+    def _show_text_viewer(self, file_path: str):
+        """Мини-просмотрщик текстовых файлов внутри приложения."""
+        viewer = _TextViewerDialog(file_path, parent=self)
+        viewer.exec()
+
+    def _preview_file(self, file_path: str):
+        """Открывает предпросмотр файла в зависимости от типа."""
+        if not os.path.exists(file_path):
+            from PyQt6 import QtWidgets
+            QtWidgets.QMessageBox.warning(
+                self, "Файл не найден",
+                f"Файл не найден:\n{file_path}\n\nВозможно, файл был перемещён.",
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+            return
+        if is_image_file(file_path):
+            self._show_image_viewer(file_path)
+        elif is_text_file(file_path):
+            self._show_text_viewer(file_path)
+        else:
+            # Открываем в системном приложении
+            import subprocess, sys
+            try:
+                if sys.platform == 'darwin':
+                    subprocess.run(['open', file_path], check=True)
+                elif sys.platform == 'win32':
+                    os.startfile(file_path)
+                else:
+                    subprocess.run(['xdg-open', file_path], check=True)
+            except Exception as e:
+                from PyQt6 import QtWidgets
+                QtWidgets.QMessageBox.warning(
+                    self, "Ошибка", f"Не удалось открыть файл:\n{e}",
+                    QtWidgets.QMessageBox.StandardButton.Ok
+                )
+
 
     def create_new_chat(self):
         """Создать новый чат (УЛУЧШЕНО: с плавной анимацией кнопки)"""
@@ -12565,9 +13019,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 self.messages_layout.activate()
                 self.messages_widget.updateGeometry()
                 
-                # Синхронная отрисовка
-                self.scroll_area.viewport().repaint()
-                QtWidgets.QApplication.processEvents()
+                # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: используем update() вместо repaint() + processEvents()
+                # repaint() + processEvents() вызывали перерисовку всего окна включая нижнюю панель
+                self.scroll_area.viewport().update()
                 
             else:
                 print(f"[ADD_MESSAGE] ⚡ БЫСТРОЕ обновление (сообщение #{message_count + 1})")
@@ -12648,7 +13102,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         Никогда не использует старые значения или данные из других чатов
         """
         
-        # Если идёт генерация - останавливаем БЕЗ возврата текста
+        # Если идёт генерация - останавливаем и возвращаем текст в поле
         if self.is_generating:
             print(f"[SEND] ═══════════════════════════════════════════")
             print(f"[SEND] ОСТАНОВКА ГЕНЕРАЦИИ")
@@ -12669,16 +13123,22 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # ── Удаляем последнее сообщение пользователя из БД и UI ──
             # Оно было сохранено при отправке, но ответа не последовало —
             # без удаления AI увидит его в истории и ответит на него повторно.
+            
+            # ✅ ВОССТАНОВЛЕНИЕ: Сохраняем текст и файлы ПЕРЕД удалением виджета
+            restored_text = ""
+            restored_files = []
+            
             try:
                 conn = sqlite3.connect("chats.db")
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT role FROM chat_messages
+                    SELECT role, content FROM chat_messages
                     WHERE chat_id = ?
                     ORDER BY id DESC LIMIT 1
                 """, (self.current_chat_id,))
                 last = cur.fetchone()
                 if last and last[0] == "user":
+                    restored_text = last[1] or ""
                     cur.execute("""
                         DELETE FROM chat_messages
                         WHERE chat_id = ? AND id = (
@@ -12693,29 +13153,53 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             except Exception as e:
                 print(f"[SEND] ⚠️ Ошибка удаления сообщения из БД: {e}")
 
-            # Удаляем последний виджет пользователя из UI
+            # ✅ ВОССТАНОВЛЕНИЕ: Забираем прикреплённые файлы из последнего виджета ДО его удаления
             try:
                 for i in range(self.messages_layout.count() - 1, -1, -1):
                     item = self.messages_layout.itemAt(i)
                     if item and item.widget() and hasattr(item.widget(), 'speaker'):
                         w = item.widget()
                         if w.speaker == "Вы":
+                            # Забираем файлы из виджета если они там есть
+                            if hasattr(w, 'attached_files') and w.attached_files:
+                                restored_files = list(w.attached_files)
                             self.messages_layout.removeWidget(w)
                             w.deleteLater()
                             print("[SEND] ✓ Виджет сообщения пользователя удалён из UI")
                             break
             except Exception as e:
                 print(f"[SEND] ⚠️ Ошибка удаления виджета: {e}")
+            
+            # Если из виджета файлы не получили — берём сохранённую копию
+            if not restored_files and hasattr(self, '_last_sent_files') and self._last_sent_files:
+                restored_files = list(self._last_sent_files)
+            # Если текст из БД не получили — берём сохранённую копию
+            if not restored_text and hasattr(self, '_last_sent_text') and self._last_sent_text:
+                restored_text = self._last_sent_text
 
-            # НЕ возвращаем текст в поле - оставляем пустым
+            # ✅ ВОССТАНОВЛЕНИЕ: Возвращаем текст в поле ввода
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
             self.send_btn.setText("→")
             
+            if restored_text:
+                self.input_field.setText(restored_text)
+                self.input_field.setCursorPosition(len(restored_text))
+                print(f"[SEND] ✓ Текст возвращён в поле ввода: '{restored_text[:40]}...'")
+            
+            # ✅ ВОССТАНОВЛЕНИЕ: Возвращаем прикреплённые файлы
+            if restored_files:
+                try:
+                    self.attached_files = restored_files
+                    self.update_file_chips()
+                    print(f"[SEND] ✓ Восстановлено {len(restored_files)} прикреплённых файлов")
+                except Exception as e:
+                    print(f"[SEND] ⚠️ Не удалось восстановить файлы: {e}")
+            
             # Очищаем статус сразу (без задержки)
             self.status_label.setText("")
             
-            print(f"[SEND] ✅ Генерация остановлена пользователем")
+            print(f"[SEND] ✅ Генерация остановлена, текст и файлы возвращены")
             print(f"[SEND] ═══════════════════════════════════════════")
             return
         
@@ -12742,7 +13226,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             
             # Отвечаем немедленно без вызова AI
             self.add_message_widget(llama_handler.ASSISTANT_NAME, acknowledgment_response, add_controls=True, is_acknowledgment=True)
-            self.chat_manager.save_message(self.current_chat_id, "assistant", acknowledgment_response)
+            self.chat_manager.save_message(self.current_chat_id, "assistant", acknowledgment_response, speaker_name=llama_handler.ASSISTANT_NAME)
             
             # Обновляем название чата если это первое сообщение
             try:
@@ -12861,7 +13345,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         ai_response = f"❌ Failed to forget '{target}': {e}"
             
             self.add_message_widget(llama_handler.ASSISTANT_NAME, ai_response, add_controls=False)
-            self.chat_manager.save_message(self.current_chat_id, "assistant", ai_response)
+            self.chat_manager.save_message(self.current_chat_id, "assistant", ai_response, speaker_name=llama_handler.ASSISTANT_NAME)
             return
 
         language_switch = detect_language_switch(user_text)
@@ -12877,6 +13361,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.add_message_widget("Система", notification, add_controls=False)
 
         self.current_user_message = user_text
+        
+        # ✅ ВОССТАНОВЛЕНИЕ ПРИ ОТМЕНЕ: сохраняем текст и файлы ДО очистки поля
+        self._last_sent_text = user_text
+        self._last_sent_files = list(self.attached_files) if self.attached_files else []
         
         # ═══════════════════════════════════════════════════════════
         # УМНАЯ АДАПТИВНАЯ СИСТЕМА ВЕБ-ПОИСКА
@@ -12954,10 +13442,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     print("[SEND] Системное приветствие плавно удаляется")
             
             self.add_message_widget("Вы", user_text, add_controls=True,
-                                     attached_files=[os.path.basename(f) for f in self.attached_files] if self.attached_files else None)
+                                     attached_files=list(self.attached_files) if self.attached_files else None)
             
-            # Сохраняем сообщение с файлами в БД
-            files_to_save = [os.path.basename(f) for f in self.attached_files] if self.attached_files else None
+            # Сохраняем сообщение с файлами в БД (полный путь, чтобы можно было открыть позже)
+            files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
             
             # Сохраняем список файлов в контекстную память (для AI)
@@ -12995,10 +13483,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Режим редактирования - НЕ добавляем сообщение, оно уже было удалено
             self.input_field.clear()
             self.add_message_widget("Вы", user_text, add_controls=True,
-                                     attached_files=[os.path.basename(f) for f in self.attached_files] if self.attached_files else None)
+                                     attached_files=list(self.attached_files) if self.attached_files else None)
             
-            # Сохраняем сообщение с файлами в БД
-            files_to_save = [os.path.basename(f) for f in self.attached_files] if self.attached_files else None
+            # Сохраняем сообщение с файлами в БД (полный путь для открытия)
+            files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
             
             # Сохраняем список файлов в контекстную память (для AI)
@@ -13189,20 +13677,35 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 action_history.append("[✓] найдено в интернете")
             
             # Добавляем сообщение с защитой
+            # Определяем имя модели которая реально ответила (для пузыря)
             try:
-                self.add_message_widget(llama_handler.ASSISTANT_NAME, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [])
+                _response_model_key = (
+                    self.current_worker.model_key
+                    if hasattr(self, 'current_worker') and self.current_worker
+                       and hasattr(self.current_worker, 'model_key')
+                    else llama_handler.CURRENT_AI_MODEL_KEY
+                )
+                _response_speaker = llama_handler.SUPPORTED_MODELS.get(
+                    _response_model_key,
+                    llama_handler.SUPPORTED_MODELS.get(llama_handler.CURRENT_AI_MODEL_KEY)
+                )[1]
+            except Exception:
+                _response_speaker = llama_handler.ASSISTANT_NAME
+
+            try:
+                self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [])
             except Exception as e:
                 print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
                 try:
                     # Пробуем без thinking_time
-                    self.add_message_widget(llama_handler.ASSISTANT_NAME, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [])
+                    self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [])
                 except Exception as e2:
                     print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
             
             # Сохраняем в БД с защитой
             try:
                 if hasattr(self, 'chat_manager') and hasattr(self, 'current_chat_id'):
-                    self.chat_manager.save_message(self.current_chat_id, "assistant", response, sources=sources or [])
+                    self.chat_manager.save_message(self.current_chat_id, "assistant", response, sources=sources or [], speaker_name=_response_speaker)
                 else:
                     print(f"[HANDLE_RESPONSE] ✗ Нет chat_manager или current_chat_id")
             except Exception as e:
@@ -13258,7 +13761,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 print(f"[HANDLE_RESPONSE] Ошибка восстановления UI: {e}")
 
 
-    def regenerate_last_response(self):
+    def regenerate_last_response(self, force_model_key: str = None):
         """Перегенерировать последний ответ ассистента
         
         ЛОГИКА:
@@ -13267,8 +13770,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         3. Получаем последнее сообщение пользователя из БД
         4. Удаляем последний ответ ассистента (из UI и БД)
         5. Перезапускаем генерацию с последним запросом пользователя
+        
+        force_model_key — если передан, используется эта модель вместо текущей
+        (для кнопки «Перегенерировать через другую модель»)
         """
-        print("[REGENERATE] ▶ Начинаем регенерацию последнего ответа")
+        print(f"[REGENERATE] ▶ Начинаем регенерацию последнего ответа"
+              + (f" (модель: {force_model_key})" if force_model_key else ""))
         
         # Если генерация идёт - останавливаем её
         if self.is_generating:
@@ -13393,8 +13900,17 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.last_message_use_search = actual_use_search
         print(f"[REGENERATE] поиск={'вкл' if actual_use_search else 'выкл'}")
 
+        # Если передана другая модель — обновляем статус соответственно
+        if force_model_key and force_model_key != llama_handler.CURRENT_AI_MODEL_KEY:
+            other_display = llama_handler.SUPPORTED_MODELS.get(
+                force_model_key, ("", force_model_key))[1]
+            self.status_base_text = f"⏳ Перегенерация через {other_display}"
+            self.status_label.setText(self.status_base_text)
+
         worker = AIWorker(last_user_msg, self.current_language, actual_deep_thinking,
-                         actual_use_search, False, self.chat_manager, self.current_chat_id, None, self.ai_mode)
+                         actual_use_search, False, self.chat_manager, self.current_chat_id,
+                         None, self.ai_mode,
+                         model_key_override=force_model_key)
         worker.signals.finished.connect(self.handle_response)
         self._current_request_id = worker.request_id
         self.current_worker = worker
@@ -13405,7 +13921,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.active_workers = self.active_workers[-5:]
         
         self.threadpool.start(worker)
-        print(f"[REGENERATE] Запущена новая генерация (режим: {self.ai_mode}, deep_thinking: {actual_deep_thinking}, search: {self.use_search})")
+        print(f"[REGENERATE] Запущена новая генерация (модель: {force_model_key or llama_handler.CURRENT_AI_MODEL_KEY}, "
+              f"режим: {self.ai_mode}, deep_thinking: {actual_deep_thinking}, search: {self.use_search})")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # STATUS PIPELINE - ПОЭТАПНОЕ ОБНОВЛЕНИЕ СТАТУСА В НИЖНЕМ ЛЕВОМ УГЛУ
@@ -13633,7 +14150,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Текст - КРИТИЧНО: убираем любые стили которые могут создать слой
         label = QtWidgets.QLabel("Вы уверены, что хотите\nочистить чат?")
         label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        label.setFont(QtGui.QFont("Inter", 16, QtGui.QFont.Weight.Medium))
+        label.setFont(_apple_font(16, weight=QtGui.QFont.Weight.Medium))
         
         # ИСПРАВЛЕНИЕ: Минимальный стиль только для цвета текста
         # НЕ используем padding, background и другие свойства которые создают слои
@@ -13654,7 +14171,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         buttons.setSpacing(15)
         
         no_btn = QtWidgets.QPushButton("НЕТ")
-        no_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Bold))
+        no_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Bold))
         no_btn.setFixedHeight(54)
         no_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         
@@ -13689,7 +14206,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             """)
         
         yes_btn = QtWidgets.QPushButton("ДА")
-        yes_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Bold))
+        yes_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Bold))
         yes_btn.setFixedHeight(54)
         yes_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         
@@ -14020,7 +14537,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Заголовок
         title = QtWidgets.QLabel("⚠️ Удалить все чаты?")
         title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QtGui.QFont("Inter", 18, QtGui.QFont.Weight.Bold))
+        title.setFont(_apple_font(18, weight=QtGui.QFont.Weight.Bold))
         
         if is_dark:
             title.setStyleSheet("QLabel { color: #e89999; background-color: none; border: none; }")
@@ -14033,7 +14550,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Текст предупреждения
         warning = QtWidgets.QLabel("Это действие невозможно отменить.\nВсе чаты будут удалены безвозвратно.")
         warning.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        warning.setFont(QtGui.QFont("Inter", 13, QtGui.QFont.Weight.Normal))
+        warning.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Normal))
         warning.setWordWrap(True)
         
         if is_dark:
@@ -14049,7 +14566,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         buttons.setSpacing(15)
         
         no_btn = QtWidgets.QPushButton("Отмена")
-        no_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Medium))
+        no_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
         no_btn.setMinimumHeight(48)
         no_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         
@@ -14081,7 +14598,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             """)
         
         yes_btn = QtWidgets.QPushButton("Удалить все")
-        yes_btn.setFont(QtGui.QFont("Inter", 14, QtGui.QFont.Weight.Bold))
+        yes_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Bold))
         yes_btn.setMinimumHeight(48)
         yes_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         yes_btn.setStyleSheet("""
@@ -14282,6 +14799,23 @@ def main():
 
     if IS_WINDOWS:
         app.setStyle("Fusion")
+        # ── Apple-style рендеринг шрифтов на Windows ──────────────────────
+        # QtGui уже импортирован глобально — НЕ импортируем повторно (UnboundLocalError)
+        _db = QtGui.QFontDatabase()
+        _win_font = next(
+            (n for n in ["Segoe UI Variable", "Segoe UI"] if n in _db.families()),
+            "Segoe UI"
+        )
+        _gf = QtGui.QFont(_win_font, 11)
+        _gf.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
+        _gf.setStyleStrategy(
+            QtGui.QFont.StyleStrategy.PreferAntialias |
+            QtGui.QFont.StyleStrategy.PreferQuality
+        )
+        app.setFont(_gf)
+        import os; os.environ.setdefault("QT_FONT_DPI", "96")
+        print(f"[FONT] ✓ Apple-style: {_win_font}, субпиксельный рендеринг")
+
 
     # ── Шаг 2: запуск всех проверок ───────────────────────────────────────
     print("[MAIN] Запуск диагностики...")
