@@ -26,10 +26,16 @@ from context_memory_manager import ContextMemoryManager
 # Отдельная память для DeepSeek — изолирована от LLaMA (deepseek_memory.db)
 try:
     from deepseek_memory_manager import DeepSeekMemoryManager
-    print("[IMPORT] ✓ deepseek_memory_manager загружен")
+    # ─── СИНГЛТОН: один инстанс на всё время работы программы ───────────────
+    # Это критично: _current_chat_id хранится в объекте, и если каждый раз
+    # создавать новый DeepSeekMemoryManager() — состояние теряется и память
+    # никогда не чистится при смене чата.
+    _DS_MEMORY = DeepSeekMemoryManager()
+    print("[IMPORT] ✓ deepseek_memory_manager загружен (singleton)")
 except ImportError:
     print("[IMPORT] ⚠️ deepseek_memory_manager.py не найден — используется общая память")
     DeepSeekMemoryManager = None
+    _DS_MEMORY = None
 
 # ═══════════════════════════════════════════════════════════════
 # ИСПРАВЛЕНИЕ №1: Импорт запрещенных английских слов (исправлено)
@@ -66,6 +72,42 @@ except Exception as e:
 # -------------------------
 IS_WINDOWS = sys.platform == "win32"
 
+# ── Директория приложения (для поиска ресурсов) ─────────────────────────────
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Логотипы моделей встроены как base64 ─────────────────────────────────────
+# Для надёжности: не зависят от расположения файлов на диске.
+# Fallback: если файл assets/logos/<model>_logo.png существует рядом — берётся он.
+import base64 as _b64
+_MODEL_LOGOS_B64 = {
+    "llama3":   "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",
+    "deepseek": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAQi0lEQVR4nO1aeXSVRZb/3arvrXlJSEJWdoKoQbRbe9xGhjhweprTNujxvKc9tqitDS6Nrdjigvq9r91XVEZtaccFddp5T2lX2taxDQ6ijIiiJAo2QoCQfXlZ3vpV3fnjSzDIlhDs6emT3zk5OSepurfur27de+vWBwxjGMMYxjCGMYxhDGMYwxjGMIYxjGH8H4CZiZnpIKPI+fk7QTDCcrrJBvCNTQci4buy/LDLZWYKRaOiorqQgMp+/6lCzZRKDgIIhUj1/dWQQMZuywVakkSTU/uQSMxRsejuU1YKzjx61/UTXo1GIfrL+JuAaZoiGGQ5kLFuF/Dof9T/89V3tz58yeLGdRfd1Nlw2W3Jprse/cu5ABCJOHL65D389JYTLzSZ54frnweAoLnRPRA9wSBL0zTFgcYYAxE0EEWWRQqwwLwx8OCzBVOaW/lIg/QErdlIpNCtOLNrbImoSyTUhLrW/PmrP8n5h7QWSKUBwUBRXuzTvFz5KTNTOBxmAKiocDz0612eWZ3dUDlG1oyabTWlFeMr6qebbKyyyN73ipgA4mj04F4ypCPAzEQEAki/+PqmiR9vKry2ud2Y3Z10l7HwQDNA/M14Q2hAC/SkgIwNFgI2AMrLiifO+ZdtU8+YMaXWNFlYFmmHWZaIkrrMao40tI8MaqUxemTPhpMqeubPDZau7TMUYIpEIKqrQfVlH9Oy+SfYUhDfvKTlcSK13Lyy+P095PbDIXtAr/EgIh1esn3Rq2vyb+5OZQUySUArxST0bvb7WGYNwUIzkSIpDAFiQUJI5tTO2TOm1M6bt85lWZTpmxcEEAUQj2sPEWBrndnRkn1c5zrXB9ff13DPndfQDeEwG5ZFdiiE3fo8LmDBrU2PbOsomBdAcyuA96sAAeDwEMDMFApFBTOw6O4dT2xqGH1heydgQNtEWkopiEH9IjyDAJAEHIdwOcQwpMpA2x7fEUuf3zz9ivMmr5o3b51r2bIfZPrrc7lJcxogCMFK6aZOL7P0XnfzQw09t1l0K/NG929fKJvV0KInpFMJf0fcM2trU+FpBNglpRQDnHC8ah+2HBIBleEq+d6LIfvqO2ufaIyNvjDWqTNuoQwFl+EQ/W0QeB9/ZRCE0NQd98qPakZFlz7z9fkLLpj4J9N0drWpNwZ4XZ4GKQCbBYMgPaR0e6dUsL3zo69veutya+TD3am8E9O2cyCSaSCd0ZmcAFx+b/wLAJgyZZ9LGDwBkQjLUIjs8ANbrviqcezFsU6ddgl2M+QhBhQigubmDn/huk3Fb97zWO1Fiy6jp02TDaAKqwC4XbGPJHIu3T0DUhAz4klf8RvvF7/f1p0rbVsrScwMgiCQIHKRiiUnjWlZBwDV1eF9EnDAFPFtmCaLUAh6xcra8q2NI+/p6IIyBLs0JHhwovoTAECQYK2b2/36821FT1lLt5xtWWQDhQIATq6Iv2uILq0YEmBoAARCWrmNpo5cyQpaCiFB0iASBkPAMEgH/PbHP51zfD1MFpZl7XX+B01ATQ0IIP6vj1y3dWVy/AYUA/LwFFMkhBSamru8ekt98X/+9tkvZ1jWMemgudF97plHbc0fEf+DxwMCf5P6CIAUzkn6RhBDa2h/FsS4svhDRMQmqvZr54AXbzILi0g/94ftU1d+MHJ9R5dPGEKL3vB2aEbvE1ozBJXkd3accequU86cdfQmBFlGzv961Jtri2rqOwJZBrQGxF5GERiaOe32CHdZbtPbS82iWeEweF/prw8D9oCqSmfs+s3eeRntMyRp7bj94a6mSRBDN7Xn5L3zcfErzKuzEQVCs8u3TxrfGBoZiNuAIKBfUGNoZtgZRcrtE+7i3JYN58zYfA4RNBA+oLYBEsC0ahXZzBvdze00K5UEQACztpWCVgzFGjYDCmSzs7Z9xpyBEAAQpNbKrmvNO3LBreVPMZPGdDZu/MWklSdMbj4ry5fJaA0maDAYwoDw+WAU5mk5sbjh9/Pm7KycNm1au2mGaX9nvw8DygLBSFREQ1CP/957rFbZ5Wkb2uMShs/n7D+zU2FkbMBOG2ANJcgmJiEGF2Y0O4UxC0HCSCVhN3WVnH31nfXLuSp6MRGQ7aUaQBHgIg2tXQZRYXb36oK8zHvHTuQ//etZpf99H5y7ycGMHzABFdVBAoC6Jv+JNnsgBVCQ0/lFeWl6qXTrrzWRTHRnJqdSvumtnfLERCanLJ4wkFbQUmjqddkDgwEmQUQgrYgFAVLCiHfD3qlLfnbl7TOPWPFGzdwNX7l/yOR1EcFmTcLlkjSqmK4zFxR+0CtIMIOJ9n/uB01AVe/v9m4xIa0Anw+icIT+3eJfFj7Wb9hKAA8yb8l94MnknNpd/itaugInxnoEBCtFgiTzvr2BAZaSKT+rs8nlQndnPHtiT1IAWrGQZCQSUNvtvJNerJKfALI7HmcQkSSWrDTQ0JLIcuqGamFZlKZBhKWBFUJVDgWJHlEMdlze1ukC02SjLR9yWins6mqQVRNlovIYgOXMePbex3ect3lXzl3tsZxR6bStIEnu3dTRDAgU5HTX/ftt702WNDt++7LaOZtrC5c3d3hzBNssyCV1RutYJscvBPy9tBGDYCCJ0uLO1lsuL7FNcz8MHwADmlBUVMmOSnee7iUgkUKBZZH92QqoUIiUZZGNaEgxM0UiLIkYiy4d89xVoS9/MKao4VVvwJBakU17BUhBAFNHtyv/iltnvrvovoaFN8wb98rJx7XMLshJpm12aQAMIiEIDO6bTAwCCaR6jpuc3AUA4fDgI++gGFO9Fy6tgXRKjAWAVav2VEpE7HRriE2TjWOOOanh324unVNe2vhYTjYMzWQT1B4kEAi2zR6NVHNbT+H9N91XO3t+aOyqMYWtiwJZkJq17s0s/YsOJgF4PVw3e8aXLY7uwZo/QAKamhyl6SR1SgFkMgDDfQzzZg9Aan+1gGWRbZosbM3yroUll08obnjA74OhWNj0rTlSQk0oS61JJuPpNLv9psnirkVjHspxt6w1DCGJ9Lf1aGkAPo+9mSikHPen78oDqgAAOYFMnAjQDJVMydHPveIuBwDT1PuVY1mkmaGnT2fjjmtKrxlX3LLC7xOG1kr1vyPayuv6sLr49owdcOeNQIMFYPFiFkeN67wt22tD2UR71D7stNZ8Wck1g7NlTwxoUmVlJQDAILWDBCAIGZuyRM1meXyvWx5QDhFxVRUUgizvubZubn5Wx2fCJSU4s0eqyiSRyiigpUOcC4u0ZZFeNK/8da+naxMZUoC/SW2aISQ0xhbxGmD/192DYVCsFYyUO6RwarW0DbR3+c8iENfUHFw5EXEwCBB9r+f4ithFub6etILRLyISSLAnmVC6rqlg/k3319378ts7v3/7I1/NTaY9haTBIN13BrSUEC7Ruf3Kf9qyFgBCob27PQPBgAiomRJlACgrUJ9LToFZu1RKI542frT600+LolFSA0lB0RAp02Rj/rnj148q6nwwK0v0Brg+EIQQoqub8GVd2a9XvFO0fsO2Sc/Euv35BOwuqAi2drvBI7LSb9KE05NO93jw53/ABESCQQ0A83+6rdpFyTophQA4k9A5/tfezg85o/Z/5eyPcBgqGGR550J5a463rZaE2KNX53SJBBIpqJYOF3f1OCmjf/mgtBAew6bxpYnlAJzm4SFiQIt23Jcl0amJrKzUKsMFBhGnEkBLLOtqJxtUahz0ecuRVVFRRUTF3RNGJ67PDoC0Bn97AwUgpWQSBIk9w78y3IKyvW0fX33JuA8AU0SH8Egy4BhQUVFFADCmJPOy1wNSGlJpqK50/kRrqW+uZZE2w9jvw4hpshHsffCwrNPtYJDlLZeNfiHgaqpyeSCZeR9G7M2n0ho+j6YxxUmLiHQwEh7SfXzABITDlQpgCgVTb7nRUSeEEFIAnXHo2sZcq6ZmZ4FlQe/vJcayyHZ2ikWfpygNHDOJFnpdcc3auWEfaA0MrdweIfP8rX++5ZfjXgsGI3Iouw8MggAiYtOELM8vjxXmdT/qywJprVlqxV3J7NLHXpT3A6Try8L9vMAxNLJxo3vxA1tvfPiZ2pkAaRBxRQU4GGT5qwuKPinLb1vmzxJS8561wbft1yyQ64unT5maWqiZqSISPNSmw24MKg2Gw1BgpovOy3k8YMSamISQBErEYTd1l1xw45IdVy2bT5l589gFAKbp+PD2Nfb47Y2jb/+f6tFvX3t381ONGyMByyI9cyYETBYX/rj9xoC7rZaElAy9j3TGUAydnQM5vqTturlnj9kQjEBYA7zyHjYCiIiDUYiK0bmtE0rbr8/NhshoaCG17OmC2lZftOSOx2svWLaMMtOnszFlSpQA4MdneeqZu5tbOwVvaRx5YfilH364/LVNx82fT5kF+XAde+yx7UePa7kk15cgW0tF0HvsLIOUzwNZ6G94xvrVmAdNk91Ddf3dNh3KpGCQ5YqXSF0ably5q61olkpnbCaSmg0ekZ0WR45tucq8YtRDDOBHCzZ7fj7tCHvt180PbWseeUUqQUlpwJuf3d02dVLr3IUXjX8jePV2X3TJ2MTiJXW/2dZYdnN7zM4YklzsxExWCpw/IsOzpzfOOWfWmDccdnbX/kM6BodEgPPQCF63blfB714NfF7XnlNC2laAIZQCjxgBMSq/7amLzuhaXFExvh4Anntl2z+uXDNudSwGLaXNNgw5MjuJo8d2XHzD5aVPAiyZIX59+64nd3SV/SwR0xrym84vseJAVgoFI9JvHjUuee+C80vf1UOOAENo6UYiERkKhdSzL+04+c/r895qimVlC7aVAMk0k/J5hcz1drVn+1PvBPyqubHFM7Olc8QRmsEEJobSShvIz9ViQtn2xb9ZsO0BotOTALDwjuYntjaNuCCTNjRISwKIwGQzyHBJ5PgyKM7reOnMU92/OO203A7AOZ5/VQIcEliGQqSWPru1cv2mghXNsew8KNsWZBianVcTtxsQEsiknN5Pf4UEzbYSnB2AyMvu2DwiJ/VyIIu/KClA82ebXI/VdxSMUWmn2apVb+tEK9YsqbgYOP24rd+be/bEDcFIREZDoUOKCUNu6vc9ZD79/BcnrP3LqBUN7dljUykoQ2gCQJqFhpMPBRFE/21yCnsFxVCCpHT7ABcDZAB+0dg1vjS5uLXTNzMW9x2bzqDItsnldsH2edGQn9314p3XrL4BCOpD3f3daxgq+jzh3XfXlrz6Yfljje0FZ3b1AFrbSgoGQIIhnPvMHio1AM2CiRXBTjNkwC9lQVbHhlOmtJ3/81D55wDAHHH/seqUotoGwxg1WuufnPZ+A1EofTjWftiedYLBiIxGQ0oQcOsjO8/d3pxr9sQDR/WkgHQGYM0ASPVVe+y8ZJEQEMIAvB7ALxPxwsKeJfcs3HgX0endzrcCJyhg73zfp2+o6z6s71r9P5lhXuNb8uSkn2ytE2f2JKgylfGXsuEFO0+7IAKINSQSMZ8n82VBPv9x2tSOF2bNmLgJ6Ms0vYYzkxkOU98zlxV2LmOHY83fyed3wQjvUaMzbww89Vre5LaYe7RKiDLp0lKI+M6A32ibeqTcPO37JY127+hgkGUkgiGd678J9LXHMaBP55hMk41D6esPFX+VT0+ZmcIATYmCqqsdnX09vGDw72C3hzGMYfy/xf8CHEwD+GU6X+QAAAAASUVORK5CYII=",
+    "mistral":  "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",
+}
+
+def _get_model_logo_pixmap(model_key: str, size: int = 30) -> "QtGui.QPixmap":
+    """Возвращает QPixmap логотипа модели. Сначала ищет файл, затем base64."""
+    from PyQt6 import QtGui, QtCore
+    # Попытка 1: файл рядом с run.py
+    file_path = os.path.join(APP_DIR, "assets", "logos", f"{model_key}_logo.png")
+    px = QtGui.QPixmap(file_path)
+    if not px.isNull():
+        return px.scaled(size, size,
+                         QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                         QtCore.Qt.TransformationMode.SmoothTransformation)
+    # Попытка 2: встроенный base64
+    b64 = _MODEL_LOGOS_B64.get(model_key, "")
+    if b64:
+        data = _b64.b64decode(b64)
+        px2 = QtGui.QPixmap()
+        px2.loadFromData(data, "PNG")
+        if not px2.isNull():
+            return px2.scaled(size, size,
+                              QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                              QtCore.Qt.TransformationMode.SmoothTransformation)
+    return QtGui.QPixmap()  # пустой — покажем fallback-букву
+
+
 # ═══════════════════════════════════════════════════════════════
 # Apple-style Font System для Windows
 # На Windows: Segoe UI Variable (Win11) / Segoe UI (Win10) —
@@ -76,8 +118,7 @@ def _apple_font(size: int, weight=None):
     from PyQt6 import QtGui
     if IS_WINDOWS:
         candidates = ["Segoe UI Variable", "Segoe UI", "Inter"]
-        db = QtGui.QFontDatabase()
-        chosen = next((n for n in candidates if n in db.families()), "Segoe UI")
+        chosen = next((n for n in candidates if n in QtGui.QFontDatabase.families()), "Segoe UI")
         font = QtGui.QFont(chosen, size)
         font.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
         font.setStyleStrategy(
@@ -99,7 +140,7 @@ from llama_handler import (
     AI_MODE_FAST, AI_MODE_THINKING, AI_MODE_PRO,
     SYSTEM_PROMPTS, MODE_STRATEGY_RULES,
     get_current_ollama_model, get_current_display_name,
-    call_ollama_chat, warm_up_model,
+    call_ollama_chat, warm_up_model, unload_model, unload_all_models,
 )
 # Мутируемые глобалы LLaMA — доступ только через модуль:
 #   llama_handler.CURRENT_AI_MODEL_KEY   — текущая модель
@@ -108,6 +149,32 @@ from llama_handler import (
 
 APP_TITLE = "AI Assistant"
 
+
+# Импортируем конфигурацию Mistral Nemo
+try:
+    from mistral_config import (
+        get_mistral_system_prompt,
+        clean_mistral_response,
+        MISTRAL_MODEL_NAME,
+        MISTRAL_DISPLAY_NAME,
+        MISTRAL_OLLAMA_PULL,
+    )
+    print("[IMPORT] ✓ mistral_config загружен")
+except ImportError:
+    print("[IMPORT] ⚠️ mistral_config.py не найден — Mistral недоступен")
+    def get_mistral_system_prompt(language, mode): return ""
+    def clean_mistral_response(text): return text
+    MISTRAL_MODEL_NAME    = "mistral-nemo:12b"
+    MISTRAL_DISPLAY_NAME  = "Mistral Nemo"
+    MISTRAL_OLLAMA_PULL   = "ollama pull mistral-nemo:12b"
+
+# Импортируем менеджер памяти Mistral
+try:
+    from mistral_memory_manager import MistralMemoryManager
+    print("[IMPORT] ✓ mistral_memory_manager загружен")
+except ImportError:
+    print("[IMPORT] ⚠️ mistral_memory_manager.py не найден — используется общая память")
+    MistralMemoryManager = None
 
 # Импортируем конфигурацию DeepSeek
 try:
@@ -168,6 +235,7 @@ from model_downloader import (
     delete_model_files_from_disk,
     LlamaDownloadDialog,
     DeepSeekDownloadDialog,
+    MistralDownloadDialog,
 )
 
 # ── Система проверок и самовосстановления ───────────────────────────────
@@ -4702,11 +4770,15 @@ def clear_messages():
 def get_memory_manager(model_key: str):
     """
     Возвращает нужный менеджер памяти в зависимости от модели.
-    DeepSeek → DeepSeekMemoryManager (deepseek_memory.db)
+    DeepSeek  → DeepSeekMemoryManager  (deepseek_memory.db)
+    Mistral   → MistralMemoryManager   (mistral_memory.db)
     LLaMA и все остальные → ContextMemoryManager (context_memory.db)
     """
-    if model_key == "deepseek" and DeepSeekMemoryManager is not None:
-        return DeepSeekMemoryManager()
+    if model_key == "deepseek" and _DS_MEMORY is not None:
+        # Возвращаем СИНГЛТОН — чтобы _current_chat_id сохранялся между вызовами
+        return _DS_MEMORY
+    if model_key == "mistral" and MistralMemoryManager is not None:
+        return MistralMemoryManager()
     return ContextMemoryManager()
 
 
@@ -4804,6 +4876,9 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     if _mk == "deepseek":
         base_system = get_deepseek_system_prompt(detected_language, mode)
         print(f"[GET_AI_RESPONSE] Используется промпт DeepSeek")
+    elif _mk == "mistral":
+        base_system = get_mistral_system_prompt(detected_language, mode)
+        print(f"[GET_AI_RESPONSE] Используется промпт Mistral Nemo")
         # Если пользователь пытается исправить ИИ — добавляем жёсткое предупреждение
         if detect_user_correction(user_message):
             _warn = (
@@ -5589,6 +5664,11 @@ Consider information from BOTH sources: search results AND attached files."""
     # ═══════════════════════════════════════════════════════════════
     # ФИЛЬТРАЦИЯ CJK + АНГЛИЙСКИХ СЛОВ
     # ═══════════════════════════════════════════════════════════════
+    # Постобработка ответа Mistral — убираем артефакты токенизатора
+    if _mk == "mistral" and response_text and not response_text.startswith("❌"):
+        response_text = clean_mistral_response(response_text)
+        print(f"[GET_AI_RESPONSE] [Mistral] Постобработка применена")
+
     # CJK (китайский/японский/корейский) фильтруем ВСЕГДА для deepseek
     if _mk == "deepseek" and response_text:
         import re as _re_cjk_check
@@ -5908,6 +5988,14 @@ class MessageWidget(QtWidgets.QWidget):
         self.is_acknowledgment = is_acknowledgment  # Быстрый ответ без AI (нет регенерации)
         self.attached_files = list(attached_files) if attached_files else []  # Файлы для восстановления при отмене
         
+        # ── История перегенерации ─────────────────────────────────────────
+        # Каждая запись: {"text": str, "thinking_time": float, "action_history": list, "sources": list}
+        self._regen_history = [{"text": text, "thinking_time": thinking_time, "action_history": action_history or [], "sources": sources or [], "speaker": speaker}]
+        self._regen_idx = 0          # текущий индекс
+        self._regen_prev_btn = None  # кнопка «‹»
+        self._regen_next_btn = None  # кнопка «›»
+        self._regen_counter = None   # метка «2/3»
+        
         # Создаём эффект прозрачности для анимации
         self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_effect)
@@ -6216,6 +6304,7 @@ class MessageWidget(QtWidgets.QWidget):
         formatted_text = format_text_with_markdown_and_math(text)
         display_text = f"<b style='color:{color};'>{speaker}:</b><br>{formatted_text}"
         message_label.setText(display_text)
+        self._speaker_color = color  # сохраняем для _regen_apply_entry
         message_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
         
         # ✅ MessageWidget только обновляет себя, БЕЗ управления родителем
@@ -6353,6 +6442,90 @@ class MessageWidget(QtWidgets.QWidget):
                 }}
             """)
             controls_layout.addWidget(regenerate_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+            
+            # ── Кнопки навигации ‹ 1/1 › ─────────────────────────────────────
+            # ВАЖНО: НЕ используем objectName("floatingControl") — иначе глобальный
+            # стиль перебивает размеры и кнопки выглядят асимметрично.
+            _ns = 28  # nav size
+            _nr = _ns // 2
+            _nav_btn_css = f"""
+                QPushButton {{
+                    background: {self.btn_bg};
+                    color: {self.icon_color};
+                    border: 1px solid {self.btn_border};
+                    border-radius: {_nr}px;
+                    font-size: 14px;
+                    font-weight: 600;
+                    min-width: {_ns}px;
+                    max-width: {_ns}px;
+                    min-height: {_ns}px;
+                    max-height: {_ns}px;
+                    padding: 0px;
+                    margin: 0px;
+                }}
+                QPushButton:hover {{
+                    background: {self.btn_bg_hover};
+                    border: 1px solid {self.hover_border_color};
+                }}
+                QPushButton:pressed {{ background: {self.btn_bg_hover}; }}
+                QPushButton:disabled {{
+                    opacity: 0.35;
+                }}
+            """
+            _nav_lbl_css = f"""
+                QLabel {{
+                    color: {self.icon_color};
+                    font-size: 11px;
+                    font-weight: 600;
+                    background: transparent;
+                    border: none;
+                    min-width: 28px;
+                    max-width: 28px;
+                    min-height: {_ns}px;
+                    max-height: {_ns}px;
+                    padding: 0px;
+                    margin: 0px;
+                }}
+            """
+
+            # Группируем ‹ 1/1 › в один QWidget для симметрии
+            nav_group = QtWidgets.QWidget()
+            nav_group.setVisible(False)  # скрыт пока 1 вариант
+            nav_group_layout = QtWidgets.QHBoxLayout(nav_group)
+            nav_group_layout.setContentsMargins(0, 0, 0, 0)
+            nav_group_layout.setSpacing(2)
+
+            prev_btn = QtWidgets.QPushButton("‹")
+            prev_btn.setFixedSize(_ns, _ns)
+            prev_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            prev_btn.setStyleSheet(_nav_btn_css)
+            prev_btn.setEnabled(False)
+            prev_btn.setToolTip("Предыдущий вариант")
+            prev_btn.clicked.connect(self._regen_go_prev)
+
+            counter_lbl = QtWidgets.QLabel("1/1")
+            counter_lbl.setFixedSize(28, _ns)
+            counter_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            counter_lbl.setStyleSheet(_nav_lbl_css)
+
+            next_btn = QtWidgets.QPushButton("›")
+            next_btn.setFixedSize(_ns, _ns)
+            next_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            next_btn.setStyleSheet(_nav_btn_css)
+            next_btn.setEnabled(False)
+            next_btn.setToolTip("Следующий вариант")
+            next_btn.clicked.connect(self._regen_go_next)
+
+            nav_group_layout.addWidget(prev_btn)
+            nav_group_layout.addWidget(counter_lbl)
+            nav_group_layout.addWidget(next_btn)
+
+            controls_layout.addWidget(nav_group, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+            self._regen_prev_btn = prev_btn
+            self._regen_counter  = counter_lbl
+            self._regen_next_btn = next_btn
+            self._regen_nav_group = nav_group
             
             # Сохраняем ссылку на кнопку регенерации для управления видимостью
             self.regenerate_button = regenerate_btn
@@ -6989,17 +7162,160 @@ class MessageWidget(QtWidgets.QWidget):
         print("[FADE_OUT] Запущена анимация fade-out (универсальная для всех тем)")
 
 
+    def _regen_update_nav(self):
+        """Обновить кнопки навигации и счётчик после изменения истории."""
+        total = len(self._regen_history)
+        idx   = self._regen_idx
+        show  = total > 1
+        
+        # Показываем/скрываем group-контейнер целиком
+        nav_group = getattr(self, '_regen_nav_group', None)
+        if nav_group:
+            nav_group.setVisible(show)
+        else:
+            # Fallback: управляем по отдельности (старый код)
+            for w in [self._regen_prev_btn, self._regen_counter, self._regen_next_btn]:
+                if w:
+                    w.setVisible(show)
+        
+        if show:
+            if self._regen_counter:
+                self._regen_counter.setText(f"{idx + 1}/{total}")
+            if self._regen_prev_btn:
+                self._regen_prev_btn.setEnabled(idx > 0)
+            if self._regen_next_btn:
+                self._regen_next_btn.setEnabled(idx < total - 1)
+
+    def _regen_go_prev(self):
+        """Показать предыдущий вариант ответа."""
+        if self._regen_idx > 0:
+            self._regen_idx -= 1
+            self._regen_apply_entry(self._regen_idx)
+
+    def _regen_go_next(self):
+        """Показать следующий вариант ответа."""
+        if self._regen_idx < len(self._regen_history) - 1:
+            self._regen_idx += 1
+            self._regen_apply_entry(self._regen_idx)
+
+    def _regen_apply_entry(self, idx: int):
+        """Применить запись из истории: обновить текст, имя модели и счётчик."""
+        if idx < 0 or idx >= len(self._regen_history):
+            return
+        entry = self._regen_history[idx]
+        self.text = entry["text"]
+        # Обновляем имя модели (при перегенерации через другую модель)
+        if entry.get("speaker"):
+            self.speaker = entry["speaker"]
+        
+        # Обновляем текст пузыря
+        if hasattr(self, 'message_label') and self.message_label:
+            try:
+                formatted = format_text_with_markdown_and_math(entry["text"])
+            except Exception:
+                formatted = entry["text"]
+            color = getattr(self, '_speaker_color', '#4CAF50')
+            self.message_label.setText(
+                f"<b style='color:{color};'>{self.speaker}:</b><br>{formatted}"
+            )
+        
+        self._regen_update_nav()
+
+    def add_regen_entry(self, text: str, thinking_time: float = 0,
+                        action_history: list = None, sources: list = None,
+                        speaker: str = None):
+        """
+        Добавить новый вариант в историю перегенерации.
+        speaker — имя модели (может отличаться при force_model_key).
+        """
+        entry = {
+            "text": text,
+            "thinking_time": thinking_time,
+            "action_history": action_history or [],
+            "sources": sources or [],
+            "speaker": speaker or self.speaker,
+        }
+        self._regen_history.append(entry)
+        self._regen_idx = len(self._regen_history) - 1
+        self._regen_apply_entry(self._regen_idx)
+        self._regen_update_nav()
+        # Восстанавливаем яркость после перегенерации
+        self._set_regen_dim(False)
+        # ВАЖНО: _persist_regen_history НЕ вызываем здесь — она должна вызываться
+        # ПОСЛЕ save_message в handle_response, иначе обновляется старая запись БД.
+        print(f"[REGEN_HISTORY] Вариант {self._regen_idx + 1}/{len(self._regen_history)}, модель: {entry['speaker']}")
+
+    def _set_regen_dim(self, dimmed: bool):
+        """Затемнить/восстановить пузырь во время перегенерации.
+        
+        ВАЖНО: после fade-in анимации setGraphicsEffect(None) убивает opacity_effect.
+        Поэтому мы всегда создаём НОВЫЙ эффект, а не переиспользуем старый.
+        """
+        try:
+            if dimmed:
+                # Создаём свежий эффект и вешаем на виджет
+                eff = QtWidgets.QGraphicsOpacityEffect(self)
+                self.setGraphicsEffect(eff)
+                self.opacity_effect = eff
+                eff.setOpacity(1.0)
+                anim = QtCore.QPropertyAnimation(eff, b"opacity")
+                anim.setDuration(200)
+                anim.setStartValue(1.0)
+                anim.setEndValue(0.38)
+                anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+                anim.start()
+                self._dim_anim = anim
+            else:
+                # Берём текущий эффект (может быть нашим dim-эффектом)
+                eff = self.graphicsEffect()
+                if eff is None:
+                    return  # уже чистый, ничего делать не нужно
+                cur_opacity = eff.opacity() if hasattr(eff, 'opacity') else 0.38
+                anim = QtCore.QPropertyAnimation(eff, b"opacity")
+                anim.setDuration(250)
+                anim.setStartValue(cur_opacity)
+                anim.setEndValue(1.0)
+                anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+                # После восстановления убираем эффект (иначе он искажает цвета)
+                anim.finished.connect(lambda: self.setGraphicsEffect(None))
+                anim.start()
+                self._dim_anim = anim
+        except Exception as e:
+            print(f"[DIM] Ошибка затемнения: {e}")
+
+    def _persist_regen_history(self):
+        """Сохранить историю перегенерации в БД через main_window."""
+        try:
+            mw = self.main_window
+            if not mw:
+                return
+            chat_id = getattr(mw, 'current_chat_id', None)
+            if not chat_id:
+                return
+            cm = getattr(mw, 'chat_manager', None)
+            if not cm:
+                return
+            msg_id = cm.get_last_assistant_message_id(chat_id)
+            if not msg_id:
+                return
+            cm.update_regen_history(chat_id, msg_id, self._regen_history)
+            print(f"[REGEN_HISTORY] ✓ Сохранено в БД msg_id={msg_id}, вариантов={len(self._regen_history)}")
+        except Exception as e:
+            print(f"[REGEN_HISTORY] ⚠️ Ошибка сохранения: {e}")
+
     def regenerate_response(self):
         """Перегенерировать ответ ассистента — показывает меню выбора модели"""
         parent_window = self.window()
         if not hasattr(parent_window, 'regenerate_last_response'):
             return
 
-        # ── Определяем текущую и другую модель ──────────────────────
+        # ── Определяем текущую модель и список альтернатив ──────────
         current_key  = llama_handler.CURRENT_AI_MODEL_KEY
         current_name = llama_handler.SUPPORTED_MODELS.get(current_key, ("", "LLaMA 3"))[1]
-        other_key    = "deepseek" if current_key == "llama3" else "llama3"
-        other_name   = llama_handler.SUPPORTED_MODELS.get(other_key, ("", "DeepSeek"))[1]
+
+        # Список всех моделей кроме текущей — для пунктов «перегенерировать через»
+        _all_keys  = list(llama_handler.SUPPORTED_MODELS.keys())
+        _alt_keys  = [k for k in _all_keys if k != current_key]
 
         # ── Создаём контекстное меню ─────────────────────────────────
         menu = QtWidgets.QMenu(self)
@@ -7068,7 +7384,17 @@ class MessageWidget(QtWidgets.QWidget):
 
         act_same  = menu.addAction(f"🔄  Перегенерировать  ({current_name})")
         menu.addSeparator()
-        act_other = menu.addAction(f"🔀  Перегенерировать через  {other_name}")
+
+        # Динамические пункты «перегенерировать через <другую модель>»
+        _alt_actions = {}
+        for _alt_key in _alt_keys:
+            _alt_display = llama_handler.SUPPORTED_MODELS.get(_alt_key, ("", _alt_key))[1]
+            _installed   = check_model_in_ollama(
+                llama_handler.SUPPORTED_MODELS.get(_alt_key, (_alt_key,))[0]
+            )
+            _suffix = "" if _installed else "  ↓ (не скачана)"
+            _act = menu.addAction(f"🔀  Перегенерировать через  {_alt_display}{_suffix}")
+            _alt_actions[_act] = (_alt_key, _installed, _alt_display)
 
         # ── Показываем меню рядом с кнопкой ─────────────────────────
         btn = self.regenerate_button
@@ -7081,8 +7407,25 @@ class MessageWidget(QtWidgets.QWidget):
 
         if chosen == act_same:
             parent_window.regenerate_last_response()
-        elif chosen == act_other:
-            parent_window.regenerate_last_response(force_model_key=other_key)
+        elif chosen in _alt_actions:
+            _target_key, _is_installed, _target_display = _alt_actions[chosen]
+            if _is_installed:
+                parent_window.regenerate_last_response(force_model_key=_target_key)
+            else:
+                # Модель не скачана — предлагаем скачать
+                reply = QtWidgets.QMessageBox.question(
+                    self.window(),
+                    f"{_target_display} не установлена",
+                    f"⚠️ {_target_display} ещё не скачана.\n\n"
+                    f"Хотите скачать её сейчас?",
+                    QtWidgets.QMessageBox.StandardButton.Yes |
+                    QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.Yes,
+                )
+                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                    _pw = self.window()
+                    if hasattr(_pw, '_start_model_download'):
+                        _pw._start_model_download(_target_key)
     
     def edit_message(self):
         """Редактировать сообщение пользователя"""
@@ -8417,6 +8760,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.deep_thinking = False
         self.use_search = False
         self.is_generating = False
+        self._regen_target_widget = None  # виджет-цель для add_regen_entry
         self.current_user_message = ""
         self.current_worker = None
         
@@ -8428,7 +8772,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.ai_mode = AI_MODE_FAST  # По умолчанию быстрый режим
         # Загружаем сохранённую модель из настроек
         self._load_model_preference()
-        # Прогреваем модель при запуске — загружаем в память Ollama
+        # При запуске: выгружаем все модели кроме выбранной (на случай грязного завершения),
+        # затем загружаем в память только активную модель
+        unload_all_models(except_key=llama_handler.CURRENT_AI_MODEL_KEY, synchronous=False)
         warm_up_model(llama_handler.CURRENT_AI_MODEL_KEY)
         
         # Таймер обдумывания
@@ -8475,6 +8821,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         new_chat_id = self.chat_manager.create_chat("Новый чат")
         self.chat_manager.set_active_chat(new_chat_id)
         self.current_chat_id = new_chat_id
+        # Уведомляем память DeepSeek о новом чате
+        if _DS_MEMORY is not None:
+            _DS_MEMORY.on_chat_switch(new_chat_id)
         
         # Помечаем этот чат как стартовый (пустой)
         self.startup_chat_id = new_chat_id
@@ -8950,7 +9299,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     def closeEvent(self, event):
         """
         Закрытие окна — мгновенное даже если ИИ генерирует ответ.
-        os._exit(0) убивает процесс сразу, не дожидаясь ни сессии, ни потоков.
+        Перед выходом синхронно выгружает все модели из памяти Ollama,
+        чтобы при следующем запуске не было «призрачных» загруженных весов.
+        os._exit(0) убивает процесс сразу после выгрузки.
         """
         import os as _os, threading as _thr
 
@@ -8966,21 +9317,31 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        # 3. Закрываем HTTP-сессию в фоне — не блокируем главный поток.
-        #    Если Ollama сейчас отвечает, close() может висеть секунды.
-        #    Поэтому делаем это отдельным daemon-потоком.
-        try:
-            sess = llama_handler._OLLAMA_SESSION
-            _thr.Thread(target=sess.close, daemon=True).start()
-        except Exception:
-            pass
-
-        # 4. Скрываем окно сразу
+        # 3. Скрываем окно сразу — UI не подвисает
         self.hide()
         event.accept()
 
-        # 5. os._exit(0) — убивает процесс немедленно, минуя все Qt-деструкторы,
-        #    деструкторы Python, waitForDone() threadpool и всё остальное.
+        # 4. Синхронно выгружаем ВСЕ модели из памяти Ollama.
+        #    Timeout 4с на каждую — суммарно не более ~12с для 3 моделей.
+        #    Если Ollama недоступна — просто пропускаем, не блокируем выход.
+        print("[CLOSE] Выгружаем все модели из памяти Ollama…")
+        unload_all_models(except_key=None, synchronous=True, timeout=4)
+        print("[CLOSE] ✓ Модели выгружены")
+
+        # 5. Закрываем HTTP-сессию
+        try:
+            llama_handler._OLLAMA_SESSION.close()
+        except Exception:
+            pass
+
+        # 6. Останавливаем Ollama, если мы её сами запускали
+        try:
+            from ollama_manager import stop_managed_ollama
+            stop_managed_ollama()
+        except Exception:
+            pass
+
+        # 7. os._exit(0) — убивает процесс немедленно
         print("[CLOSE] ✓ os._exit(0)")
         _os._exit(0)
 
@@ -9591,6 +9952,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         Флаг first_launch_done сохраняется ТОЛЬКО после того как пользователь
         согласился. Если нажал «Нет» — при следующем запуске снова предложит.
         """
+        # Ollama не запущена — проверять модели бессмысленно, диалог не показываем
+        from ollama_manager import is_ollama_running as _oll_running
+        if not _oll_running():
+            print("[FIRST_LAUNCH] ⏭ Ollama API не отвечает — пропускаем проверку моделей")
+            return
+
         try:
             s = load_settings()
             if s.get("first_launch_done", False):
@@ -9652,7 +10019,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     def change_ai_model(self, model_key: str):
         """
         Переключает активную модель.
-        Выгружает предыдущую модель из памяти Ollama (keep_alive=0).
+        Выгружает ВСЕ остальные модели из памяти Ollama (keep_alive=0),
+        затем загружает только выбранную.
         """
         if model_key not in SUPPORTED_MODELS:
             print(f"[MODEL] Неизвестная модель: {model_key}")
@@ -9660,27 +10028,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         if llama_handler.CURRENT_AI_MODEL_KEY == model_key:
             return
 
-        # Выгружаем текущую модель из памяти Ollama
-        old_model_ollama = get_current_ollama_model()
-        def _unload_model(ollama_name):
-            try:
-                import requests as _req
-                _req.post(
-                    f"{OLLAMA_HOST}/api/generate",
-                    json={"model": ollama_name, "keep_alive": 0},
-                    timeout=5
-                )
-                print(f"[MODEL] ✓ Выгружена из памяти: {ollama_name}")
-            except Exception as e:
-                print(f"[MODEL] ⚠️ Не удалось выгрузить {ollama_name}: {e}")
-        threading.Thread(target=_unload_model, args=(old_model_ollama,), daemon=True).start()
+        print(f"[MODEL] Смена модели: {llama_handler.CURRENT_AI_MODEL_KEY} → {model_key}")
+
+        # Выгружаем ВСЕ модели кроме новой — на случай, если в памяти
+        # что-то осталось от предыдущих сессий или переключений
+        unload_all_models(except_key=model_key, synchronous=False)
 
         llama_handler.CURRENT_AI_MODEL_KEY = model_key
         llama_handler.ASSISTANT_NAME = get_current_display_name()
         self._save_model_preference()
         display = get_current_display_name()
         print(f"[MODEL] ✓ Активная модель: {display} ({get_current_ollama_model()})")
-        # Прогреваем новую модель
+        # Загружаем только новую модель
         warm_up_model(model_key)
 
     def show_model_selector(self):
@@ -9879,7 +10238,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         # ── Функция создания карточки модели ─────────────────────────
         def make_model_card(
-            emoji: str, name: str, desc: str,
+            model_logo_key: str, name: str, desc: str,
             tag: str, is_active: bool, is_installed: bool
         ) -> QtWidgets.QPushButton:
             btn = QtWidgets.QPushButton()
@@ -9918,7 +10277,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             hl.setContentsMargins(16, 0, 16, 0)
             hl.setSpacing(14)
 
-            # Иконка в круглом контейнере
+            # ── Иконка модели: PNG-логотип в скруглённом контейнере ───────
             icon_frame = QtWidgets.QWidget()
             icon_frame.setFixedSize(42, 42)
             icon_frame.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -9937,12 +10296,29 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     )
 
             icon_inner = QtWidgets.QVBoxLayout(icon_frame)
-            icon_inner.setContentsMargins(0, 0, 0, 0)
-            emoji_lbl = QtWidgets.QLabel(emoji)
-            emoji_lbl.setStyleSheet(("background: transparent; border: none; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; font-size: 20px;" if IS_WINDOWS else "background: transparent; border: none; font-size: 20px;"))
-            emoji_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            emoji_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            icon_inner.addWidget(emoji_lbl)
+            icon_inner.setContentsMargins(5, 5, 5, 5)
+            icon_inner.setSpacing(0)
+
+            icon_lbl = QtWidgets.QLabel()
+            icon_lbl.setFixedSize(32, 32)
+            icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            icon_lbl.setStyleSheet("background: transparent; border: none;")
+
+            # Загружаем логотип модели (сначала файл, потом base64)
+            _px = _get_model_logo_pixmap(model_logo_key, size=30)
+            if not _px.isNull():
+                icon_lbl.setPixmap(_px)
+            else:
+                # Fallback: первая буква модели
+                icon_lbl.setText(name[0].upper())
+                icon_lbl.setStyleSheet(
+                    f"background: transparent; border: none; "
+                    f"font-size: 18px; font-weight: 700; "
+                    f"color: {'#ffffff' if is_active else title_col};"
+                )
+
+            icon_inner.addWidget(icon_lbl, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
             hl.addWidget(icon_frame)
 
             # Текстовый блок
@@ -10017,6 +10393,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Проверяем установленность
         llama_installed    = check_model_in_ollama("llama3")
         deepseek_installed = check_model_in_ollama(DEEPSEEK_MODEL_NAME)
+        mistral_installed  = check_model_in_ollama(MISTRAL_MODEL_NAME)
 
         # ── Кнопка удаления модели ───────────────────────────────────
         def _make_delete_btn(model_key, model_name, ollama_name, is_installed):
@@ -10067,7 +10444,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     dialog,
                     f"Удалить {model_name}?",
                     f"⚠️ Вы уверены, что хотите удалить {model_name} с диска?\n\n"
-                    f"Это освободит ~{('4.7' if model_key == 'llama3' else '4.1')} GB, "
+                    f"Это освободит ~{('4.7' if model_key == 'llama3' else ('4.1' if model_key == 'deepseek' else '7.1'))} GB, "
                     f"но потом придётся скачивать заново.",
                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                     QtWidgets.QMessageBox.StandardButton.No
@@ -10090,7 +10467,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         # ── Карточки моделей с кнопками удаления ───────────────────
         llama_btn = make_model_card(
-            "🦙", "LLaMA 3",
+            "llama3", "LLaMA 3",
             "Универсальная · быстрая · поддержка поиска",
             "8B", llama_handler.CURRENT_AI_MODEL_KEY == "llama3", llama_installed
         )
@@ -10103,7 +10480,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         cl.addSpacing(10)
 
         deepseek_btn = make_model_card(
-            "🧠", "DeepSeek",
+            "deepseek", "DeepSeek",
             "Аналитика · математика · код",
             "7B", llama_handler.CURRENT_AI_MODEL_KEY == "deepseek", deepseek_installed
         )
@@ -10113,6 +10490,19 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         deepseek_row.addWidget(deepseek_btn)
         deepseek_row.addWidget(_make_delete_btn("deepseek", "DeepSeek", DEEPSEEK_MODEL_NAME, deepseek_installed))
         cl.addLayout(deepseek_row)
+        cl.addSpacing(10)
+
+        mistral_btn = make_model_card(
+            "mistral", "Mistral Nemo",
+            "Многоязычный · гибкий · 12B параметров",
+            "12B", llama_handler.CURRENT_AI_MODEL_KEY == "mistral", mistral_installed
+        )
+        mistral_row = QtWidgets.QHBoxLayout()
+        mistral_row.setContentsMargins(0, 0, 0, 0)
+        mistral_row.setSpacing(6)
+        mistral_row.addWidget(mistral_btn)
+        mistral_row.addWidget(_make_delete_btn("mistral", "Mistral Nemo", MISTRAL_MODEL_NAME, mistral_installed))
+        cl.addLayout(mistral_row)
 
         cl.addSpacing(16)
 
@@ -10286,8 +10676,29 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         self._start_deepseek_download()
             _fade_and_close(_after)
 
+        # ── Выбор Mistral ───────────────────────────────────────────
+        def _select_mistral():
+            def _after():
+                if llama_handler.CURRENT_AI_MODEL_KEY == "mistral":
+                    return
+                if mistral_installed:
+                    self.change_ai_model("mistral")
+                else:
+                    reply = QtWidgets.QMessageBox.question(
+                        self,
+                        "Модель не найдена",
+                        "⚠️ Mistral Nemo 12B не скачан (~7.1 GB).\n\n"
+                        "Хотите скачать его сейчас?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        self._start_mistral_download()
+            _fade_and_close(_after)
+
         llama_btn.clicked.connect(_select_llama)
         deepseek_btn.clicked.connect(_select_deepseek)
+        mistral_btn.clicked.connect(_select_mistral)
 
         dialog.exec()
 
@@ -10297,8 +10708,6 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dl_dialog.download_finished.connect(
             lambda success, msg: self._on_deepseek_downloaded(success, msg)
         )
-        # НЕ вызываем start_download() автоматически —
-        # пользователь сам выбирает папку/диск и нажимает «Начать»
         dl_dialog.exec()
 
     def _on_deepseek_downloaded(self, success: bool, message: str):
@@ -10307,6 +10716,37 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.change_ai_model("deepseek")
         else:
             print(f"[MODEL] Скачивание DeepSeek не удалось: {message}")
+
+    def _start_mistral_download(self):
+        """Открывает диалог скачивания Mistral Nemo и после успеха активирует модель."""
+        dl_dialog = MistralDownloadDialog(self)
+        dl_dialog.download_finished.connect(
+            lambda success, msg: self._on_mistral_downloaded(success, msg)
+        )
+        dl_dialog.exec()
+
+    def _on_mistral_downloaded(self, success: bool, message: str):
+        """Вызывается после завершения скачивания Mistral Nemo."""
+        if success:
+            self.change_ai_model("mistral")
+        else:
+            print(f"[MODEL] Скачивание Mistral Nemo не удалось: {message}")
+
+    def _start_model_download(self, model_key: str):
+        """
+        Универсальный метод запуска скачивания модели по ключу.
+        Используется из меню перегенерации.
+        """
+        if model_key == "llama3":
+            dl = LlamaDownloadDialog(self)
+            dl.download_finished.connect(
+                lambda ok, msg: self.change_ai_model("llama3") if ok else None
+            )
+            dl.exec()
+        elif model_key == "deepseek":
+            self._start_deepseek_download()
+        elif model_key == "mistral":
+            self._start_mistral_download()
 
     # ─────────────────────────────────────────────────────────────────
     def _delete_model(self, model_key: str, model_name: str, ollama_name: str):
@@ -10597,11 +11037,21 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _cl.setSpacing(10)
         _cl.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        _icon_lbl = QtWidgets.QLabel("🤖")
-        _icon_lbl.setStyleSheet("background: transparent; border: none; font-size: 17px;")
+        _icon_lbl = QtWidgets.QLabel()
         _icon_lbl.setFixedSize(26, 26)
         _icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         _icon_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        _icon_lbl.setStyleSheet("background: transparent; border: none;")
+        # Логотип текущей модели — берём из встроенного base64
+        _model_px = _get_model_logo_pixmap(llama_handler.CURRENT_AI_MODEL_KEY, size=22)
+        if not _model_px.isNull():
+            _icon_lbl.setPixmap(_model_px)
+        else:
+            _icon_lbl.setText(llama_handler.SUPPORTED_MODELS.get(
+                llama_handler.CURRENT_AI_MODEL_KEY, ("", "?"))[1][:1])
+            _icon_lbl.setStyleSheet(
+                f"background: transparent; border: none; font-size: 15px; font-weight: 700; color: {_icon_color};"
+            )
         _cl.addWidget(_icon_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         _text_col = QtWidgets.QVBoxLayout()
@@ -10639,12 +11089,109 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu.addAction(_model_widget_action)
         menu.addSeparator()
 
-        # Создаём действия — галочка встроена в текст (без setCheckable, чтобы не вылезала наружу)
-        _chk = "✓  "
-        _emp = "     "
-        fast_action     = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_FAST     else _emp}⚡  Быстрый")
-        thinking_action = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_THINKING else _emp}🧠  Думающий")
-        pro_action      = menu.addAction(f"{_chk if self.ai_mode == AI_MODE_PRO      else _emp}🚀  Про")
+        # ── Режимы: QWidgetAction с кастомным рендером ───────────────────────
+        # QMenu::item никогда не выглядит хорошо — используем виджеты напрямую
+        _MENU_W = 240  # фиксированная ширина строк
+
+        _mode_cfg = [
+            (AI_MODE_FAST,     "⚡", "Быстрый",   AI_MODE_FAST),
+            (AI_MODE_THINKING, "🧠", "Думающий",  AI_MODE_THINKING),
+            (AI_MODE_PRO,      "🚀", "Про",        AI_MODE_PRO),
+        ]
+
+        if is_dark:
+            _row_bg_active  = "rgba(80, 82, 110, 0.55)"
+            _row_border_act = "rgba(110, 120, 210, 0.40)"
+            _row_hover      = "rgba(58, 58, 75, 0.70)"
+            _txt_active     = "#ffffff"
+            _txt_normal     = "#c8c8de"
+            _chk_col        = "#8899ff"
+        else:
+            _row_bg_active  = "rgba(225, 228, 252, 0.80)"
+            _row_border_act = "rgba(140, 155, 230, 0.45)"
+            _row_hover      = "rgba(238, 240, 252, 0.90)"
+            _txt_active     = "#1a1a3a"
+            _txt_normal     = "#3a3a5a"
+            _chk_col        = "#5566cc"
+
+        _mode_btns = []
+        for _mk2, _emoji, _label, _target in _mode_cfg:
+            _active = (self.ai_mode == _mk2)
+
+            _wa = QtWidgets.QWidgetAction(menu)
+            _row = QtWidgets.QWidget()
+            _row.setFixedSize(_MENU_W, 46)
+
+            # Фон активного пункта — скруглённый pill
+            if _active:
+                _row.setStyleSheet(f"""
+                    QWidget {{
+                        background: {_row_bg_active};
+                        border: 1px solid {_row_border_act};
+                        border-radius: 10px;
+                    }}
+                """)
+            else:
+                _row.setStyleSheet("""
+                    QWidget { background: transparent; border: none; border-radius: 10px; }
+                    QWidget:hover { background: """ + _row_hover + """; }
+                """)
+
+            _rl = QtWidgets.QHBoxLayout(_row)
+            _rl.setContentsMargins(14, 0, 14, 0)
+            _rl.setSpacing(11)
+
+            # Emoji
+            _e = QtWidgets.QLabel(_emoji)
+            _e.setFixedSize(26, 26)
+            _e.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            _e.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            _e.setStyleSheet("background: transparent; border: none; font-size: 16px;")
+            _rl.addWidget(_e)
+
+            # Label
+            _t = QtWidgets.QLabel(_label)
+            _t.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            _t.setStyleSheet(
+                f"background: transparent; border: none; "
+                f"color: {_txt_active if _active else _txt_normal}; "
+                f"font-size: 14px; font-weight: {'700' if _active else '600'};"
+            )
+            _rl.addWidget(_t)
+            _rl.addStretch()
+
+            # Галочка активного
+            if _active:
+                _c = QtWidgets.QLabel("✓")
+                _c.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                _c.setStyleSheet(
+                    f"background: transparent; border: none; "
+                    f"color: {_chk_col}; font-size: 13px; font-weight: 700;"
+                )
+                _rl.addWidget(_c)
+
+            _wa.setDefaultWidget(_row)
+            menu.addAction(_wa)
+
+            # Обёртка: делаем строку кликабельной через btn поверх
+            _btn = QtWidgets.QPushButton(_row)
+            _btn.setGeometry(0, 0, _MENU_W, 46)
+            _btn.setFlat(True)
+            _btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            _btn.setStyleSheet("QPushButton { background: transparent; border: none; }")
+            _mode_btns.append((_btn, _target))
+
+        # Подключаем обработчики
+        for _btn, _target in _mode_btns:
+            def _h(checked=False, k=_target):
+                menu.close()
+                self.animate_mode_change(k)
+            _btn.clicked.connect(_h)
+
+        # stub-переменные (triggered.connect ниже на них не вызывается)
+        fast_action     = None
+        thinking_action = None
+        pro_action      = None
         
         # Получаем позицию кнопки
         button_rect = self.mode_btn.rect()
@@ -10763,10 +11310,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu._opacity_effect = opacity_effect
         menu._scale_animator = scale_animator
 
-        # ── Обработка выбора через сигналы (нужно для popup()) ──
-        fast_action.triggered.connect(lambda: self.animate_mode_change(AI_MODE_FAST))
-        thinking_action.triggered.connect(lambda: self.animate_mode_change(AI_MODE_THINKING))
-        pro_action.triggered.connect(lambda: self.animate_mode_change(AI_MODE_PRO))
+        # ── Режимы управляются через _btn.clicked (см. выше) ────────────────
 
         # ── Анимация закрытия: screenshot-proxy паттерн ──
         # menu.grab() рендерит виджет со всеми стилями (скругления, прозрачность).
@@ -12380,6 +12924,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 new_chat_id = self.chat_manager.create_chat("Новый чат")
                 self.chat_manager.set_active_chat(new_chat_id)
                 self.current_chat_id = new_chat_id
+                if _DS_MEMORY is not None:
+                    _DS_MEMORY.on_chat_switch(new_chat_id)
             
             # Удаляем контекстную память чата ПЕРЕД удалением самого чата
             try:
@@ -12390,7 +12936,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 print(f"[DELETE_CHAT] ⚠️ Ошибка удаления контекстной памяти: {e}")
             try:
                 if DeepSeekMemoryManager is not None:
-                    DeepSeekMemoryManager().delete_chat_context(chat_id)
+                    _DS_MEMORY.delete_chat_context(chat_id)
                     print(f"[DELETE_CHAT] ✓ Память DeepSeek чата {chat_id} удалена")
             except Exception as e:
                 print(f"[DELETE_CHAT] ⚠️ Ошибка удаления памяти DeepSeek: {e}")
@@ -12437,7 +12983,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         pass
                     try:
                         if DeepSeekMemoryManager is not None:
-                            DeepSeekMemoryManager().delete_chat_context(chat_id)
+                            _DS_MEMORY.delete_chat_context(chat_id)
                     except Exception:
                         pass
                     self.chat_manager.delete_chat(chat_id)
@@ -12532,11 +13078,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Загружаем существующие сообщения с файлами
         for idx, msg_data in enumerate(messages):
             role    = msg_data[0]
-            content = msg_data[1]
-            files   = msg_data[2] if len(msg_data) > 2 else None
-            sources = msg_data[3] if len(msg_data) > 3 else []
+            content           = msg_data[1]
+            files             = msg_data[2] if len(msg_data) > 2 else None
+            sources           = msg_data[3] if len(msg_data) > 3 else []
             # speaker_name сохранён в БД — используем его, иначе текущий ИИ
-            stored_speaker = msg_data[5] if len(msg_data) > 5 else None
+            stored_speaker    = msg_data[5] if len(msg_data) > 5 else None
+            stored_regen_hist = msg_data[6] if len(msg_data) > 6 else None
             
             if role == "user":
                 speaker = "Вы"
@@ -12559,6 +13106,19 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 sources=sources or []
             )
             
+            # Восстанавливаем историю перегенерации из БД
+            if role == "assistant" and stored_regen_hist and len(stored_regen_hist) >= 1:
+                try:
+                    message_widget._regen_history = stored_regen_hist
+                    message_widget._regen_idx = len(stored_regen_hist) - 1
+                    # Инициализируем _regen_nav_group если его нет (старые виджеты)
+                    if not hasattr(message_widget, '_regen_nav_group'):
+                        message_widget._regen_nav_group = None
+                    message_widget._regen_apply_entry(message_widget._regen_idx)
+                    print(f"[LOAD_CHAT] ✓ Восстановлена история: {len(stored_regen_hist)} вариантов")
+                except Exception as e:
+                    print(f"[LOAD_CHAT] ⚠️ Ошибка восстановления истории: {e}")
+
             # Для старых сообщений сразу убираем анимацию
             if not is_recent:
                 if hasattr(message_widget, 'opacity_effect'):
@@ -12789,7 +13349,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     pass
                 try:
                     if DeepSeekMemoryManager is not None:
-                        DeepSeekMemoryManager().delete_chat_context(self.current_chat_id)
+                        _DS_MEMORY.delete_chat_context(self.current_chat_id)
                 except Exception:
                     pass
                     self.chat_manager.delete_chat(self.current_chat_id)
@@ -12800,6 +13360,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         chat_id = self.chat_manager.create_chat("Новый чат")
         self.chat_manager.set_active_chat(chat_id)
         self.current_chat_id = chat_id
+        if _DS_MEMORY is not None:
+            _DS_MEMORY.on_chat_switch(chat_id)
         
         # Обновляем флаги стартового чата
         self.startup_chat_id = chat_id
@@ -12881,7 +13443,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     pass
                 try:
                     if DeepSeekMemoryManager is not None:
-                        DeepSeekMemoryManager().delete_chat_context(self.current_chat_id)
+                        _DS_MEMORY.delete_chat_context(self.current_chat_id)
                 except Exception:
                     pass
                 try:
@@ -12897,6 +13459,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         self.chat_manager.set_active_chat(chat_id)
         self.current_chat_id = chat_id
+        if _DS_MEMORY is not None:
+            _DS_MEMORY.on_chat_switch(chat_id)
         
         # Обновляем флаги стартового чата
         self.startup_chat_id = None
@@ -13277,7 +13841,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     print(f"[SEND] ✗ Ошибка очистки контекстной памяти: {e}")
                 try:
                     if DeepSeekMemoryManager is not None:
-                        DeepSeekMemoryManager().clear_context_memory(self.current_chat_id)
+                        _DS_MEMORY.clear_context_memory(self.current_chat_id)
                         print(f"[SEND] ✓ Память DeepSeek очищена для chat_id={self.current_chat_id}")
                 except Exception as e:
                     print(f"[SEND] ✗ Ошибка очистки памяти DeepSeek: {e}")
@@ -13692,20 +14256,60 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             except Exception:
                 _response_speaker = llama_handler.ASSISTANT_NAME
 
-            try:
-                self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [])
-            except Exception as e:
-                print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
+            # ── Обновляем виджет или создаём новый ─────────────────────────────
+            _regen_widget = getattr(self, '_regen_target_widget', None)
+            self._last_regen_widget = _regen_widget  # для save_message ниже
+            if _regen_widget is not None:
+                # Перегенерация: добавляем в историю существующего виджета
                 try:
-                    # Пробуем без thinking_time
-                    self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [])
-                except Exception as e2:
-                    print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
+                    _regen_widget.add_regen_entry(
+                        response,
+                        thinking_time=thinking_time_to_show,
+                        action_history=action_history,
+                        sources=sources or [],
+                        speaker=_response_speaker
+                    )
+                    print("[HANDLE_RESPONSE] ✓ Ответ добавлен в историю перегенерации виджета")
+                except Exception as e:
+                    print(f"[HANDLE_RESPONSE] ✗ Ошибка add_regen_entry: {e}, создаём новый виджет")
+                    try:
+                        self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [])
+                    except Exception as e2:
+                        print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
+                finally:
+                    self._regen_target_widget = None  # сбрасываем цель
+            else:
+                # Обычный ответ: создаём новый виджет
+                try:
+                    self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [])
+                except Exception as e:
+                    print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
+                    try:
+                        # Пробуем без thinking_time
+                        self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [])
+                    except Exception as e2:
+                        print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
             
             # Сохраняем в БД с защитой
+            # При перегенерации — сразу передаём полную историю вариантов,
+            # чтобы она была доступна при следующей загрузке чата.
             try:
                 if hasattr(self, 'chat_manager') and hasattr(self, 'current_chat_id'):
-                    self.chat_manager.save_message(self.current_chat_id, "assistant", response, sources=sources or [], speaker_name=_response_speaker)
+                    _save_regen_hist = None
+                    if _regen_widget is not None or getattr(self, '_last_regen_widget', None):
+                        _target = _regen_widget if _regen_widget is not None else self._last_regen_widget
+                        try:
+                            _save_regen_hist = list(_target._regen_history)
+                        except Exception:
+                            pass
+                    self.chat_manager.save_message(
+                        self.current_chat_id, "assistant", response,
+                        sources=sources or [],
+                        speaker_name=_response_speaker,
+                        regen_history=_save_regen_hist
+                    )
+                    if _save_regen_hist:
+                        print(f"[HANDLE_RESPONSE] ✓ Сохранено с историей перегенерации ({len(_save_regen_hist)} вариантов)")
                 else:
                     print(f"[HANDLE_RESPONSE] ✗ Нет chat_manager или current_chat_id")
             except Exception as e:
@@ -13820,10 +14424,16 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         print(f"[REGENERATE] Найдено последнее сообщение пользователя: {last_user_msg[:50]}...")
         
         # ═══════════════════════════════════════════════════════════════
-        # ШАГ 3: УДАЛЯЕМ ВИДЖЕТ ПОСЛЕДНЕГО ОТВЕТА
+        # ШАГ 3: СОХРАНЯЕМ ВИДЖЕТ ДЛЯ ДОБАВЛЕНИЯ В ИСТОРИЮ
+        # (НЕ удаляем — новый ответ добавится через add_regen_entry)
         # ═══════════════════════════════════════════════════════════════
-        last_assistant_widget.deleteLater()
-        print("[REGENERATE] ✓ Виджет последнего ответа удалён")
+        self._regen_target_widget = last_assistant_widget
+        # Затемняем пузырь пока идёт генерация нового варианта
+        try:
+            last_assistant_widget._set_regen_dim(True)
+        except Exception:
+            pass
+        print("[REGENERATE] ✓ Виджет сохранён как цель для истории перегенерации")
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 4: УДАЛЯЕМ ПОСЛЕДНЕЕ СООБЩЕНИЕ АССИСТЕНТА ИЗ БД
@@ -14451,7 +15061,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 print(f"[FINALIZE] ⚠️ Ошибка очистки контекстной памяти: {e}")
             try:
                 if DeepSeekMemoryManager is not None:
-                    DeepSeekMemoryManager().clear_context_memory(self.current_chat_id)
+                    _DS_MEMORY.clear_context_memory(self.current_chat_id)
                     print(f"[FINALIZE] ✓ Память DeepSeek чата {self.current_chat_id} очищена")
             except Exception as e:
                 print(f"[FINALIZE] ⚠️ Ошибка очистки памяти DeepSeek: {e}")
@@ -14701,7 +15311,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 print(f"[DELETE_ALL_CHATS] ⚠️ Ошибка очистки контекстной памяти: {e}")
             try:
                 if DeepSeekMemoryManager is not None:
-                    DeepSeekMemoryManager().clear_all_context()
+                    _DS_MEMORY.clear_all_context()
                     print("[DELETE_ALL_CHATS] ✓ Вся память DeepSeek очищена")
             except Exception as e:
                 print(f"[DELETE_ALL_CHATS] ⚠️ Ошибка очистки памяти DeepSeek: {e}")
@@ -14736,6 +15346,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # ШАГ 2: Обновляем все внутренние ID
             self.current_chat_id = new_chat_id
             self.startup_chat_id = new_chat_id
+            if _DS_MEMORY is not None:
+                _DS_MEMORY.on_chat_switch(new_chat_id)
             
             # ШАГ 3: Если в настройках — возвращаемся к чату плавно
             if self.content_stack.currentIndex() == 1:
@@ -14801,9 +15413,8 @@ def main():
         app.setStyle("Fusion")
         # ── Apple-style рендеринг шрифтов на Windows ──────────────────────
         # QtGui уже импортирован глобально — НЕ импортируем повторно (UnboundLocalError)
-        _db = QtGui.QFontDatabase()
         _win_font = next(
-            (n for n in ["Segoe UI Variable", "Segoe UI"] if n in _db.families()),
+            (n for n in ["Segoe UI Variable", "Segoe UI"] if n in QtGui.QFontDatabase.families()),
             "Segoe UI"
         )
         _gf = QtGui.QFont(_win_font, 11)
@@ -14816,11 +15427,30 @@ def main():
         import os; os.environ.setdefault("QT_FONT_DPI", "96")
         print(f"[FONT] ✓ Apple-style: {_win_font}, субпиксельный рендеринг")
 
+    # ── Шаг 1.5: запуск Ollama ────────────────────────────────────────────────
+    # Ищем бинарник во ВСЕХ стандартных местах ОС и сразу запускаем в фоне.
+    # Не блокируем главный поток — просто стартуем и идём дальше.
+    # Если Ollama не найдена — диалог откроется после запуска главного окна.
+    print("[MAIN] Проверка Ollama…")
+    try:
+        import threading as _thr0
+        from ollama_manager import is_ollama_running, find_ollama_binary, launch_ollama
 
-    # ── Шаг 2: запуск всех проверок ───────────────────────────────────────
+        if is_ollama_running():
+            print("[MAIN] ✅ Ollama уже запущена")
+        else:
+            _binary = find_ollama_binary()
+            if _binary:
+                print(f"[MAIN] Найдена Ollama: {_binary} — запускаем в фоне")
+                # launch_ollama запускает процесс (не блокирует), ждать не нужно
+                _thr0.Thread(target=launch_ollama, args=(_binary,), daemon=True).start()
+            else:
+                print("[MAIN] Ollama не найдена в стандартных местах — диалог после окна")
+    except Exception as _oe:
+        print(f"[MAIN] ⚠️ ollama_manager: {_oe}")
     print("[MAIN] Запуск диагностики...")
     report = startup_checks(
-        check_ollama   = True,
+        check_ollama   = False,  # Ollama управляется через ollama_manager
         check_dbs      = ["chats.db", "chat_memory.db", "deepseek_memory.db"],
         check_packages = True,
         check_space    = True,
@@ -14885,20 +15515,89 @@ def main():
         window = MainWindow()
         window.show()
 
-        # Проверка первого запуска — после того как окно появилось
-        QtCore.QTimer.singleShot(600, window._check_first_launch)
+        # ── Цепочка запуска Ollama ────────────────────────────────────────────
+        # Правильный Qt-паттерн: сигналы из фонового потока → слоты в главном.
+        # QTimer.singleShot из фонового потока ненадёжен — функция может быть
+        # собрана GC до срабатывания. Сигналы Qt гарантируют доставку.
 
-        # Если Ollama была недоступна — повторно проверяем через 5 сек
-        # (она могла запуститься пока открывалось окно)
-        ollama_result = report["checks"].get("ollama", {})
-        if not ollama_result.get("reachable", True):
-            def _recheck_ollama():
-                r = check_ollama_health(auto_fix=False)
-                if r["reachable"]:
-                    print("[MAIN] ✅ Ollama появилась после запуска окна")
+        class _OllamaBridge(QtCore.QObject):
+            """Мост: фоновый поток → главный поток через Qt-сигналы."""
+            ollama_ready   = QtCore.pyqtSignal()   # Ollama запущена → проверить модели
+            need_install   = QtCore.pyqtSignal()   # Ollama не найдена → диалог установки
+
+        _bridge = _OllamaBridge()
+
+        def _after_ollama_ready():
+            """Ollama запущена (или не найдена — неважно). Проверяем модели."""
+            print("[MAIN] → _check_first_launch()")
+            window._check_first_launch()
+
+        def _show_ollama_install_dialog():
+            """Показывает диалог установки Ollama. Вызывается в главном потоке."""
+            print("[MAIN] Открываем OllamaDownloadDialog...")
+            try:
+                from model_downloader import OllamaDownloadDialog
+                dlg = OllamaDownloadDialog(window)
+                accepted = dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted
+                if accepted:
+                    print("[MAIN] Пользователь принял установку — ищем бинарник...")
+                    # После установки запускаем в фоне, потом проверяем модели
+                    def _after_install():
+                        try:
+                            from ollama_manager import find_ollama_binary, launch_ollama, wait_for_ollama
+                            binary = find_ollama_binary()
+                            if binary:
+                                launch_ollama(binary)
+                                print("[MAIN] ✅ Ollama установлена и запущена")
+                            else:
+                                print("[MAIN] ⚠️ После установки бинарник не найден")
+                        except Exception as _e:
+                            print(f"[MAIN] ⚠️ _after_install: {_e}")
+                        finally:
+                            _bridge.ollama_ready.emit()
+                    import threading as _thr2
+                    _thr2.Thread(target=_after_install, daemon=True).start()
                 else:
-                    print("[MAIN] ⚠️ Ollama всё ещё недоступна")
-            QtCore.QTimer.singleShot(5000, _recheck_ollama)
+                    print("[MAIN] Пользователь отказался от установки Ollama")
+                    # Не предлагаем модели — Ollama не установлена, смысла нет
+            except Exception as _e:
+                print(f"[MAIN] ⚠️ OllamaDownloadDialog: {_e}")
+
+        # Подключаем сигналы к слотам (всё в главном потоке)
+        _bridge.ollama_ready.connect(_after_ollama_ready)
+        _bridge.need_install.connect(_show_ollama_install_dialog)
+
+        def _ollama_startup_check():
+            """
+            Фоновый поток: проверяет/ищет/запускает Ollama.
+            Общается с главным потоком ТОЛЬКО через сигналы _bridge.
+            """
+            try:
+                from ollama_manager import is_ollama_running, find_ollama_binary, launch_ollama
+                print("[MAIN] Проверяем Ollama...")
+
+                if is_ollama_running():
+                    print("[MAIN] ✅ Ollama уже запущена")
+                    _bridge.ollama_ready.emit()
+                    return
+
+                binary = find_ollama_binary()
+                if binary:
+                    print(f"[MAIN] Бинарник найден: {binary} — запускаем")
+                    launch_ollama(binary)
+                    print("[MAIN] ✅ Ollama запущена в фоне")
+                    _bridge.ollama_ready.emit()
+                else:
+                    print("[MAIN] ❌ Ollama не найдена — сигнал диалога установки")
+                    _bridge.need_install.emit()
+
+            except Exception as _e:
+                print(f"[MAIN] ⚠️ _ollama_startup_check: {_e}")
+                # При ошибке всё равно проверяем модели
+                _bridge.ollama_ready.emit()
+
+        import threading as _thr_ol
+        _thr_ol.Thread(target=_ollama_startup_check, daemon=True).start()
 
         print("[MAIN] ✅ Запуск главного цикла...")
         sys.exit(app.exec())

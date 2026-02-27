@@ -1,10 +1,28 @@
+# Виртуальное окружение
 venv/
 .venv/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# База данных
 *.db
+
+# Редакторы
 .vscode/
 .idea/
-.DS_Store
-app_settings.json/
 
+# Настройки приложения
+app_settings.json
+
+# Бинарники Ollama
+bin/
+
+# Модели Ollama
+ollama_models/
+
+# macOS
+.DS_Store
+**/.DS_Store

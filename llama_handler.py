@@ -1,5 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
-# llama_handler.py — вся работа с LLaMA 3 (и общий Ollama-слой)
+# llama_handler.py — вся работа с LLaMA 3, DeepSeek и Mistral Nemo
+#                    (общий Ollama-слой)
 #
 # Содержит:
 #   • Конфигурацию: OLLAMA_HOST, OLLAMA_MODEL, SUPPORTED_MODELS,
@@ -10,7 +11,11 @@
 #   • call_ollama_chat()  — вызов Ollama /api/chat
 #   • warm_up_model()     — прогрев модели в RAM
 #
-# Используется из run.py:
+# Поддерживаемые модели:
+#   "llama3"   → llama3
+#   "deepseek" → deepseek-llm:7b-chat
+#   "mistral"  → mistral-nemo:12b
+# ═══════════════════════════════════════════════════════════════════════
 #   import llama_handler
 #   from llama_handler import (
 #       OLLAMA_HOST, OLLAMA_MODEL, USE_OLLAMA, ASSISTANT_NAME,
@@ -48,6 +53,7 @@ ASSISTANT_NAME = "LLaMA 3"
 SUPPORTED_MODELS: dict = {
     "llama3":   ("llama3",               "LLaMA 3"),
     "deepseek": ("deepseek-llm:7b-chat", "DeepSeek"),
+    "mistral":  ("mistral-nemo:12b",     "Mistral Nemo"),
 }
 
 # ── Текущая активная модель ──────────────────────────────────────────────
@@ -1005,6 +1011,15 @@ def call_ollama_chat(messages: list, max_tokens: int = 800, timeout=60, model_ke
             "repeat_penalty": 1.15,  # Штраф за повторения
             "stop": ["<|end|>", "Human:", "User:", "###"]
         }
+    elif _mk == "mistral":
+        # Mistral Nemo: сбалансированные параметры, стоп-токены формата Mistral
+        options = {
+            "num_predict": max_tokens,
+            "temperature": 0.7,
+            "top_p": 0.90,
+            "repeat_penalty": 1.10,
+            "stop": ["[INST]", "[/INST]", "</s>", "Human:", "User:"]
+        }
     else:
         options = {"num_predict": max_tokens}
 
@@ -1107,6 +1122,63 @@ def warm_up_model(model_key: str = None):
             print(f"[WARM_UP] ⚠️ Ошибка прогрева {_display}: {e}")
 
     threading.Thread(target=_do_warm_up, daemon=True).start()
+
+
+def unload_model(model_key: str):
+    """
+    Выгружает конкретную модель из памяти Ollama (keep_alive=0).
+    Выполняется асинхронно в фоновом потоке.
+    """
+    entry = SUPPORTED_MODELS.get(model_key)
+    if not entry:
+        return
+    _model_name, _display = entry[0], entry[1]
+
+    def _do_unload():
+        try:
+            url = f"{OLLAMA_HOST}/api/generate"
+            requests.post(url, json={"model": _model_name, "keep_alive": 0}, timeout=5)
+            print(f"[UNLOAD] ✅ Выгружена из памяти: {_display} ({_model_name})")
+        except Exception as e:
+            print(f"[UNLOAD] ⚠️ Не удалось выгрузить {_display}: {e}")
+
+    threading.Thread(target=_do_unload, daemon=True).start()
+
+
+def unload_all_models(except_key: str = None, synchronous: bool = False, timeout: int = 6):
+    """
+    Выгружает ВСЕ поддерживаемые модели из памяти Ollama.
+
+    except_key   — если задан, пропускает эту модель (например, только что выбранную)
+    synchronous  — True: ждёт завершения (для closeEvent)
+                   False: запускает в фоне
+    timeout      — секунд на каждый запрос при synchronous=True
+    """
+    targets = [
+        (key, entry[0], entry[1])
+        for key, entry in SUPPORTED_MODELS.items()
+        if key != except_key
+    ]
+    if not targets:
+        return
+
+    def _do_unload_all():
+        url = f"{OLLAMA_HOST}/api/generate"
+        for key, ollama_name, display in targets:
+            try:
+                requests.post(
+                    url,
+                    json={"model": ollama_name, "keep_alive": 0},
+                    timeout=timeout,
+                )
+                print(f"[UNLOAD_ALL] ✅ {display} ({ollama_name}) выгружена")
+            except Exception as e:
+                print(f"[UNLOAD_ALL] ⚠️ {display}: {e}")
+
+    if synchronous:
+        _do_unload_all()
+    else:
+        threading.Thread(target=_do_unload_all, daemon=True).start()
 
 
 # ═══════════════════════════════════════════════════════════════════

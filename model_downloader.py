@@ -8,6 +8,7 @@ model_downloader.py — диалоги и утилиты для скачиван
     delete_model_files_from_disk(ollama_model_name, models_dir) -> (int, list)
     LlamaDownloadDialog(parent)
     DeepSeekDownloadDialog(parent)
+    MistralDownloadDialog(parent)
 """
 
 import os
@@ -28,6 +29,13 @@ try:
 except ImportError:
     DEEPSEEK_MODEL_NAME = "deepseek-llm:7b-chat"
     DEEPSEEK_OLLAMA_PULL = "ollama pull deepseek-llm:7b-chat"
+
+# ── Константы Mistral (берём из mistral_config или fallback) ─────────────
+try:
+    from mistral_config import MISTRAL_MODEL_NAME, MISTRAL_OLLAMA_PULL
+except ImportError:
+    MISTRAL_MODEL_NAME = "mistral-nemo:12b"
+    MISTRAL_OLLAMA_PULL = "ollama pull mistral-nemo:12b"
 
 # ── OLLAMA_HOST (берём из llama_handler или fallback) ───────────────────
 try:
@@ -616,3 +624,492 @@ class DeepSeekDownloadDialog(_BaseDownloadDialog):
             except Exception:
                 pass
             self.cancel_btn.clicked.connect(self.reject)
+
+
+class MistralDownloadDialog(_BaseDownloadDialog):
+    """Диалог скачивания Mistral Nemo 12B."""
+    MODEL_CMD   = MISTRAL_OLLAMA_PULL
+    MODEL_LABEL = "⚡  Скачивание Mistral Nemo 12B"
+    MODEL_SIZE  = "~7.1 GB"
+
+    @QtCore.pyqtSlot(bool, str)
+    def _on_download_finished(self, success: bool, message: str):
+        if success:
+            self.progress_bar.setValue(100)
+            self.status_label.setText("✅ Скачивание завершено!")
+            self.cancel_btn.setText("✓  Готово")
+            self.cancel_btn.setStyleSheet(
+                "QPushButton{background:rgba(55,155,75,0.72);color:#f0f8f0;"
+                "border:1px solid rgba(75,175,95,0.55);border-radius:11px;"
+                "font-size:13px;font-weight:600;}"
+                "QPushButton:hover{background:rgba(65,170,85,0.88);}"
+            )
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.accept)
+            if hasattr(self, "start_btn"):
+                self.start_btn.hide()
+            QtWidgets.QMessageBox.information(
+                self, "Готово",
+                f"✅ {message}\n\nMistral Nemo готов к использованию!",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+            self.accept()
+        else:
+            self.status_label.setText(f"❌ {message}")
+            if hasattr(self, "start_btn"):
+                self.start_btn.setEnabled(True)
+                self.start_btn.setText("⬇  Повторить")
+            self.cancel_btn.setText("✕  Закрыть")
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.reject)
+
+# ══════════════════════════════════════════════════════════════════════════
+# ДИАЛОГ СКАЧИВАНИЯ САМОЙ ПРОГРАММЫ OLLAMA
+# ══════════════════════════════════════════════════════════════════════════
+
+class OllamaDownloadDialog(QtWidgets.QDialog):
+    """
+    Диалог скачивания и установки Ollama.
+
+    Mac:     скачивает Ollama-darwin.zip → распаковывает → перемещает в /Applications
+    Windows: скачивает OllamaSetup.exe   → запускает тихую установку (/SILENT)
+
+    Без терминала — только чистый прогресс: %, скорость, статус.
+    """
+
+    _sig_progress = QtCore.pyqtSignal(int, str, str)   # pct, status, speed
+    _sig_done     = QtCore.pyqtSignal(bool, str)        # success, message
+
+    # URLs для скачивания
+    _URL_MAC = "https://ollama.com/download/Ollama-darwin.zip"
+    _URL_WIN = "https://ollama.com/download/OllamaSetup.exe"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Скачивание Ollama")
+        self._cancelled = False
+
+        self._is_dark = True
+        if parent and hasattr(parent, "current_theme"):
+            self._is_dark = parent.current_theme == "dark"
+
+        IS_MAC = sys.platform == "darwin"
+        if IS_WINDOWS or IS_MAC:
+            self.setWindowFlags(
+                QtCore.Qt.WindowType.Dialog |
+                QtCore.Qt.WindowType.WindowTitleHint |
+                QtCore.Qt.WindowType.WindowCloseButtonHint
+            )
+        else:
+            self.setWindowFlags(
+                QtCore.Qt.WindowType.Dialog |
+                QtCore.Qt.WindowType.FramelessWindowHint
+            )
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self._build_ui()
+        self._sig_progress.connect(self._on_progress)
+        self._sig_done.connect(self._on_done)
+
+    # ── UI ────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        d   = self._is_dark
+        win = IS_WINDOWS
+
+        if d:
+            card_bg   = "rgb(22,22,32)"    if win else "rgba(22,22,32,0.98)"
+            card_bdr  = "rgba(75,75,105,0.75)"
+            title_col = "#e4e4f4"; desc_col = "#8888aa"; status_col = "#8899dd"
+            pb_bg     = "rgba(40,40,60,0.85)"; pb_bdr = "rgba(70,70,100,0.55)"; pb_txt = "#d0d0f0"
+            speed_col = "#aabbee"
+        else:
+            card_bg   = "rgb(248,248,255)" if win else "rgba(248,248,255,0.99)"
+            card_bdr  = "rgba(200,205,235,0.90)"
+            title_col = "#1a1a40"; desc_col = "#6677aa"; status_col = "#5566bb"
+            pb_bg     = "rgba(225,228,248,0.90)"; pb_bdr = "rgba(180,190,225,0.70)"; pb_txt = "#2a2a60"
+            speed_col = "#4455aa"
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(4 if win else 14, 4 if win else 14,
+                                4 if win else 14, 4 if win else 14)
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("olDlCard")
+        card.setStyleSheet(
+            f"QFrame#olDlCard {{ background:{card_bg}; border:1px solid {card_bdr}; border-radius:20px; }}"
+        )
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(32, 28, 32, 28)
+        cl.setSpacing(16)
+        root.addWidget(card)
+
+        # Заголовок
+        title = QtWidgets.QLabel("🦙  Установка Ollama")
+        title.setStyleSheet(
+            f"color:{title_col};font-size:18px;font-weight:700;background:transparent;border:none;"
+        )
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(title)
+
+        # Описание
+        desc_txt = (
+            "Для работы ИИ-ассистента требуется Ollama. "
+            "Нажмите «Скачать» — файл загрузится и установится автоматически."
+        )
+        self._desc_lbl = QtWidgets.QLabel(desc_txt)
+        self._desc_lbl.setStyleSheet(f"color:{desc_col};font-size:12px;background:transparent;border:none;")
+        self._desc_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._desc_lbl.setWordWrap(True)
+        cl.addWidget(self._desc_lbl)
+
+        # Прогресс-бар
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(18)
+        self.progress_bar.setStyleSheet(
+            f"QProgressBar{{background:{pb_bg};border:1px solid {pb_bdr};"
+            f"border-radius:9px;}}"
+            f"QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 #667eea,stop:1 #764ba2);border-radius:8px;}}"
+        )
+        cl.addWidget(self.progress_bar)
+
+        # Строка: процент + скорость
+        info_row = QtWidgets.QHBoxLayout()
+        self._pct_lbl = QtWidgets.QLabel("0%")
+        self._pct_lbl.setStyleSheet(f"color:{pb_txt};font-size:12px;font-weight:600;background:transparent;border:none;")
+        self._speed_lbl = QtWidgets.QLabel("")
+        self._speed_lbl.setStyleSheet(f"color:{speed_col};font-size:12px;background:transparent;border:none;")
+        self._speed_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        info_row.addWidget(self._pct_lbl)
+        info_row.addStretch()
+        info_row.addWidget(self._speed_lbl)
+        cl.addLayout(info_row)
+
+        # Статус
+        self.status_label = QtWidgets.QLabel("Нажмите «Скачать» для начала")
+        self.status_label.setStyleSheet(
+            f"color:{status_col};font-size:12px;background:transparent;border:none;"
+        )
+        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setWordWrap(True)
+        cl.addWidget(self.status_label)
+
+        # Кнопки
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.start_btn = QtWidgets.QPushButton("⬇  Скачать Ollama")
+        self.start_btn.setFixedHeight(42)
+        self.start_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.start_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.start_btn.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #667eea,stop:1 #764ba2);color:#fff;border:none;"
+            "border-radius:12px;font-size:14px;font-weight:700;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #7b8ff5,stop:1 #8860b8);}"
+            "QPushButton:disabled{background:rgba(100,100,140,0.45);color:#9999bb;}"
+        )
+        self.start_btn.clicked.connect(self._on_start)
+        btn_row.addWidget(self.start_btn)
+
+        self.cancel_btn = QtWidgets.QPushButton("✕  Пропустить")
+        self.cancel_btn.setFixedHeight(42)
+        self.cancel_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.cancel_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.cancel_btn.setStyleSheet(
+            "QPushButton{background:rgba(180,55,55,0.65);color:#f0f0f8;"
+            "border:1px solid rgba(200,75,75,0.5);border-radius:12px;"
+            "font-size:14px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(205,65,65,0.82);}"
+        )
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self.cancel_btn)
+        cl.addLayout(btn_row)
+
+        self.adjustSize()
+        self.setMinimumWidth(480)
+
+    # ── Запуск скачивания ─────────────────────────────────────────────────
+    def _on_start(self):
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("⏳  Скачивание…")
+        self.status_label.setText("Подключение к серверу…")
+        self._cancelled = False
+        threading.Thread(target=self._download_thread, daemon=True).start()
+
+    # ── Поток скачивания ──────────────────────────────────────────────────
+    def _download_thread(self):
+        import time as _time
+        import zipfile as _zip
+        import shutil as _sh
+        import tempfile as _tmp
+
+        IS_MAC = sys.platform == "darwin"
+        url    = self._URL_MAC if IS_MAC else self._URL_WIN
+
+        tmp_dir  = _tmp.mkdtemp(prefix="ollama_dl_")
+        filename = "Ollama-darwin.zip" if IS_MAC else "OllamaSetup.exe"
+        dest     = os.path.join(tmp_dir, filename)
+
+        try:
+            # ── Скачивание ────────────────────────────────────────────────
+            self._sig_progress.emit(0, "Подключение…", "")
+            resp = requests.get(url, stream=True, timeout=30)
+            resp.raise_for_status()
+
+            total     = int(resp.headers.get("content-length", 0))
+            received  = 0
+            t0        = _time.monotonic()
+            t_last    = t0
+
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if self._cancelled:
+                        self._sig_done.emit(False, "Отменено")
+                        return
+                    if chunk:
+                        f.write(chunk)
+                        received += len(chunk)
+
+                        now   = _time.monotonic()
+                        elapsed = max(now - t0, 0.001)
+                        speed_bps = received / elapsed
+
+                        # Скорость в читаемом виде
+                        if speed_bps > 1_048_576:
+                            speed_str = f"{speed_bps/1_048_576:.1f} МБ/с"
+                        elif speed_bps > 1024:
+                            speed_str = f"{speed_bps/1024:.0f} КБ/с"
+                        else:
+                            speed_str = f"{speed_bps:.0f} Б/с"
+
+                        if total > 0:
+                            pct = int(received * 90 / total)
+                            mb_recv = received / 1_048_576
+                            mb_total = total / 1_048_576
+                            status = f"Скачивание… {mb_recv:.1f} / {mb_total:.1f} МБ"
+                        else:
+                            pct = min(45, int(received / 1_048_576))
+                            mb_recv = received / 1_048_576
+                            status = f"Скачивание… {mb_recv:.1f} МБ"
+
+                        # Обновляем UI не чаще чем раз в 0.1 сек
+                        if now - t_last >= 0.1:
+                            t_last = now
+                            self._sig_progress.emit(pct, status, speed_str)
+
+            if self._cancelled:
+                self._sig_done.emit(False, "Отменено")
+                return
+
+            # ── Установка ────────────────────────────────────────────────
+            self._sig_progress.emit(91, "Установка…", "")
+
+            if IS_MAC:
+                self._install_mac(dest, tmp_dir)
+            else:
+                self._install_windows(dest)
+
+        except requests.exceptions.ConnectionError:
+            self._sig_done.emit(False, "Нет соединения с интернетом")
+        except Exception as e:
+            self._sig_done.emit(False, f"Ошибка: {e}")
+        finally:
+            try:
+                import shutil as _sh2
+                _sh2.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _install_mac(self, zip_path: str, tmp_dir: str):
+        """
+        Распаковывает zip, перемещает Ollama.app в /Applications,
+        снимает карантин macOS и выставляет права на исполнение.
+
+        Без этих шагов macOS блокирует запуск и Finder показывает ошибку.
+        """
+        import zipfile as _zip
+        import shutil  as _sh
+
+        # ── 1. Распаковка ────────────────────────────────────────────────
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        self._sig_progress.emit(91, "Распаковка архива…", "")
+        with _zip.ZipFile(zip_path, "r") as zf:
+            # Восстанавливаем права из zip-метаданных (важно для исполняемых файлов)
+            for info in zf.infolist():
+                zf.extract(info, extract_dir)
+                extracted_path = os.path.join(extract_dir, info.filename)
+                # Старший байт external_attr — unix permissions
+                unix_mode = (info.external_attr >> 16) & 0xFFFF
+                if unix_mode and os.path.isfile(extracted_path):
+                    os.chmod(extracted_path, unix_mode)
+
+        # ── 2. Ищем Ollama.app ───────────────────────────────────────────
+        app_src = None
+        for root_d, dirs, _ in os.walk(extract_dir):
+            for d in dirs:
+                if d == "Ollama.app":
+                    app_src = os.path.join(root_d, d)
+                    break
+            if app_src:
+                break
+
+        if not app_src:
+            self._sig_done.emit(False, "Ollama.app не найдена в архиве")
+            return
+
+        # ── 3. Перемещаем в /Applications ───────────────────────────────
+        app_dst = "/Applications/Ollama.app"
+        self._sig_progress.emit(94, "Установка в /Applications…", "")
+
+        if os.path.exists(app_dst):
+            _sh.rmtree(app_dst, ignore_errors=True)
+
+        try:
+            _sh.move(app_src, app_dst)
+        except PermissionError:
+            # Нет прав на /Applications → ~/Applications
+            user_apps = os.path.expanduser("~/Applications")
+            os.makedirs(user_apps, exist_ok=True)
+            app_dst = os.path.join(user_apps, "Ollama.app")
+            if os.path.exists(app_dst):
+                _sh.rmtree(app_dst, ignore_errors=True)
+            _sh.move(app_src, app_dst)
+
+        # ── 4. Снимаем карантин macOS ────────────────────────────────────
+        # Без этого шага macOS блокирует запуск: "приложение повреждено"
+        # или Finder выдаёт ошибку. xattr -cr рекурсивно удаляет карантин.
+        self._sig_progress.emit(96, "Снятие карантина macOS…", "")
+        try:
+            ret = subprocess.call(
+                ["xattr", "-cr", app_dst],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if ret == 0:
+                print(f"[INSTALL] ✅ Карантин снят: {app_dst}")
+            else:
+                print(f"[INSTALL] ⚠️ xattr вернул {ret} — продолжаем")
+        except FileNotFoundError:
+            print("[INSTALL] ⚠️ xattr не найден — пропускаем")
+        except Exception as e:
+            print(f"[INSTALL] ⚠️ xattr: {e}")
+
+        # ── 5. Права на исполнение главного бинарника ────────────────────
+        self._sig_progress.emit(97, "Настройка прав доступа…", "")
+        for rel in (
+            "Contents/MacOS/Ollama",
+            "Contents/Resources/ollama",
+            "Contents/MacOS/ollama",
+        ):
+            bin_path = os.path.join(app_dst, rel)
+            if os.path.isfile(bin_path):
+                try:
+                    os.chmod(bin_path, 0o755)
+                    print(f"[INSTALL] ✅ chmod 755: {bin_path}")
+                except Exception as e:
+                    print(f"[INSTALL] ⚠️ chmod: {e}")
+
+        # ── 6. Регистрируем в Launch Services (чтобы Finder тоже видел) ──
+        self._sig_progress.emit(99, "Регистрация приложения…", "")
+        try:
+            subprocess.call(
+                ["/System/Library/Frameworks/CoreServices.framework"
+                 "/Versions/A/Frameworks/LaunchServices.framework"
+                 "/Versions/A/Support/lsregister",
+                 "-f", app_dst],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            print("[INSTALL] ✅ lsregister выполнен")
+        except Exception as e:
+            print(f"[INSTALL] ⚠️ lsregister: {e}")
+
+        self._sig_progress.emit(100, "✅ Готово!", "")
+        self._sig_done.emit(True, app_dst)
+
+    def _install_windows(self, exe_path: str):
+        """Запускает OllamaSetup.exe с флагом тихой установки."""
+        self._sig_progress.emit(93, "Запуск установщика…", "")
+        try:
+            ret = subprocess.call(
+                [exe_path, "/SILENT", "/NORESTART"],
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if ret == 0:
+                self._sig_progress.emit(100, "✅ Готово!", "")
+                self._sig_done.emit(True, "")
+            else:
+                self._sig_done.emit(False, f"Установщик завершился с кодом {ret}")
+        except Exception as e:
+            self._sig_done.emit(False, f"Ошибка запуска установщика: {e}")
+
+    # ── Обновление прогресса ─────────────────────────────────────────────
+    @QtCore.pyqtSlot(int, str, str)
+    def _on_progress(self, pct: int, status: str, speed: str):
+        self.progress_bar.setValue(pct)
+        self.status_label.setText(status)
+        self._pct_lbl.setText(f"{pct}%")
+        self._speed_lbl.setText(speed)
+
+    # ── Финальный обработчик ─────────────────────────────────────────────
+    @QtCore.pyqtSlot(bool, str)
+    def _on_done(self, success: bool, message: str):
+        if success:
+            self.progress_bar.setValue(100)
+            self._pct_lbl.setText("100%")
+            self._speed_lbl.setText("")
+            self.start_btn.hide()
+
+            IS_MAC = sys.platform == "darwin"
+            if IS_MAC:
+                app_path = message  # путь куда установили
+                self.status_label.setText("✅ Ollama установлена!")
+                self._desc_lbl.setText(
+                    f"Ollama установлена: {app_path}\n\n"
+                    "Нажмите «Готово» — ассистент запустит её автоматически."
+                )
+            else:
+                self.status_label.setText("✅ Ollama установлена!")
+
+            self.cancel_btn.setText("✓  Готово")
+            self.cancel_btn.setStyleSheet(
+                "QPushButton{background:rgba(55,155,75,0.72);color:#f0f8f0;"
+                "border:1px solid rgba(75,175,95,0.55);border-radius:12px;"
+                "font-size:14px;font-weight:600;}"
+                "QPushButton:hover{background:rgba(65,170,85,0.88);}"
+            )
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.accept)
+        else:
+            self.status_label.setText(f"❌ {message}")
+            self.start_btn.setEnabled(True)
+            self.start_btn.setText("⬇  Повторить")
+            self._pct_lbl.setText("")
+            self._speed_lbl.setText("")
+            self.cancel_btn.setText("✕  Закрыть")
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.reject)
+
+    def _on_cancel(self):
+        self._cancelled = True
+        self.reject()
