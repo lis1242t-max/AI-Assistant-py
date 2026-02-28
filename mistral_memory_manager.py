@@ -19,7 +19,12 @@ import re
 from datetime import datetime
 from typing import List, Dict, Optional
 
-MISTRAL_MEMORY_DB = "mistral_memory.db"
+# Абсолютный путь — БД всегда рядом с этим файлом,
+# независимо от рабочей директории при запуске.
+MISTRAL_MEMORY_DB = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "mistral_memory.db"
+)
 
 
 class MistralMemoryManager:
@@ -265,3 +270,13 @@ class MistralMemoryManager:
         lines.append("═══════════════════════════════════════")
         lines.append("Используй эти факты при ответе, если они релевантны.")
         return "\n".join(lines)
+
+    def save_context_memory(self, chat_id, key: str, value: str):
+        """
+        Алиас для совместимости с ContextMemoryManager.
+        Позволяет использовать MistralMemoryManager там, где ожидается
+        ContextMemoryManager (вызовы context_mgr.save_context_memory(...)).
+        chat_id игнорируется — Mistral хранит глобальную память без привязки к чату.
+        """
+        combined = f"[{key}] {value}"
+        self.add_memory(combined)

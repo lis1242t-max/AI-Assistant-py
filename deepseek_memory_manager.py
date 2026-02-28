@@ -48,6 +48,20 @@ class DeepSeekMemoryManager:
             CREATE INDEX IF NOT EXISTS idx_ds_chat
             ON deepseek_memory(chat_id)
         """)
+        # ── Таблица реальной истории диалога (user/assistant повороты) ───────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS deepseek_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                role        TEXT    NOT NULL,
+                content     TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ds_msg_chat
+            ON deepseek_messages(chat_id)
+        """)
         conn.commit()
         conn.close()
 
@@ -105,6 +119,48 @@ class DeepSeekMemoryManager:
         conn.close()
         print(f"[DS_MEMORY] Сохранено: chat_id={chat_id}, type={entry_type}, len={len(content)}")
 
+    # ─── Диалоговая история (user/assistant повороты) ────────────────
+
+    def save_message(self, chat_id: int, role: str, content: str):
+        """
+        Сохранить один поворот диалога.
+        role: "user" | "assistant"
+        Вызывать ПОСЛЕ каждого сообщения пользователя и ПОСЛЕ каждого ответа DeepSeek.
+        """
+        if self._current_chat_id is None:
+            self._current_chat_id = chat_id
+
+        conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
+        cur = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO deepseek_messages (chat_id, role, content, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (chat_id, role, content, now)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[DS_MEMORY] Сообщение: chat_id={chat_id}, role={role}, len={len(content)}")
+
+    def get_messages(self, chat_id: int, limit: int = 20) -> List[dict]:
+        """
+        Получить историю диалога в формате [{"role": ..., "content": ...}, ...].
+        Готов для прямой передачи в Ollama API как поле 'messages'.
+        limit=20 — последние 20 сообщений (10 пар вопрос-ответ).
+        """
+        conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM deepseek_messages "
+            "WHERE chat_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (chat_id, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        # Разворачиваем: были получены от новых к старым, нужно от старых к новым
+        return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
+
     # ─── Чтение ──────────────────────────────────────────────────────
 
     def get_context_memory(self, chat_id: int, limit: int = 12) -> List[Tuple]:
@@ -129,14 +185,16 @@ class DeepSeekMemoryManager:
     # ─── Очистка одного чата ────────────────────────────────────────
 
     def clear_context_memory(self, chat_id: int):
-        """Очистить память DeepSeek для конкретного чата."""
+        """Очистить память DeepSeek для конкретного чата (обе таблицы)."""
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
         cur.execute("DELETE FROM deepseek_memory WHERE chat_id = ?", (chat_id,))
-        deleted = cur.rowcount
+        meta_deleted = cur.rowcount
+        cur.execute("DELETE FROM deepseek_messages WHERE chat_id = ?", (chat_id,))
+        msg_deleted = cur.rowcount
         conn.commit()
         conn.close()
-        print(f"[DS_MEMORY] Очищено {deleted} записей для chat_id={chat_id}")
+        print(f"[DS_MEMORY] Очищено {meta_deleted} метазаписей и {msg_deleted} сообщений для chat_id={chat_id}")
 
     def delete_chat_context(self, chat_id: int):
         """Псевдоним clear_context_memory — для совместимости с вызовами delete_chat."""
@@ -149,13 +207,14 @@ class DeepSeekMemoryManager:
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
         cur.execute("DELETE FROM deepseek_memory")
+        cur.execute("DELETE FROM deepseek_messages")
         try:
             cur.execute("DELETE FROM sqlite_sequence WHERE name='deepseek_memory'")
+            cur.execute("DELETE FROM sqlite_sequence WHERE name='deepseek_messages'")
         except Exception:
             pass
-        deleted = cur.rowcount
         conn.commit()
         conn.close()
         # Сбрасываем и текущий chat_id
         self._current_chat_id = None
-        print(f"[DS_MEMORY] Очищена ВСЯ память DeepSeek ({deleted} записей)")
+        print("[DS_MEMORY] Очищена ВСЯ память DeepSeek (метаданные + история диалогов)")

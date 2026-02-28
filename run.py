@@ -8,6 +8,7 @@ import threading
 import time
 import platform
 from datetime import datetime
+from typing import Any
 from PyQt6 import QtWidgets, QtGui, QtCore
 import requests
 import json
@@ -79,6 +80,25 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Для надёжности: не зависят от расположения файлов на диске.
 # Fallback: если файл assets/logos/<model>_logo.png существует рядом — берётся он.
 import base64 as _b64
+
+# ── Голосовой ввод ────────────────────────────────────────────────────────────
+try:
+    import sounddevice as _sd
+    import numpy as _np
+    _VOICE_AVAILABLE = True
+except ImportError:
+    _sd = None
+    _np = None
+    _VOICE_AVAILABLE = False
+    print("[VOICE] sounddevice/numpy не установлен — голосовой ввод недоступен")
+
+try:
+    import speech_recognition as _sr
+    _SR_AVAILABLE = True
+except ImportError:
+    _sr = None
+    _SR_AVAILABLE = False
+    print("[VOICE] SpeechRecognition не установлен — голосовой ввод недоступен")
 _MODEL_LOGOS_B64 = {
     "llama3":   "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",
     "deepseek": "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",
@@ -171,10 +191,15 @@ except ImportError:
 # Импортируем менеджер памяти Mistral
 try:
     from mistral_memory_manager import MistralMemoryManager
-    print("[IMPORT] ✓ mistral_memory_manager загружен")
+    # ─── СИНГЛТОН: один инстанс на всё время работы программы ───────────────
+    # Критично: если каждый раз создавать новый MistralMemoryManager() —
+    # состояние теряется и запись в БД может завершаться ошибкой.
+    _MISTRAL_MEMORY = MistralMemoryManager()
+    print("[IMPORT] ✓ mistral_memory_manager загружен (singleton)")
 except ImportError:
     print("[IMPORT] ⚠️ mistral_memory_manager.py не найден — используется общая память")
     MistralMemoryManager = None
+    _MISTRAL_MEMORY = None
 
 # Импортируем конфигурацию DeepSeek
 try:
@@ -466,6 +491,13 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
     # Математические выражения - не требуют поиска
     if any(char in message_lower for char in ["=", "+", "-", "*", "/", "^"]):
         no_internet_score += 2
+
+    # Временные слова + любая тема → скорее всего нужна свежая инфа из интернета
+    temporal_words_ru = ['завтра', 'послезавтра', 'вчера', 'сегодня', 'на этой неделе', 'на следующей неделе']
+    temporal_words_en = ['tomorrow', 'day after tomorrow', 'yesterday', 'today', 'this week', 'next week']
+    temporal_words = temporal_words_ru + temporal_words_en
+    if any(tw in message_lower for tw in temporal_words):
+        internet_score += 2  # Временные слова увеличивают вероятность поиска
     
     # Решение: порог >= 2 чтобы избежать ложных срабатываний
     total_score = internet_score - no_internet_score
@@ -490,60 +522,230 @@ def analyze_intent_for_search(user_message: str, forced_search: bool = False, ch
 # Icon creation
 # -------------------------
 def create_app_icon():
-    """Создаёт стеклянную иконку приложения"""
-    from PyQt6.QtGui import (QPixmap, QPainter, QColor, QRadialGradient,
-                              QLinearGradient, QPen, QBrush)
+    """
+    Рисует иконку 1024×1024 и возвращает QPixmap.
+    Форма: настоящие macOS continuous corners (radius = 22.37%).
+    """
+    import math
+    from PyQt6.QtGui  import (QPixmap, QPainter, QColor, QRadialGradient,
+                               QLinearGradient, QPen, QBrush, QPainterPath)
     from PyQt6.QtCore import Qt, QRectF, QPointF
 
-    size = 256
-    pixmap = QPixmap(size, size)
+    SIZE   = 1024
+    pixmap = QPixmap(SIZE, SIZE)
     pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    cx, cy, r = size/2, size/2, size/2 - 10
 
-    base = QRadialGradient(cx, cy*1.2, r*1.1)
-    base.setColorAt(0.0, QColor(70,45,200,230)); base.setColorAt(0.5, QColor(40,20,140,210)); base.setColorAt(1.0, QColor(15,8,70,190))
-    painter.setBrush(QBrush(base)); painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing,          True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-    col = QLinearGradient(cx-r, cy-r, cx+r*0.7, cy+r)
-    col.setColorAt(0.0, QColor(140,100,255,170)); col.setColorAt(0.4, QColor(80,170,255,130))
-    col.setColorAt(0.75, QColor(180,70,250,110)); col.setColorAt(1.0, QColor(50,30,180,60))
-    painter.setBrush(QBrush(col)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+    cx = cy = SIZE / 2.0
+    # Настоящие macOS иконки заполняют весь canvas целиком — PAD = 0.
+    # Скругление само является формой, прозрачных отступов нет.
+    # RADIUS = 22.37% от SIZE — стандарт Apple continuous corners.
+    PAD    = 0
+    W_ICON = SIZE
+    RADIUS = SIZE * 0.2237            # ~229px при SIZE=1024
 
-    hi = QRadialGradient(cx-r*0.22, cy-r*0.35, r*0.62)
-    hi.setColorAt(0.0, QColor(255,255,255,155)); hi.setColorAt(0.45, QColor(255,255,255,45)); hi.setColorAt(1.0, QColor(255,255,255,0))
-    painter.setBrush(QBrush(hi)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+    def macos_path(rect: QRectF, r: float) -> QPainterPath:
+        path = QPainterPath()
+        l, t, w, h = rect.left(), rect.top(), rect.width(), rect.height()
+        k  = r * 0.89
+        k2 = r * (1 - 0.5523)
+        path.moveTo(l + r, t)
+        path.lineTo(l + w - r, t)
+        path.cubicTo(l+w-k, t,      l+w, t+k2,     l+w, t+r)
+        path.lineTo(l+w, t+h-r)
+        path.cubicTo(l+w, t+h-k2,   l+w-k, t+h,    l+w-r, t+h)
+        path.lineTo(l+r, t+h)
+        path.cubicTo(l+k, t+h,      l, t+h-k2,     l, t+h-r)
+        path.lineTo(l, t+r)
+        path.cubicTo(l, t+k2,       l+k, t,         l+r, t)
+        path.closeSubpath()
+        return path
 
-    lo = QRadialGradient(cx+r*0.25, cy+r*0.52, r*0.38)
-    lo.setColorAt(0.0, QColor(200,160,255,65)); lo.setColorAt(1.0, QColor(200,160,255,0))
-    painter.setBrush(QBrush(lo)); painter.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+    icon_rect = QRectF(0, 0, SIZE, SIZE)
+    icon_path = macos_path(icon_rect, RADIUS)
 
-    brdr = QLinearGradient(cx-r, cy-r, cx+r, cy+r)
-    brdr.setColorAt(0.0, QColor(255,255,255,130)); brdr.setColorAt(0.5, QColor(210,190,255,55)); brdr.setColorAt(1.0, QColor(120,100,220,35))
-    painter.setBrush(Qt.BrushStyle.NoBrush); painter.setPen(QPen(QBrush(brdr), 2.2))
-    painter.drawEllipse(QRectF(cx-r+1, cy-r+1, r*2-2, r*2-2))
+    # Фон
+    bg = QLinearGradient(0, 0, SIZE, SIZE)
+    bg.setColorAt(0.00, QColor(100, 65, 230))
+    bg.setColorAt(0.35, QColor( 65, 45, 195))
+    bg.setColorAt(0.70, QColor( 35, 22, 150))
+    bg.setColorAt(1.00, QColor( 20, 12, 100))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(bg))
+    p.drawPath(icon_path)
 
-    # Нейронная иконка
-    painter.setPen(Qt.PenStyle.NoPen)
-    nodes = [(cx, cy), (cx, cy-54), (cx-47, cy+31), (cx+47, cy+31)]
-    pen = QPen(QColor(255,255,255,110), 3.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    for nx, ny in nodes[1:]: painter.drawLine(QPointF(cx, cy), QPointF(nx, ny))
-    painter.setPen(Qt.PenStyle.NoPen)
-    cg = QRadialGradient(cx-4, cy-4, 16); cg.setColorAt(0, QColor(255,255,255,255)); cg.setColorAt(1, QColor(220,200,255,200))
-    painter.setBrush(QBrush(cg)); painter.drawEllipse(QRectF(cx-14, cy-14, 28, 28))
-    for nx, ny in nodes[1:]:
-        og = QRadialGradient(nx-3, ny-3, 11); og.setColorAt(0, QColor(255,255,255,240)); og.setColorAt(1, QColor(200,180,255,180))
-        painter.setBrush(QBrush(og)); painter.drawEllipse(QRectF(nx-10, ny-10, 20, 20))
-    painter.setBrush(QColor(255,255,255,150))
-    for nx, ny in nodes[1:]:
-        mx, my = (cx+nx)/2, (cy+ny)/2; painter.drawEllipse(QRectF(mx-5.5, my-5.5, 11, 11))
-    painter.end()
+    # Голубой акцент
+    accent = QRadialGradient(cx*0.55, cy*0.45, SIZE*0.52)
+    accent.setColorAt(0.0, QColor(140,110,255,110))
+    accent.setColorAt(0.5, QColor( 70,150,255, 55))
+    accent.setColorAt(1.0, QColor(  0,  0,  0,  0))
+    p.setBrush(QBrush(accent))
+    p.drawPath(icon_path)
+
+    # Блик
+    p.setClipPath(icon_path)
+    hi = QRadialGradient(cx, SIZE*0.06, SIZE*0.5)
+    hi.setColorAt(0.00, QColor(255,255,255, 70))
+    hi.setColorAt(0.50, QColor(255,255,255, 16))
+    hi.setColorAt(1.00, QColor(255,255,255,  0))
+    p.setBrush(QBrush(hi))
+    p.drawPath(icon_path)
+    p.setClipping(False)
+
+    # Обводка
+    border = QLinearGradient(0, 0, SIZE, SIZE)
+    border.setColorAt(0.0, QColor(255,255,255, 80))
+    border.setColorAt(0.5, QColor(200,185,255, 30))
+    border.setColorAt(1.0, QColor(120,105,220, 15))
+    bp = QPen(QBrush(border), SIZE*0.005)
+    bp.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(bp)
+    p.drawPath(macos_path(
+        QRectF(SIZE*0.002, SIZE*0.002,
+               SIZE-SIZE*0.004, SIZE-SIZE*0.004),
+        RADIUS - SIZE*0.002
+    ))
+
+    # Символ
+    p.setClipPath(icon_path)
+    p.setPen(Qt.PenStyle.NoPen)
+    U = SIZE / 256.0
+    outer = [(cx, cy-75*U),(cx-65*U, cy+42*U),(cx+65*U, cy+42*U),(cx, cy+82*U)]
+    ray_pen = QPen(QColor(255,255,255,125), 6.5*U,
+                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    p.setPen(ray_pen)
+    for nx,ny in outer:
+        p.drawLine(QPointF(cx,cy), QPointF(nx,ny))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(255,255,255,85))
+    for nx,ny in outer:
+        mx,my=(cx+nx)/2,(cy+ny)/2; rm=7.5*U
+        p.drawEllipse(QRectF(mx-rm,my-rm,rm*2,rm*2))
+    for nx,ny in outer:
+        g2=QRadialGradient(nx-3*U,ny-3*U,17*U)
+        g2.setColorAt(0.0,QColor(255,255,255,255))
+        g2.setColorAt(1.0,QColor(215,190,255,185))
+        p.setBrush(QBrush(g2)); ro=13.5*U
+        p.drawEllipse(QRectF(nx-ro,ny-ro,ro*2,ro*2))
+    cg=QRadialGradient(cx-4*U,cy-4*U,22*U)
+    cg.setColorAt(0.0,QColor(255,255,255,255))
+    cg.setColorAt(1.0,QColor(225,205,255,215))
+    p.setBrush(QBrush(cg)); rc=19*U
+    p.drawEllipse(QRectF(cx-rc,cy-rc,rc*2,rc*2))
+    p.setClipping(False)
+    p.end()
     return pixmap
 
+
+def _build_multi_size_icon(pixmap):
+    """QIcon со всеми размерами — fallback если PyObjC недоступен."""
+    from PyQt6.QtGui  import QIcon
+    from PyQt6.QtCore import Qt
+    icon = QIcon()
+    for sz in [16, 32, 48, 64, 128, 256, 512, 1024]:
+        icon.addPixmap(pixmap.scaled(
+            sz, sz,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        ))
+    return icon
+
+
+def _apply_macos_dock_icon(pixmap):
+    """
+    Устанавливает иконку Dock через iconutil + PyObjC.
+
+    Ключевые исправления:
+    - Правильные имена файлов iconset (стандарт Apple):
+      16, 32, 128, 256, 512 — БЕЗ 64 (его нет в спецификации)
+    - Явно выставляем NSImage.setSize_(512, 512) чтобы macOS
+      знала "базовый" размер иконки и не рендерила её гигантской
+    """
+    import sys, os, subprocess, tempfile
+    if sys.platform != "darwin":
+        return False
+
+    try:
+        from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, Qt
+        from PyQt6.QtGui  import QPixmap as _QP
+
+        # Строим .iconset — ТОЛЬКО стандартные Apple размеры
+        # Спецификация: https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Optimizing/Optimizing.html
+        ICONSET_SPEC = [
+            # (логический размер, суффикс,  пиксели)
+            (16,  "icon_16x16.png",      16),
+            (16,  "icon_16x16@2x.png",   32),
+            (32,  "icon_32x32.png",      32),
+            (32,  "icon_32x32@2x.png",   64),
+            (128, "icon_128x128.png",    128),
+            (128, "icon_128x128@2x.png", 256),
+            (256, "icon_256x256.png",    256),
+            (256, "icon_256x256@2x.png", 512),
+            (512, "icon_512x512.png",    512),
+            (512, "icon_512x512@2x.png", 1024),
+        ]
+
+        tmp_dir     = tempfile.mkdtemp(prefix="ai_icon_")
+        iconset_dir = os.path.join(tmp_dir, "AppIcon.iconset")
+        os.makedirs(iconset_dir)
+
+        for _logical, filename, px in ICONSET_SPEC:
+            s = pixmap.scaled(px, px,
+                              Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+            s.save(os.path.join(iconset_dir, filename))
+
+        icns_path = os.path.join(tmp_dir, "AppIcon.icns")
+        r = subprocess.run(
+            ["iconutil", "-c", "icns", iconset_dir, "-o", icns_path],
+            capture_output=True, timeout=15
+        )
+        if r.returncode != 0 or not os.path.exists(icns_path):
+            raise RuntimeError(f"iconutil: {r.stderr.decode()}")
+
+        print(f"[ICON] ✅ .icns ({os.path.getsize(icns_path)//1024} KB, "
+              f"10 слотов: 16/32/128/256/512 @1x+@2x)")
+
+        # Загружаем через PyObjC
+        try:
+            from AppKit import NSApplication, NSImage, NSSize
+        except ImportError:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install",
+                 "pyobjc-framework-Cocoa", "-q"],
+                check=True, timeout=60
+            )
+            from AppKit import NSApplication, NSImage, NSSize
+
+        ns_img = NSImage.alloc().initWithContentsOfFile_(icns_path)
+
+        if not (ns_img and ns_img.isValid()):
+            raise RuntimeError("NSImage не смогла загрузить .icns")
+
+        # КРИТИЧНО: явно выставляем naturalSize = 512×512
+        # Без этого macOS использует размер первого найденного слота
+        # и может отрендерить иконку неправильного размера в Dock.
+        # 512×512 = стандартный "базовый" размер macOS App Icon.
+        ns_img.setSize_(NSSize(512, 512))
+
+        NSApplication.sharedApplication().setApplicationIconImage_(ns_img)
+        print("[ICON] ✅ Dock: нативный .icns (naturalSize=512×512)")
+        return True
+
+    except Exception as e:
+        print(f"[ICON] ℹ️ iconutil/PyObjC: {e} → multi-size QIcon")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.instance().setWindowIcon(_build_multi_size_icon(pixmap))
+            print("[ICON] ✅ Dock: multi-size QIcon (fallback)")
+            return True
+        except Exception as e2:
+            print(f"[ICON] ⚠️ {e2}")
+            return False
 
 def create_menu_icon(theme="light"):
     """Создаёт аккуратную иконку меню (три ровные горизонтальные линии)"""
@@ -1505,8 +1707,17 @@ def remove_english_words_from_russian(text: str) -> str:
             replaced_count += 1
             print(f"[ENGLISH_FILTER] Заменено: '{word}' → '{replacements[clean_word]}'")
         else:
-            replaced_count += 1
-            print(f"[ENGLISH_FILTER] Удалено латинское слово: '{word}'")
+            # ── Защита единиц измерения: +25°C, -10°F, 100km, 500ml и т.п. ──
+            # clean_word типа "25c", "100km", "5f" содержит цифры → оставляем
+            if any(c.isdigit() for c in clean_word):
+                cleaned_words.append(word)
+            else:
+                # Неизвестное латинское слово — оставляем, не удаляем.
+                # Удаление незнакомых слов ломает технические термины, имена,
+                # аббревиатуры которых нет в словаре.
+                replaced_count += 1
+                print(f"[ENGLISH_FILTER] Неизвестное слово оставлено: '{word}'")
+                cleaned_words.append(word)
 
     if replaced_count > 0:
         print(f"[ENGLISH_FILTER] \u2713 Заменено/удалено: {replaced_count}")
@@ -4327,9 +4538,16 @@ def detect_question_parts(query: str) -> dict:
         "что поменялось", "отличия", "отличается", "новые функции", "улучшения"
     ])
 
+    # ВАЖНО: не используем одиночное "как" — оно входит в любое предложение
+    # ("как дела", "как называется", "как погода" и т.д.) → ложные срабатывания.
+    # Только конкретные фразы, явно запрашивающие развёрнутое объяснение.
     has_explanation = any(kw in q for kw in [
-        "как работает", "как", "почему", "зачем", "объясни", "расскажи",
-        "what is", "how does", "explain", "why", "что это", "что такое"
+        "как работает", "как устроен", "как происходит", "как это работает",
+        "как используется", "как настроить", "как установить", "как сделать",
+        "почему", "зачем", "объясни", "расскажи подробно",
+        "what is", "how does", "how to", "how do", "explain", "why",
+        "что это такое", "что такое", "что из себя представляет",
+        "в чём разница", "в чем разница", "чем отличается",
     ])
 
     # Подсчёт пунктов: вопросительные знаки, союзы "и ещё", нумерация
@@ -4398,7 +4616,11 @@ def validate_answer(answer: str, query: str, detected_language: str, facts: str 
         issues.append("missing_version: не упомянута версия/релиз")
     if parts["has_changes"] and not any(kw in answer_lower for kw in ["изменил", "добавил", "нов", "улучшил", "исправил", "change", "new", "update", "feature"]):
         issues.append("missing_changes: не описаны изменения")
-    if parts["has_explanation"] and len(answer) < 200:
+    # Порог длины: считаем ответ слишком коротким только если:
+    # 1. Вопрос сам по себе длинный (> 40 символов) — значит, ждём развёрнутый ответ
+    # 2. Ответ короче 150 символов
+    # Короткие вопросы ("почему небо синее?") могут получать короткие ответы.
+    if parts["has_explanation"] and len(query) > 40 and len(answer) < 150:
         issues.append("missing_explanation: объяснение слишком короткое")
 
     # 4. Проверка копипасты из источников (если переданы факты)
@@ -4777,8 +4999,8 @@ def get_memory_manager(model_key: str):
     if model_key == "deepseek" and _DS_MEMORY is not None:
         # Возвращаем СИНГЛТОН — чтобы _current_chat_id сохранялся между вызовами
         return _DS_MEMORY
-    if model_key == "mistral" and MistralMemoryManager is not None:
-        return MistralMemoryManager()
+    if model_key == "mistral" and _MISTRAL_MEMORY is not None:
+        return _MISTRAL_MEMORY
     return ContextMemoryManager()
 
 
@@ -4906,20 +5128,36 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     _time_ru = _now.strftime("%H:%M")
     _date_en = _now.strftime("%B %d, %Y, %A")
     _time_en = _now.strftime("%H:%M")
+
+    # Вычисляем завтрашний и послезавтрашний день
+    from datetime import timedelta
+    _tomorrow = _now + timedelta(days=1)
+    _day_after = _now + timedelta(days=2)
+    _tomorrow_ru = f"{_tomorrow.day} {_months_ru[_tomorrow.month-1]} {_tomorrow.year} г., {_weekdays_ru[_tomorrow.weekday()]}"
+    _day_after_ru = f"{_day_after.day} {_months_ru[_day_after.month-1]} {_day_after.year} г., {_weekdays_ru[_day_after.weekday()]}"
+    _tomorrow_en = _tomorrow.strftime("%B %d, %Y, %A")
+    _day_after_en = _day_after.strftime("%B %d, %Y, %A")
+
     if detected_language == "russian":
         _datetime_inject = (
             f"\n\n⚡ СИСТЕМНЫЙ ФАКТ (абсолютно точно, из системных часов компьютера):\n"
             f"• Сегодня: {_date_ru}\n"
+            f"• Завтра: {_tomorrow_ru}\n"
+            f"• Послезавтра: {_day_after_ru}\n"
             f"• Время сейчас: {_time_ru}\n"
             f"ОБЯЗАТЕЛЬНО используй эти данные при любых вопросах о дате, времени, дне недели.\n"
+            f"Если пользователь спрашивает про 'завтра' — это {_tomorrow_ru}.\n"
             f"Твои обучающие данные о датах УСТАРЕЛИ — доверяй только этому системному факту."
         )
     else:
         _datetime_inject = (
             f"\n\n⚡ SYSTEM FACT (exact, from computer system clock):\n"
             f"• Today: {_date_en}\n"
+            f"• Tomorrow: {_tomorrow_en}\n"
+            f"• Day after tomorrow: {_day_after_en}\n"
             f"• Current time: {_time_en}\n"
             f"ALWAYS use this when answering questions about date, time, or day of week.\n"
+            f"If user asks about 'tomorrow' — that is {_tomorrow_en}.\n"
             f"Your training data about dates is OUTDATED — trust only this system fact."
         )
     base_system = base_system + _datetime_inject
@@ -5319,6 +5557,32 @@ IMPORTANT:
         
         # 🔥 КОНТЕКСТНЫЙ ПОИСК: формируем запрос с учётом истории диалога
         contextual_query = build_contextual_search_query(user_message, chat_manager, chat_id, detected_language)
+
+        # ── Подстановка реальных дат вместо "завтра"/"послезавтра" ──────────
+        # Чтобы поисковик получал точную дату, а не относительное слово
+        from datetime import timedelta as _td
+        _sq_now = datetime.now()
+        _sq_months_ru = ["января","февраля","марта","апреля","мая","июня",
+                         "июля","августа","сентября","октября","ноября","декабря"]
+        _sq_tomorrow  = _sq_now + _td(days=1)
+        _sq_dayafter  = _sq_now + _td(days=2)
+        _sq_yesterday = _sq_now - _td(days=1)
+        _sq_tom_ru  = f"{_sq_tomorrow.day} {_sq_months_ru[_sq_tomorrow.month-1]}"
+        _sq_daf_ru  = f"{_sq_dayafter.day} {_sq_months_ru[_sq_dayafter.month-1]}"
+        _sq_yes_ru  = f"{_sq_yesterday.day} {_sq_months_ru[_sq_yesterday.month-1]}"
+        _sq_tom_en  = _sq_tomorrow.strftime("%B %d")
+        _sq_daf_en  = _sq_dayafter.strftime("%B %d")
+        _sq_yes_en  = _sq_yesterday.strftime("%B %d")
+        import re as _re_sq
+        if detected_language == "russian":
+            contextual_query = _re_sq.sub(r'\bпослезавтра\b', _sq_daf_ru,  contextual_query, flags=_re_sq.IGNORECASE)
+            contextual_query = _re_sq.sub(r'\bзавтра\b',      _sq_tom_ru,   contextual_query, flags=_re_sq.IGNORECASE)
+            contextual_query = _re_sq.sub(r'\bвчера\b',       _sq_yes_ru,   contextual_query, flags=_re_sq.IGNORECASE)
+        else:
+            contextual_query = _re_sq.sub(r'\bday after tomorrow\b', _sq_daf_en, contextual_query, flags=_re_sq.IGNORECASE)
+            contextual_query = _re_sq.sub(r'\btomorrow\b',            _sq_tom_en, contextual_query, flags=_re_sq.IGNORECASE)
+            contextual_query = _re_sq.sub(r'\byesterday\b',           _sq_yes_en, contextual_query, flags=_re_sq.IGNORECASE)
+
         print(f"[GET_AI_RESPONSE] 🔍 Поисковый запрос: {contextual_query}")
         
         # ── Маршрутизация запросов: версии ПО → специальный пайплайн ──
@@ -5530,13 +5794,13 @@ Consider information from BOTH sources: search results AND attached files."""
     # DeepSeek получает жёсткие ограничения — модель склонна к болтливости
     if _mk == "deepseek":
         if ai_mode == AI_MODE_FAST:
-            base_tokens = 300
-        elif ai_mode == AI_MODE_THINKING:
             base_tokens = 600
-        elif ai_mode == AI_MODE_PRO:
+        elif ai_mode == AI_MODE_THINKING:
             base_tokens = 1000
+        elif ai_mode == AI_MODE_PRO:
+            base_tokens = 1800
         else:
-            base_tokens = 400
+            base_tokens = 700
     elif ai_mode == AI_MODE_FAST:
         base_tokens = 400  # Быстрый режим - короткие ответы, но не слишком
     elif ai_mode == AI_MODE_THINKING:
@@ -5606,7 +5870,14 @@ Consider information from BOTH sources: search results AND attached files."""
     # ══════════════════════════════════════════════════════════
     # ШАГ 4 ПАЙПЛАЙНА: Валидация ответа и перегенерация при необходимости
     # ══════════════════════════════════════════════════════════
-    if use_search and response_text and not response_text.startswith("❌"):
+    # Валидация запускается только при поиске И только для содержательных вопросов.
+    # Короткие запросы (< 20 символов) или простые ответы (< 30 символов) пропускаем —
+    # они не требуют развёрнутой проверки и перегенерация только вредит.
+    _skip_validation = (
+        len(user_message.strip()) < 20         # слишком короткий вопрос
+        or len(response_text.strip()) < 30     # слишком короткий ответ (например "Да" / "Нет")
+    )
+    if use_search and response_text and not response_text.startswith("❌") and not _skip_validation:
         facts_for_validation = locals().get("facts", "")
         validation = validate_answer(response_text, user_message, detected_language, facts_for_validation)
         
@@ -6830,7 +7101,7 @@ class MessageWidget(QtWidgets.QWidget):
         if not IS_WINDOWS:
             # Создаём fade-in анимацию с идеальными параметрами
             self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
-            self.fade_in_animation.setDuration(450)  # 450ms - быстрая и плавная анимация
+            self.fade_in_animation.setDuration(350)  # плавное появление
             self.fade_in_animation.setStartValue(0.0)
             self.fade_in_animation.setEndValue(1.0)
             # OutCubic - создаёт мягкое замедление в конце для естественного появления
@@ -6846,26 +7117,17 @@ class MessageWidget(QtWidgets.QWidget):
     @QtCore.pyqtSlot()
     def _start_appear_animation(self):
         """
-        Запускает идеальную fade-in анимацию появления.
-        
-        Простая, надёжная, красивая анимация с оптимальными параметрами:
-        - 450ms длительность для быстрого и плавного появления
-        - OutCubic кривая для естественного замедления
-        
-        После завершения анимации graphicsEffect удаляется чтобы
-        избежать искажения цветов.
-        
-        Вызывается через QMetaObject.invokeMethod для синхронизации с layout.
+        Запускает fade-in анимацию появления сообщения (opacity 0→1).
+        Вызывается через invokeMethod после добавления в layout.
         """
-        if hasattr(self, 'fade_in_animation'):
-            # Подключаем очистку эффекта после завершения анимации
-            try:
-                self.fade_in_animation.finished.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            
-            self.fade_in_animation.finished.connect(self._remove_graphics_effect_after_animation)
-            self.fade_in_animation.start()
+        if not hasattr(self, 'fade_in_animation'):
+            return
+        try:
+            self.fade_in_animation.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.fade_in_animation.finished.connect(self._remove_graphics_effect_after_animation)
+        self.fade_in_animation.start()
     
     def _remove_graphics_effect_after_animation(self):
         """
@@ -7806,6 +8068,23 @@ class AIWorker(QtCore.QRunnable):
         try:
             if llama_handler._APP_SHUTTING_DOWN or self._cancelled:
                 return
+
+            # ── Ожидание готовности Ollama (актуально для первого сообщения) ──
+            # При старте программы Ollama запускается в фоне. Если пользователь
+            # успел написать раньше — делаем до 5 попыток по 3 секунды (15 сек).
+            for _attempt in range(5):
+                try:
+                    requests.get("http://localhost:11434/api/tags", timeout=2)
+                    break  # Ollama отвечает — продолжаем
+                except Exception:
+                    if self._cancelled or llama_handler._APP_SHUTTING_DOWN:
+                        return
+                    if _attempt < 4:
+                        print(f"[WORKER] ⏳ Ollama не готова, попытка {_attempt + 1}/5 — ждём 3с...")
+                        time.sleep(3)
+                    # На последней попытке просто идём дальше — get_ai_response
+                    # сам вернёт ошибку если Ollama так и не поднялась
+
             response, sources = get_ai_response(
                 self.user_message,
                 self.current_language,
@@ -7839,6 +8118,295 @@ class AIWorker(QtCore.QRunnable):
 # -------------------------
 # Main Window
 # -------------------------
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ПОЛЕ ВВОДА С ПРОВЕРКОЙ ОРФОГРАФИИ
+# Красные волнистые подчёркивания + контекстное меню с вариантами замены.
+# Работает через pyspellchecker (pip install pyspellchecker).
+# Если библиотека не установлена — поле работает как обычный QLineEdit.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SpellCheckLineEdit(QtWidgets.QLineEdit):
+    """
+    QLineEdit с живой проверкой орфографии:
+    — красные волнистые подчёркивания под ошибочными словами
+    — ПКМ → контекстное меню с вариантами исправления
+    """
+
+    _SQUIGGLE_COLOR = QtGui.QColor(210, 60, 60, 170)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._spell_ru = None
+        self._spell_en = None
+        self._spell_ok = False
+        try:
+            from spellchecker import SpellChecker
+            self._spell_ru = SpellChecker(language='ru')
+            self._spell_en = SpellChecker(language='en')
+            self._spell_ok = True
+            print("[SPELL_INPUT] ✓ pyspellchecker загружен")
+        except ImportError:
+            print("[SPELL_INPUT] ⚠️ pyspellchecker не установлен")
+        except Exception as e:
+            print(f"[SPELL_INPUT] ⚠️ Ошибка инициализации: {e}")
+
+        # Хранит готовые пиксельные координаты для рисования:
+        # [(x0_px, x1_px, suggestions), ...]
+        # Считается в _run_spell_check (вне paintEvent) — там cursorRect надёжен.
+        self._squiggles: list = []
+        # Флаг защиты от рекурсии: setCursorPosition внутри _char_x
+        # вызывает cursorPositionChanged → _on_cursor_moved → _char_x → ...
+        self._computing_positions: bool = False
+
+        # Для контекстного меню — символьные позиции
+        self._misspelled: list = []
+
+        self._spell_timer = QtCore.QTimer(self)
+        self._spell_timer.setSingleShot(True)
+        self._spell_timer.setInterval(500)
+        self._spell_timer.timeout.connect(self._run_spell_check)
+
+        self.textChanged.connect(self._on_text_changed)
+        # Обновляем позиции когда курсор двигается (горизонтальный скролл меняется)
+        self.cursorPositionChanged.connect(self._on_cursor_moved)
+
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _on_text_changed(self, _text: str):
+        self._squiggles  = []
+        self._misspelled = []
+        if self._spell_ok:
+            self._spell_timer.start()
+
+    def _on_cursor_moved(self, _old: int, _new: int):
+        """Курсор двинулся → скролл мог измениться → пересчитываем пиксели.
+        Защита: если сдвиг курсора вызван нами самими из _char_x — игнорируем."""
+        if self._misspelled and not self._computing_positions:
+            self._update_pixel_positions()
+
+    @staticmethod
+    def _is_russian(word: str) -> bool:
+        return any('\u0400' <= c <= '\u04FF' for c in word)
+
+    def _char_x(self, char_index: int) -> float:
+        """
+        Пиксельный X символа char_index в координатах виджета.
+        Вызывается ТОЛЬКО вне paintEvent.
+
+        Принцип: временно перемещаем курсор в char_index, читаем
+        cursorRect().x(). Флаг _computing_positions блокирует рекурсию:
+        setCursorPosition → cursorPositionChanged → _on_cursor_moved → _char_x.
+        """
+        self._computing_positions = True
+        try:
+            saved = self.cursorPosition()
+            self.setCursorPosition(char_index)
+            x = float(self.cursorRect().x())
+            self.setCursorPosition(saved)
+        finally:
+            self._computing_positions = False
+        return x
+
+    def _update_pixel_positions(self):
+        """Пересчитывает пиксельные X0/X1 для уже найденных ошибок."""
+        fm      = self.fontMetrics()
+        text    = self.text()
+        result  = []
+        for start, length, suggestions in self._misspelled:
+            if start < 0 or start + length > len(text):
+                continue
+            x0 = self._char_x(start)
+            x1 = x0 + fm.horizontalAdvance(text[start:start + length])
+            result.append((x0, x1, suggestions))
+        self._squiggles = result
+        self.update()
+
+    def _run_spell_check(self):
+        if not self._spell_ok:
+            return
+        text = self.text()
+        if not text.strip():
+            self._misspelled = []
+            self._squiggles  = []
+            self.update()
+            return
+
+        fm      = self.fontMetrics()
+        chars   = self._misspelled  # символьные позиции
+        chars   = []
+
+        for m in re.finditer(r'[а-яёА-ЯЁa-zA-Z]{2,}', text):
+            word     = m.group()
+            start    = m.start()
+            length   = len(word)
+            word_low = word.lower()
+            spell    = self._spell_ru if self._is_russian(word) else self._spell_en
+
+            if word_low in spell:
+                continue
+
+            try:
+                candidates  = spell.candidates(word_low) or set()
+                suggestions = sorted(candidates)[:5]
+            except Exception:
+                suggestions = []
+
+            chars.append((start, length, suggestions))
+
+        self._misspelled = chars
+
+        # Считаем пиксели здесь — вне paintEvent, cursorRect надёжен
+        squiggles = []
+        for start, length, suggestions in chars:
+            x0 = self._char_x(start)
+            x1 = x0 + fm.horizontalAdvance(text[start:start + length])
+            squiggles.append((x0, x1, suggestions))
+
+        self._squiggles = squiggles
+        self.update()
+
+    # ── QStyle content rect ───────────────────────────────────────────────
+    def _text_content_rect(self) -> QtCore.QRect:
+        opt = QtWidgets.QStyleOptionFrame()
+        self.initStyleOption(opt)
+        return self.style().subElementRect(
+            QtWidgets.QStyle.SubElement.SE_LineEditContents, opt, self
+        )
+
+    # ── Рисуем волнистые подчёркивания ───────────────────────────────────
+    def paintEvent(self, event):
+        try:
+            super().paintEvent(event)
+            if not self._squiggles:
+                return
+
+            painter = QtGui.QPainter(self)
+            if not painter.isActive():
+                return
+
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+            fm           = self.fontMetrics()
+            content_rect = self._text_content_rect()
+            # Baseline: центр текста + ascent + зазор под буквами
+            text_top   = content_rect.top() + (content_rect.height() - fm.height()) // 2
+            baseline_y = float(text_top + fm.ascent() + 5)
+
+            pen = QtGui.QPen(self._SQUIGGLE_COLOR, 1.4)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+
+            clip_left  = float(content_rect.x())
+            clip_right = float(self.width() - 4)
+
+            for x0, x1, _ in self._squiggles:
+                # Клиппинг по видимой области
+                rx0 = max(x0, clip_left)
+                rx1 = min(x1, clip_right)
+                if rx1 <= rx0:
+                    continue
+
+                step = 4.0
+                amp  = 1.8
+                path = QtGui.QPainterPath()
+                path.moveTo(rx0, baseline_y)
+
+                x = rx0
+                while x < rx1:
+                    mid = min(x + step / 2, rx1)
+                    nx  = min(x + step,     rx1)
+                    path.quadTo(mid, baseline_y + amp, nx, baseline_y)
+                    x = nx
+
+                painter.drawPath(path)
+
+            painter.end()
+
+        except KeyboardInterrupt:
+            try: painter.end()
+            except Exception: pass
+        except Exception as _e:
+            print(f"[SpellCheckLineEdit.paintEvent] ⚠️ {_e}")
+            try: painter.end()
+            except Exception: pass
+
+    # ── Контекстное меню ─────────────────────────────────────────────────
+    def _show_context_menu(self, pos: QtCore.QPoint):
+        menu = self.createStandardContextMenu()
+
+        cursor_pos = self._pos_to_char_index(pos)
+        hit_entry  = None
+        for start, length, suggestions in self._misspelled:
+            if start <= cursor_pos < start + length:
+                hit_entry = (start, length, suggestions)
+                break
+
+        if hit_entry:
+            start, length, suggestions = hit_entry
+            wrong_word = self.text()[start:start + length]
+
+            menu.insertSeparator(menu.actions()[0])
+
+            if suggestions:
+                for sug in reversed(suggestions):
+                    act = QtGui.QAction(f"  ✏️  {sug}", self)
+                    act.setFont(QtGui.QFont(
+                        self.font().family(),
+                        self.font().pointSize(),
+                        QtGui.QFont.Weight.Bold
+                    ))
+                    act.triggered.connect(
+                        lambda checked=False, s=sug, st=start, ln=length:
+                        self._apply_correction(st, ln, s)
+                    )
+                    menu.insertAction(menu.actions()[0], act)
+
+                header = QtGui.QAction(f'Исправить "{wrong_word}":', self)
+                header.setEnabled(False)
+                hf = QtGui.QFont(self.font().family(), self.font().pointSize() - 1)
+                hf.setItalic(True)
+                header.setFont(hf)
+                menu.insertAction(menu.actions()[0], header)
+            else:
+                no_sug = QtGui.QAction(f'❓ Нет вариантов для "{wrong_word}"', self)
+                no_sug.setEnabled(False)
+                menu.insertAction(menu.actions()[0], no_sug)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _pos_to_char_index(self, pos: QtCore.QPoint) -> int:
+        """Преобразует координату клика мышью в индекс символа."""
+        fm     = self.fontMetrics()
+        text   = self.text()
+        # X начала текста — из кеша или вычислить
+        if self._squiggles or not text:
+            x0_text = self._char_x(0) if text else float(self._text_content_rect().x())
+        else:
+            x0_text = float(self._text_content_rect().x())
+
+        x          = pos.x() - x0_text
+        cumulative = 0.0
+        for i, ch in enumerate(text):
+            char_w = fm.horizontalAdvance(ch)
+            if cumulative + char_w / 2 >= x:
+                return i
+            cumulative += char_w
+        return len(text)
+
+    def _apply_correction(self, start: int, length: int, replacement: str):
+        text     = self.text()
+        original = text[start:start + length]
+        if original and original[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        self.setText(text[:start] + replacement + text[start + length:])
+        self.setCursorPosition(start + len(replacement))
+        self._spell_timer.start()
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # БАЗОВЫЙ КЛАСС: NoFocusButton
@@ -8752,6 +9320,119 @@ class SettingsView(QtWidgets.QWidget):
 
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ГОЛОСОВОЙ ВВОД
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VoiceRecorder(QtCore.QObject):
+    """
+    Запись аудио с микрофона + транскрипция через SpeechRecognition (Google).
+    Работает в фоновом потоке — не блокирует UI.
+    """
+    # Сигналы
+    recording_started  = QtCore.pyqtSignal()
+    recording_stopped  = QtCore.pyqtSignal()
+    transcription_done = QtCore.pyqtSignal(str)   # готовый текст
+    error_occurred     = QtCore.pyqtSignal(str)   # сообщение об ошибке
+
+    SAMPLE_RATE = 16000
+    CHANNELS    = 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._recording   = False
+        self._frames      = []
+        self._thread      = None
+        self._stop_event  = threading.Event()
+
+    # ── Запуск записи ────────────────────────────────────────────────────────
+    def start(self):
+        if not _VOICE_AVAILABLE or not _SR_AVAILABLE:
+            self.error_occurred.emit(
+                "Для голосового ввода установите:\n"
+                "pip install sounddevice SpeechRecognition numpy"
+            )
+            return
+        if self._recording:
+            return
+        self._recording  = True
+        self._frames     = []
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._record_loop, daemon=True)
+        self._thread.start()
+        self.recording_started.emit()
+
+    # ── Остановка записи ─────────────────────────────────────────────────────
+    def stop(self):
+        if not self._recording:
+            return
+        self._recording = False
+        self._stop_event.set()
+
+    # ── Поток записи ─────────────────────────────────────────────────────────
+    def _record_loop(self):
+        try:
+            # Записываем чанками по 0.1 сек пока не придёт stop
+            chunk_size = int(self.SAMPLE_RATE * 0.1)
+            with _sd.InputStream(
+                samplerate=self.SAMPLE_RATE,
+                channels=self.CHANNELS,
+                dtype="int16",
+                blocksize=chunk_size,
+            ) as stream:
+                while not self._stop_event.is_set():
+                    data, _ = stream.read(chunk_size)
+                    self._frames.append(data.copy())
+
+            self.recording_stopped.emit()
+
+            if not self._frames:
+                self.error_occurred.emit("Нет аудио для распознавания")
+                return
+
+            # Объединяем все чанки
+            audio_data = _np.concatenate(self._frames, axis=0).flatten()
+            self._transcribe(audio_data)
+
+        except Exception as e:
+            self._recording = False
+            self.error_occurred.emit(f"Ошибка записи: {e}")
+
+    # ── Транскрипция ─────────────────────────────────────────────────────────
+    def _transcribe(self, audio_np: Any):
+        try:
+            import io, wave, struct
+
+            # Конвертируем numpy int16 → WAV bytes
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(self.CHANNELS)
+                wf.setsampwidth(2)   # int16 = 2 bytes
+                wf.setframerate(self.SAMPLE_RATE)
+                wf.writeframes(audio_np.tobytes())
+            buf.seek(0)
+
+            recognizer = _sr.Recognizer()
+            with _sr.AudioFile(buf) as source:
+                audio = recognizer.record(source)
+
+            # Google Web Speech API — бесплатно, без ключа
+            text = recognizer.recognize_google(audio, language="ru-RU")
+            self.transcription_done.emit(text)
+
+        except _sr.UnknownValueError:
+            self.error_occurred.emit("Речь не распознана — попробуйте ещё раз")
+        except _sr.RequestError as e:
+            self.error_occurred.emit(f"Ошибка сети: {e}")
+        except Exception as e:
+            self.error_occurred.emit(f"Ошибка распознавания: {e}")
+
+    @property
+    def is_recording(self) -> bool:
+        return self._recording
+
+
 class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -9138,15 +9819,48 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.attach_btn.clicked.connect(self.show_attach_menu)
         input_layout.addWidget(self.attach_btn)
 
-        self.input_field = QtWidgets.QLineEdit()
+        # ── Поле ввода с кнопкой микрофона внутри ───────────────────────────
+        self.input_wrapper = QtWidgets.QFrame()
+        self.input_wrapper.setObjectName("inputField")
+        self.input_wrapper.setMinimumHeight(60)
+        self.input_wrapper.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        _wrap_layout = QtWidgets.QHBoxLayout(self.input_wrapper)
+        _wrap_layout.setContentsMargins(20, 0, 8, 0)
+        _wrap_layout.setSpacing(4)
+
+        self.input_field = SpellCheckLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
-        self.input_field.setObjectName("inputField")
+        self.input_field.setObjectName("inputFieldInner")
         font_input = _apple_font(14)
         self.input_field.setFont(font_input)
-        self.input_field.setMinimumHeight(60)
+        self.input_field.setMinimumHeight(56)
         self.input_field.returnPressed.connect(self.send_message)
-        input_layout.addWidget(self.input_field, stretch=1)
-        
+        _wrap_layout.addWidget(self.input_field, stretch=1)
+
+        # ── Кнопка микрофона (внутри поля ввода) ────────────────────────────
+        self.mic_btn = NoFocusButton("🎤")
+        self.mic_btn.setObjectName("micBtnInline")
+        font_mic = _apple_font(20)
+        self.mic_btn.setFont(font_mic)
+        self.mic_btn.setFixedSize(44, 44)
+        self.mic_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.mic_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.mic_btn.setCheckable(True)
+        self.mic_btn.clicked.connect(self._toggle_voice)
+        _wrap_layout.addWidget(self.mic_btn)
+
+        input_layout.addWidget(self.input_wrapper, stretch=1)
+
+        # Инициализируем VoiceRecorder
+        self._voice = VoiceRecorder(self)
+        self._voice.recording_started.connect(self._on_recording_started)
+        self._voice.recording_stopped.connect(self._on_recording_stopped)
+        self._voice.transcription_done.connect(self._on_transcription_done)
+        self._voice.error_occurred.connect(self._on_voice_error)
+
         # Кнопка выбора режима AI (новая)
         self.mode_btn = NoFocusButton(self.ai_mode)
         self.mode_btn.setObjectName("modeBtn")
@@ -9793,20 +10507,29 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         QScrollBar::add-line:vertical,
         QScrollBar::sub-line:vertical {{ height: 0px; }}
 
-        /* ── Input field ── */
+        /* ── Input field (wrapper) ── */
         #inputField {{
             background: {colors["input_btn_bg"]};
-            color: {colors["text_primary"]};
             border: 1.5px solid {colors["input_border"]};
             border-radius: 30px;
-            padding: 18px 25px;
-            font-size: 16px;
         }}
-        #inputField:focus {{
+        #inputField:focus-within {{
             border: 1.5px solid {colors["input_focus_border"]};
             background: {colors["input_btn_bg_hover"]};
         }}
-        #inputField::placeholder {{
+        #inputFieldInner {{
+            background: transparent;
+            color: {colors["text_primary"]};
+            border: none;
+            border-radius: 0px;
+            padding: 0px 5px;
+            font-size: 16px;
+        }}
+        #inputFieldInner:focus {{
+            border: none;
+            outline: none;
+        }}
+        #inputFieldInner::placeholder {{
             color: {colors["text_tertiary"]};
         }}
 
@@ -9888,6 +10611,105 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             border: 1.5px solid {colors["accent_hover"]};
         }}
         #modeBtn:focus {{
+            outline: none;
+            border: 1.5px solid {colors["input_border"]};
+        }}
+
+        /* ── Mic button inline (inside input field) ── */
+        #micBtnInline {{
+            background: transparent;
+            color: {colors["text_tertiary"]};
+            border: none;
+            border-radius: 22px;
+            font-size: 20px;
+            outline: none;
+        }}
+        #micBtnInline:hover {{
+            background: {colors["input_btn_bg_hover"]};
+            color: {colors["text_secondary"]};
+            outline: none;
+        }}
+        #micBtnInline:checked {{
+            background: rgba(220, 50, 50, 0.75);
+            color: #ffffff;
+            outline: none;
+        }}
+        #micBtnInline:pressed {{
+            background: rgba(200,40,40,0.75);
+            color: white;
+            outline: none;
+        }}
+        #micBtnInline:focus {{
+            outline: none;
+            border: none;
+        }}
+
+        /* ── Mic button ── */
+        #micBtn {{
+            background: {colors["input_btn_bg"]};
+            color: {colors["text_secondary"]};
+            border: 1.5px solid {colors["input_border"]};
+            border-radius: 30px;
+            font-size: 20px;
+            outline: none;
+        }}
+        #micBtn:hover {{
+            background: {colors["input_btn_bg_hover"]};
+            border: 1.5px solid {colors["input_focus_border"]};
+            outline: none;
+        }}
+        #micBtn:focus {{
+            outline: none;
+            border: 1.5px solid {colors["input_border"]};
+        }}
+        #micBtn:pressed {{
+            background: rgba(200,40,40,0.75);
+            border: 1.5px solid rgba(220,60,60,0.9);
+            color: white;
+            outline: none;
+        }}
+        #micBtnActive {{
+            background: rgba(200,40,40,0.75);
+            color: white;
+            border: 1.5px solid rgba(220,60,60,0.9);
+            border-radius: 30px;
+            font-size: 20px;
+            outline: none;
+        }}
+        #micBtnWait {{
+            background: rgba(120,90,200,0.6);
+            color: white;
+            border: 1.5px solid rgba(140,110,220,0.8);
+            border-radius: 30px;
+            font-size: 20px;
+            outline: none;
+        }}
+
+        /* ── Mic button ── */
+        #micBtn {{
+            background: {colors["input_btn_bg"]};
+            color: {colors["text_tertiary"]};
+            border: 1.5px solid {colors["input_border"]};
+            border-radius: 30px;
+            font-size: 20px;
+            outline: none;
+        }}
+        #micBtn:hover {{
+            background: {colors["input_btn_bg_hover"]};
+            border: 1.5px solid {colors["input_focus_border"]};
+            outline: none;
+        }}
+        #micBtn:checked {{
+            background: rgba(220, 50, 50, 0.75);
+            border: 1.5px solid rgba(255, 80, 80, 0.85);
+            color: #ffffff;
+            outline: none;
+        }}
+        #micBtn:pressed {{
+            background: {colors["accent_primary"]};
+            outline: none;
+        }}
+        #micBtn:focus {{
             outline: none;
             border: 1.5px solid {colors["input_border"]};
         }}
@@ -9991,6 +10813,164 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             dl_dialog = LlamaDownloadDialog(self)
             dl_dialog.exec()
             self._save_first_launch_flag()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ГОЛОСОВОЙ ВВОД
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _toggle_voice(self):
+        """Нажатие кнопки микрофона: старт / стоп записи."""
+        if not _VOICE_AVAILABLE:
+            QtWidgets.QMessageBox.warning(
+                self, "Голосовой ввод недоступен",
+                "Установите зависимости:\n\npip install sounddevice speechrecognition numpy\n\nЗатем перезапустите программу."
+            )
+            return
+
+        if not self._voice_recording:
+            self._start_voice()
+        else:
+            self._stop_voice()
+
+    def _start_voice(self):
+        """Начало записи."""
+        self._voice_recording = True
+        self._voice_level     = 0.0
+        self._voice_anim_phase = 0
+        self.input_field.setPlaceholderText("🔴 Говорите… (нажмите ещё раз для остановки)")
+        self.input_field.setEnabled(False)
+        self.mic_btn.setObjectName("micBtnInline")
+        self.mic_btn.setText("⏹")
+        self.mic_btn.setStyleSheet(
+            "QPushButton { background: rgba(200,40,40,0.75); "
+            "border: none; border-radius: 22px; font-size: 20px; color: white; outline: none; }"
+        )
+        self._voice_anim_timer.start()
+        self._voice_recorder.start()
+
+    def _stop_voice(self):
+        """Остановка записи — запускает транскрипцию."""
+        if not self._voice_recording:
+            return
+        self._voice_recording = False
+        self._voice_anim_timer.stop()
+        self._voice_recorder.stop()
+        self.mic_btn.setText("⏳")
+        self.mic_btn.setObjectName("micBtnInline")
+        self.mic_btn.setStyleSheet(
+            "QPushButton { background: rgba(120,90,200,0.6); "
+            "border: none; border-radius: 22px; font-size: 20px; color: white; outline: none; }"
+        )
+        self.input_field.setPlaceholderText("Распознаю речь…")
+
+    def _on_voice_text(self, text: str):
+        """Транскрипция получена — вставляем в поле ввода."""
+        self.input_field.setEnabled(True)
+        self.input_field.setText(text)
+        self.input_field.setFocus()
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self._reset_mic_btn()
+        # Курсор в конец
+        self.input_field.setCursorPosition(len(text))
+
+    def _on_voice_error(self, msg: str):
+        """Ошибка голосового ввода."""
+        self.input_field.setEnabled(True)
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self._voice_recording = False
+        self._voice_anim_timer.stop()
+        self._reset_mic_btn()
+        # Показываем ошибку в статусе если есть
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(f"🎙 {msg}")
+            QtCore.QTimer.singleShot(4000, lambda: self.status_label.setText(""))
+
+    def _on_voice_level(self, level: float):
+        """Обновляем уровень громкости для анимации."""
+        self._voice_level = level
+
+    def _voice_anim_tick(self):
+        """Анимация кнопки микрофона во время записи — пульсация по уровню звука."""
+        self._voice_anim_phase += 1
+        level = self._voice_level
+        # Интенсивность цвета зависит от уровня звука
+        r = int(200 + 55 * level)
+        g = int(30  * (1 - level))
+        b = int(30  * (1 - level))
+        a = 0.7 + 0.3 * level
+        self.mic_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba({r},{g},{b},{a:.2f}); "
+            f"border: none; "
+            f"border-radius: 22px; font-size: 20px; color: white; outline: none; }}"
+        )
+
+    def _reset_mic_btn(self):
+        """Возвращает кнопку микрофона в исходное состояние."""
+        self.mic_btn.setText("🎤")
+        self.mic_btn.setObjectName("micBtnInline")
+        self.mic_btn.setStyleSheet("")  # вернуть к теме
+        self.mic_btn.style().unpolish(self.mic_btn)
+        self.mic_btn.style().polish(self.mic_btn)
+
+    def eventFilter(self, obj, event):
+        """Перехватываем Space в поле ввода чтобы остановить запись."""
+        if (obj is self.input_field
+                and self._voice_recording
+                and event.type() == QtCore.QEvent.Type.KeyPress):
+            if event.key() == QtCore.Qt.Key.Key_Space:
+                self._stop_voice()
+                return True  # поглощаем Space
+        return super().eventFilter(obj, event)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ГОЛОСОВОЙ ВВОД
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _toggle_voice(self):
+        """Нажатие на микрофон: старт/стоп записи."""
+        if self._voice.is_recording:
+            self._voice.stop()
+        else:
+            self.input_field.setPlaceholderText("🔴 Говорите… (нажмите 🎤 для остановки)")
+            self._voice.start()
+
+    def keyPressEvent(self, event):
+        """Пробел во время записи — останавливает её."""
+        if event.key() == QtCore.Qt.Key.Key_Space and self._voice.is_recording:
+            self._voice.stop()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _on_recording_started(self):
+        self.mic_btn.setChecked(True)
+        self.mic_btn.setText("⏹")
+        self.mic_btn.setToolTip("Остановить запись")
+        self.status_label.setText("🔴 Запись...")
+
+    def _on_recording_stopped(self):
+        self.mic_btn.setChecked(False)
+        self.mic_btn.setText("🎤")
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self.status_label.setText("⏳ Распознавание речи...")
+
+    def _on_transcription_done(self, text: str):
+        current = self.input_field.text().strip()
+        if current:
+            self.input_field.setText(current + " " + text)
+        else:
+            self.input_field.setText(text)
+        self.input_field.setFocus()
+        self.status_label.setText("")
+        print(f"[VOICE] Распознано: {text}")
+
+    def _on_voice_error(self, message: str):
+        self.mic_btn.setChecked(False)
+        self.mic_btn.setText("🎤")
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self.status_label.setText(f"⚠️ {message}")
+        QtCore.QTimer.singleShot(4000, lambda: self.status_label.setText(""))
+        print(f"[VOICE] Ошибка: {message}")
 
     def _save_first_launch_flag(self):
         """Сохраняет флаг first_launch_done = True."""
@@ -10940,7 +11920,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     background: rgba(30, 30, 35, 245);
                     border: 1px solid rgba(60, 60, 70, 200);
                     border-radius: 16px;
-                    padding: 10px;
+                    padding: 6px;
                 }
                 QMenu::item {
                     padding: 14px 30px;
@@ -10949,7 +11929,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
                     font-size: 15px;
                     font-weight: 600;
-                    margin: 4px;
+                    margin: 2px;
                     background: transparent;
                 }
                 QMenu::item:selected {
@@ -10970,7 +11950,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     background: rgba(255, 255, 255, 245);
                     border: 1px solid rgba(220, 220, 230, 200);
                     border-radius: 16px;
-                    padding: 10px;
+                    padding: 6px;
                 }
                 QMenu::item {
                     padding: 14px 30px;
@@ -10979,7 +11959,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
                     font-size: 15px;
                     font-weight: 600;
-                    margin: 4px;
+                    margin: 2px;
                     background: transparent;
                 }
                 QMenu::item:selected {
@@ -10998,6 +11978,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _model_widget_action = QtWidgets.QWidgetAction(menu)
         _model_card = QtWidgets.QPushButton()
         _model_card.setFixedHeight(52)
+        _model_card.setFixedWidth(210 - 8)  # _MENU_W минус отступы обёртки
         _model_card.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
 
         _current_display = get_current_display_name()
@@ -11082,7 +12063,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         _wrap = QtWidgets.QWidget()
         _wl = QtWidgets.QVBoxLayout(_wrap)
-        _wl.setContentsMargins(4, 4, 4, 4)
+        _wl.setContentsMargins(4, 4, 4, 2)
         _wl.addWidget(_model_card)
 
         _model_widget_action.setDefaultWidget(_wrap)
@@ -11091,7 +12072,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         # ── Режимы: QWidgetAction с кастомным рендером ───────────────────────
         # QMenu::item никогда не выглядит хорошо — используем виджеты напрямую
-        _MENU_W = 240  # фиксированная ширина строк
+        _MENU_W = 210  # фиксированная ширина строк
 
         _mode_cfg = [
             (AI_MODE_FAST,     "⚡", "Быстрый",   AI_MODE_FAST),
@@ -11120,7 +12101,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
             _wa = QtWidgets.QWidgetAction(menu)
             _row = QtWidgets.QWidget()
-            _row.setFixedSize(_MENU_W, 46)
+            _row.setFixedSize(_MENU_W, 36)
 
             # Фон активного пункта — скруглённый pill
             if _active:
@@ -11138,15 +12119,15 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 """)
 
             _rl = QtWidgets.QHBoxLayout(_row)
-            _rl.setContentsMargins(14, 0, 14, 0)
-            _rl.setSpacing(11)
+            _rl.setContentsMargins(12, 0, 12, 0)
+            _rl.setSpacing(9)
 
             # Emoji
             _e = QtWidgets.QLabel(_emoji)
-            _e.setFixedSize(26, 26)
+            _e.setFixedSize(22, 22)
             _e.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             _e.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            _e.setStyleSheet("background: transparent; border: none; font-size: 16px;")
+            _e.setStyleSheet("background: transparent; border: none; font-size: 15px;")
             _rl.addWidget(_e)
 
             # Label
@@ -11158,24 +12139,24 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 f"font-size: 14px; font-weight: {'700' if _active else '600'};"
             )
             _rl.addWidget(_t)
-            _rl.addStretch()
 
-            # Галочка активного
+            # Галочка активного — сразу после текста, без растяжки
             if _active:
-                _c = QtWidgets.QLabel("✓")
+                _c = QtWidgets.QLabel(" ✓")
                 _c.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                 _c.setStyleSheet(
                     f"background: transparent; border: none; "
                     f"color: {_chk_col}; font-size: 13px; font-weight: 700;"
                 )
                 _rl.addWidget(_c)
+            _rl.addStretch()
 
             _wa.setDefaultWidget(_row)
             menu.addAction(_wa)
 
             # Обёртка: делаем строку кликабельной через btn поверх
             _btn = QtWidgets.QPushButton(_row)
-            _btn.setGeometry(0, 0, _MENU_W, 46)
+            _btn.setGeometry(0, 0, _MENU_W, 36)
             _btn.setFlat(True)
             _btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             _btn.setStyleSheet("QPushButton { background: transparent; border: none; }")
@@ -13608,13 +14589,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         if hasattr(self, 'scroll_to_bottom_btn'):
             self.update_scroll_button_visibility()
         
-        # Анимация появления (не влияет на layout)
+        # Анимация появления — запускаем через QTimer чтобы гарантированно
+        # дождаться завершения layout перед стартом opacity анимации.
+        # QMetaObject.invokeMethod иногда не срабатывал для нижних сообщений.
         if not IS_WINDOWS and hasattr(message_widget, '_start_appear_animation'):
-            QtCore.QMetaObject.invokeMethod(
-                message_widget,
-                "_start_appear_animation",
-                QtCore.Qt.ConnectionType.QueuedConnection
-            )
+            _mw_ref = message_widget  # локальная ссылка чтобы не потерять в closure
+            QtCore.QTimer.singleShot(20, _mw_ref._start_appear_animation)
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 6: УПРАВЛЕНИЕ ВИДИМОСТЬЮ КНОПОК РЕГЕНЕРАЦИИ И РЕДАКТИРОВАНИЯ
@@ -15409,6 +16389,15 @@ def main():
         print(f"[MAIN] ❌ Не удалось создать QApplication: {e}")
         sys.exit(1)
 
+    # ── SIGINT: полностью игнорируем Ctrl+C / внешние сигналы ────────────
+    # KeyboardInterrupt в Qt-коллбеках (paintEvent, eventFilter и т.д.)
+    # нельзя поймать через try/except — Python бросает его при ВХОДЕ в функцию,
+    # до первого байткода. Единственный надёжный способ — SIG_IGN на уровне ОС.
+    # GUI-приложение всё равно закрывается через красную кнопку окна.
+    import signal as _signal
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    print("[MAIN] ✓ SIGINT отключён (GUI-приложение, используйте кнопку закрытия)")
+
     if IS_WINDOWS:
         app.setStyle("Fusion")
         # ── Apple-style рендеринг шрифтов на Windows ──────────────────────
@@ -15509,7 +16498,12 @@ def main():
     try:
         print("[MAIN] Создание иконки приложения...")
         app_icon = create_app_icon()
-        app.setWindowIcon(QtGui.QIcon(app_icon))
+
+        # На macOS — устанавливаем через NSApp (PyObjC) для нативного Dock.
+        # Это даёт правильный размер и корректные углы без масштабирования Qt.
+        # Fallback: setWindowIcon для Windows/Linux или если PyObjC недоступен.
+        if not _apply_macos_dock_icon(app_icon):
+            app.setWindowIcon(QtGui.QIcon(app_icon))
 
         print("[MAIN] Создание главного окна...")
         window = MainWindow()

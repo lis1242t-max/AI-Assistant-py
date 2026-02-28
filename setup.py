@@ -23,6 +23,10 @@ PACKAGES = [
     "beautifulsoup4",
     "deep-translator",
     "pyspellchecker",
+    # Голосовой ввод
+    "sounddevice",
+    "SpeechRecognition",
+    "numpy",
 ]
 
 # Папка venv рядом с этим файлом
