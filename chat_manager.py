@@ -43,46 +43,25 @@ class ChatManager:
         )
         """)
         
-        # МИГРАЦИЯ: Добавляем колонку attached_files если её нет
-        try:
-            cur.execute("ALTER TABLE chat_messages ADD COLUMN attached_files TEXT")
-            print("[DB_MIGRATION] ✓ Добавлена колонка attached_files")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("[DB_MIGRATION] ℹ️ Колонка attached_files уже существует")
-            else:
-                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции: {e}")
+        # ── Миграции (добавляем колонки если их нет) ─────────────────
+        _migrations = [
+            ("attached_files",  "TEXT"),
+            ("sources",         "TEXT"),
+            ("speaker_name",    "TEXT"),
+            ("regen_history",   "TEXT"),
+            ("generated_files", "TEXT"),   # ← список файлов сгенерированных ИИ
+        ]
 
-        # МИГРАЦИЯ: Добавляем колонку sources если её нет
-        try:
-            cur.execute("ALTER TABLE chat_messages ADD COLUMN sources TEXT")
-            print("[DB_MIGRATION] ✓ Добавлена колонка sources")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("[DB_MIGRATION] ℹ️ Колонка sources уже существует")
-            else:
-                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции sources: {e}")
+        for col_name, col_type in _migrations:
+            try:
+                cur.execute(f"ALTER TABLE chat_messages ADD COLUMN {col_name} {col_type}")
+                print(f"[DB_MIGRATION] ✓ Добавлена колонка {col_name}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" in str(e).lower():
+                    print(f"[DB_MIGRATION] ℹ️ Колонка {col_name} уже существует")
+                else:
+                    print(f"[DB_MIGRATION] ⚠️ Ошибка миграции {col_name}: {e}")
 
-        # МИГРАЦИЯ: Добавляем колонку speaker_name если её нет
-        try:
-            cur.execute("ALTER TABLE chat_messages ADD COLUMN speaker_name TEXT")
-            print("[DB_MIGRATION] ✓ Добавлена колонка speaker_name")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("[DB_MIGRATION] ℹ️ Колонка speaker_name уже существует")
-            else:
-                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции speaker_name: {e}")
-
-        # МИГРАЦИЯ: История перегенерации
-        try:
-            cur.execute("ALTER TABLE chat_messages ADD COLUMN regen_history TEXT")
-            print("[DB_MIGRATION] ✓ Добавлена колонка regen_history")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("[DB_MIGRATION] ℹ️ Колонка regen_history уже существует")
-            else:
-                print(f"[DB_MIGRATION] ⚠️ Ошибка миграции regen_history: {e}")
-        
         conn.commit()
         
         # Если нет чатов - создаём первый
@@ -157,22 +136,38 @@ class ChatManager:
         conn.commit()
         conn.close()
     
-    def save_message(self, chat_id: int, role: str, content: str, attached_files: list = None, sources: list = None, speaker_name: str = None, regen_history: list = None):
-        """Сохранить сообщение в чат с прикреплёнными файлами, источниками, именем ИИ и историей перегенерации"""
+    def save_message(self,
+                     chat_id: int,
+                     role: str,
+                     content: str,
+                     attached_files: list = None,
+                     sources: list = None,
+                     speaker_name: str = None,
+                     regen_history: list = None,
+                     generated_files: list = None):
+        """
+        Сохранить сообщение в чат.
+
+        generated_files — список dict {"filename":str,"content":str,"ext":str},
+                          сгенерированных ИИ файлов для этого сообщения.
+        """
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
         now = datetime.utcnow().isoformat()
         
-        # Сериализуем список файлов в JSON
-        files_json = json.dumps(attached_files) if attached_files else None
-        # Сериализуем источники [(title, url), ...] в JSON
-        sources_json = json.dumps(sources) if sources else None
-        # История перегенерации
-        regen_json = json.dumps(regen_history) if regen_history else None
+        files_json   = json.dumps(attached_files)  if attached_files  else None
+        sources_json = json.dumps(sources)          if sources         else None
+        regen_json   = json.dumps(regen_history)    if regen_history   else None
+        gfiles_json  = json.dumps(generated_files)  if generated_files else None
         
-        cur.execute("INSERT INTO chat_messages (chat_id, role, content, attached_files, sources, created_at, speaker_name, regen_history) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                   (chat_id, role, content, files_json, sources_json, now, speaker_name, regen_json))
+        cur.execute("""
+            INSERT INTO chat_messages
+                (chat_id, role, content, attached_files, sources, created_at,
+                 speaker_name, regen_history, generated_files)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, role, content, files_json, sources_json, now,
+              speaker_name, regen_json, gfiles_json))
         
         # Обновить время последнего обновления чата
         cur.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
@@ -181,30 +176,41 @@ class ChatManager:
         conn.close()
     
     def get_chat_messages(self, chat_id: int, limit: int = 50) -> List[Tuple]:
-        """Получить сообщения чата с прикреплёнными файлами"""
+        """
+        Получить сообщения чата.
+
+        Возвращает список кортежей:
+            (role, content, attached_files, sources, created_at,
+             speaker_name, regen_history, generated_files)
+        """
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
         cur.execute("""
-        SELECT role, content, attached_files, sources, created_at, speaker_name, regen_history
-        FROM chat_messages 
-        WHERE chat_id = ? 
-        ORDER BY id DESC 
+        SELECT role, content, attached_files, sources, created_at,
+               speaker_name, regen_history, generated_files
+        FROM chat_messages
+        WHERE chat_id = ?
+        ORDER BY id DESC
         LIMIT ?
         """, (chat_id, limit))
         
         rows = cur.fetchall()
         conn.close()
         
-        # Десериализуем файлы, источники и историю перегенерации из JSON
         result = []
         for row in reversed(rows):
-            role, content, files_json, sources_json, created_at, speaker_name, regen_json = row
-            files = json.loads(files_json) if files_json else None
-            sources = json.loads(sources_json) if sources_json else []
-            sources = [tuple(s) for s in sources] if sources else []
-            regen_history = json.loads(regen_json) if regen_json else None
-            result.append((role, content, files, sources, created_at, speaker_name, regen_history))
+            (role, content, files_json, sources_json,
+             created_at, speaker_name, regen_json, gfiles_json) = row
+
+            files        = json.loads(files_json)   if files_json   else None
+            sources      = json.loads(sources_json) if sources_json else []
+            sources      = [tuple(s) for s in sources] if sources else []
+            regen_history = json.loads(regen_json)  if regen_json   else None
+            gen_files    = json.loads(gfiles_json)  if gfiles_json  else []
+
+            result.append((role, content, files, sources, created_at,
+                           speaker_name, regen_history, gen_files))
         
         return result
     
@@ -229,7 +235,7 @@ class ChatManager:
         return row[0] if row else None
 
     def update_regen_history(self, chat_id: int, message_id: int, regen_history: list):
-        """Обновить историю перегенерации у конкретного сообщения (вызывается после каждой регенерации)."""
+        """Обновить историю перегенерации у конкретного сообщения."""
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         cur.execute("UPDATE chat_messages SET regen_history = ? WHERE id = ? AND chat_id = ?",
@@ -253,10 +259,7 @@ class ChatManager:
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
-        # Удаляем все сообщения чата
         cur.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
-        
-        # Удаляем сам чат
         cur.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         
         conn.commit()
@@ -270,13 +273,9 @@ class ChatManager:
         conn = sqlite3.connect(CHATS_DB)
         cur = conn.cursor()
         
-        # Удаляем все сообщения
         cur.execute("DELETE FROM chat_messages")
-        
-        # Удаляем все чаты
         cur.execute("DELETE FROM chats")
         
-        # Создаём новый чат
         now = datetime.utcnow().isoformat()
         cur.execute("INSERT INTO chats (title, created_at, updated_at, is_active) VALUES (?, ?, ?, ?)",
                    ("Новый чат", now, now, 1))

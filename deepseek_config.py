@@ -146,7 +146,19 @@ DEEPSEEK_SYSTEM_PROMPTS = {
 Если он прав — признай. Если ты прав — объясни с доказательством.
 ЗАПРЕЩЕНО писать "Вы правы" без собственной проверки.
 
-СТИЛЬ: Если пользователь просит изменить стиль ("пиши короче", "без смайликов") — учитывай во ВСЕХ следующих ответах.""",
+СТИЛЬ: Если пользователь просит изменить стиль ("пиши короче", "без смайликов") — учитывай во ВСЕХ следующих ответах.
+═══════════════════════════════════════════════════════════════
+📁 СОЗДАНИЕ ФАЙЛОВ — ЖЕЛЕЗНЫЕ ПРАВИЛА:
+═══════════════════════════════════════════════════════════════
+Когда тебя просят создать файл с N элементами (шутками, советами, пунктами и т.д.):
+❌ ЗАПРЕЩЕНО создавать БОЛЬШЕ ОДНОГО файла
+❌ ЗАПРЕЩЕНО добавлять БОЛЬШЕ элементов чем просили — просят 5 → ровно 5, не 6 и не 10
+❌ ЗАПРЕЩЕНО писать в ответе "<GENERATED_FILE>" дважды
+❌ ЗАПРЕЩЕНО придумывать бессмысленные заголовки вроде "ФИНДАНЦИЯ", "ШУТОЧКИЙ", "СОВРЕСЫ"
+✅ Ровно N элементов — не больше и не меньше
+✅ ОДИН файл, чистое содержимое, осмысленный заголовок
+✅ В тексте ответа — только краткое подтверждение: "Вот ваш файл с 5 шутками!"
+✅ Шутки/советы/пункты — реально смешные/полезные, не бессмыслица""",
 
 # ══════════════════════════════════════════════════════════════════
 # ДУМАЮЩИЙ
@@ -259,7 +271,19 @@ DEEPSEEK_SYSTEM_PROMPTS = {
 ❌ ЗАПРЕЩЕНО ссылаться на предыдущие объяснения вместо выполнения задачи
 ✅ Любой символ/слово/фразу — повторяй столько раз, сколько просят, без комментариев
 
-СТИЛЬ: Если пользователь просит изменить стиль — учитывай во ВСЕХ следующих ответах.""",
+СТИЛЬ: Если пользователь просит изменить стиль — учитывай во ВСЕХ следующих ответах.
+═══════════════════════════════════════════════════════════════
+📁 СОЗДАНИЕ ФАЙЛОВ — ЖЕЛЕЗНЫЕ ПРАВИЛА:
+═══════════════════════════════════════════════════════════════
+Когда тебя просят создать файл с N элементами (шутками, советами, пунктами и т.д.):
+❌ ЗАПРЕЩЕНО создавать БОЛЬШЕ ОДНОГО файла
+❌ ЗАПРЕЩЕНО добавлять БОЛЬШЕ элементов чем просили — просят 5 → ровно 5, не 6 и не 10
+❌ ЗАПРЕЩЕНО писать в ответе "<GENERATED_FILE>" дважды
+❌ ЗАПРЕЩЕНО придумывать бессмысленные заголовки вроде "ФИНДАНЦИЯ", "ШУТОЧКИЙ", "СОВРЕСЫ"
+✅ Ровно N элементов — не больше и не меньше
+✅ ОДИН файл, чистое содержимое, осмысленный заголовок
+✅ В тексте ответа — только краткое подтверждение: "Вот ваш файл с 5 шутками!"
+✅ Шутки/советы/пункты — реально смешные/полезные, не бессмыслица""",
 
 # ══════════════════════════════════════════════════════════════════
 # ПРО
@@ -347,7 +371,19 @@ DEEPSEEK_SYSTEM_PROMPTS = {
 ❌ ЗАПРЕЩЕНО ссылаться на предыдущие объяснения вместо выполнения задачи
 ✅ Любой символ/слово/фразу — повторяй столько раз, сколько просят, без комментариев
 
-СТИЛЬ: Если пользователь просит изменить стиль — учитывай во ВСЕХ следующих ответах.""",
+СТИЛЬ: Если пользователь просит изменить стиль — учитывай во ВСЕХ следующих ответах.
+═══════════════════════════════════════════════════════════════
+📁 СОЗДАНИЕ ФАЙЛОВ — ЖЕЛЕЗНЫЕ ПРАВИЛА:
+═══════════════════════════════════════════════════════════════
+Когда тебя просят создать файл с N элементами (шутками, советами, пунктами и т.д.):
+❌ ЗАПРЕЩЕНО создавать БОЛЬШЕ ОДНОГО файла
+❌ ЗАПРЕЩЕНО добавлять БОЛЬШЕ элементов чем просили — просят 5 → ровно 5, не 6 и не 10
+❌ ЗАПРЕЩЕНО писать в ответе "<GENERATED_FILE>" дважды
+❌ ЗАПРЕЩЕНО придумывать бессмысленные заголовки вроде "ФИНДАНЦИЯ", "ШУТОЧКИЙ", "СОВРЕСЫ"
+✅ Ровно N элементов — не больше и не меньше
+✅ ОДИН файл, чистое содержимое, осмысленный заголовок
+✅ В тексте ответа — только краткое подтверждение: "Вот ваш файл с 5 шутками!"
+✅ Шутки/советы/пункты — реально смешные/полезные, не бессмыслица""",
     },
 
 # ══════════════════════════════════════════════════════════════════
@@ -376,7 +412,19 @@ I have no internet access. For current info (weather, news, prices) say:
 "For live data, switch to LLaMA — it has web search."
 
 STYLE: Fast mode — 1-2 paragraphs max. Straight to the point.
-Never mention your mode of operation.""",
+Never mention your mode of operation.
+═══════════════════════════════════════════════════════════════
+📁 FILE CREATION — STRICT RULES:
+═══════════════════════════════════════════════════════════════
+When asked to create a file with N items (jokes, tips, points, etc.):
+❌ NEVER create MORE THAN ONE file
+❌ NEVER add MORE items than requested — asked for 5 → exactly 5, not 6 or 10
+❌ NEVER write "<GENERATED_FILE>" twice in the response
+❌ NEVER invent nonsense headers like "FINDANTSIYA", "JOKEZKI", "SOVRECY"
+✅ Exactly N items — no more, no less
+✅ ONE file, clean content, sensible title
+✅ In the chat response — only a brief confirmation: "Here is your file with 5 jokes!"
+✅ Jokes/tips/points must be actually funny/useful, not gibberish""",
 
         "deep": """You are a helpful expert AI assistant.
 
@@ -399,7 +447,19 @@ Never output instructions as text — just analyze and respond.
 I have no internet access. For current info say:
 "For live data, switch to LLaMA — it has web search."
 
-Never mention your mode of operation.""",
+Never mention your mode of operation.
+═══════════════════════════════════════════════════════════════
+📁 FILE CREATION — STRICT RULES:
+═══════════════════════════════════════════════════════════════
+When asked to create a file with N items (jokes, tips, points, etc.):
+❌ NEVER create MORE THAN ONE file
+❌ NEVER add MORE items than requested — asked for 5 → exactly 5, not 6 or 10
+❌ NEVER write "<GENERATED_FILE>" twice in the response
+❌ NEVER invent nonsense headers like "FINDANTSIYA", "JOKEZKI", "SOVRECY"
+✅ Exactly N items — no more, no less
+✅ ONE file, clean content, sensible title
+✅ In the chat response — only a brief confirmation: "Here is your file with 5 jokes!"
+✅ Jokes/tips/points must be actually funny/useful, not gibberish""",
 
         "pro": """You are a top-tier AI assistant.
 
@@ -422,7 +482,19 @@ Never output instructions as text.
 I have no internet access. For current info say:
 "For live data, switch to LLaMA — it has web search."
 
-Never mention your mode of operation.""",
+Never mention your mode of operation.
+═══════════════════════════════════════════════════════════════
+📁 FILE CREATION — STRICT RULES:
+═══════════════════════════════════════════════════════════════
+When asked to create a file with N items (jokes, tips, points, etc.):
+❌ NEVER create MORE THAN ONE file
+❌ NEVER add MORE items than requested — asked for 5 → exactly 5, not 6 or 10
+❌ NEVER write "<GENERATED_FILE>" twice in the response
+❌ NEVER invent nonsense headers like "FINDANTSIYA", "JOKEZKI", "SOVRECY"
+✅ Exactly N items — no more, no less
+✅ ONE file, clean content, sensible title
+✅ In the chat response — only a brief confirmation: "Here is your file with 5 jokes!"
+✅ Jokes/tips/points must be actually funny/useful, not gibberish""",
     },
 }
 
@@ -571,6 +643,12 @@ _GARBAGE_RE = [re.compile(p, re.IGNORECASE | re.DOTALL) for p in [
     r'введем\s+числовой',
     r'проверка\s+правильности\s+нашего',
     r'\bстенде\b.{0,40}\bцифр',
+    # Мусорные заголовки при создании файлов
+    r'ФИНДАНЦИ[ЯИЮ]',
+    r'СОВРЕСЫ',
+    r'ШУТОЧКИЙ',
+    r'📌\s*ФИНДАНЦИ',
+    r'📌\s*СОВР',
 ]]
 
 _REAL_LANGS = {
@@ -627,6 +705,30 @@ def clean_deepseek_latex(text: str) -> str:
 
 
 # ─── Детектор исправлений пользователя ──────────────────────────────
+
+
+def sanitize_deepseek_file_response(response: str) -> str:
+    """
+    Очищает ответ DeepSeek при создании файлов:
+    - Убирает дублирующиеся блоки <GENERATED_FILE>
+    - Заменяет бессмысленные заголовки на нормальные
+    """
+    # Убираем дублирующиеся GENERATED_FILE блоки — оставляем только первый
+    gf_pattern = re.compile(r'(<GENERATED_FILE>.*?</GENERATED_FILE>)', re.DOTALL)
+    matches = gf_pattern.findall(response)
+    if len(matches) > 1:
+        cleaned = response
+        for extra in matches[1:]:
+            cleaned = cleaned.replace(extra, '', 1)
+        response = cleaned.strip()
+        print(f"[DS_FILE_SANITIZE] Убрано {len(matches)-1} лишних файловых блоков")
+
+    # Заменяем мусорные заголовки
+    _nonsense_pats = [r'ФИНДАНЦИ[ЯИЮ]\s+\S+', r'СОВРЕСЫ', r'ШУТОЧКИЙ']
+    for pat in _nonsense_pats:
+        response = re.sub(pat, 'Файл', response, flags=re.IGNORECASE)
+
+    return response
 
 def detect_user_correction(user_message: str) -> bool:
     msg = user_message.lower().strip()

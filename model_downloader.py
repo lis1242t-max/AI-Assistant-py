@@ -8,6 +8,7 @@ model_downloader.py — диалоги и утилиты для скачиван
     delete_model_files_from_disk(ollama_model_name, models_dir) -> (int, list)
     LlamaDownloadDialog(parent)
     DeepSeekDownloadDialog(parent)
+    DeepSeekR1DownloadDialog(parent)
     MistralDownloadDialog(parent)
 """
 
@@ -29,6 +30,10 @@ try:
 except ImportError:
     DEEPSEEK_MODEL_NAME = "deepseek-llm:7b-chat"
     DEEPSEEK_OLLAMA_PULL = "ollama pull deepseek-llm:7b-chat"
+
+# ── Константы DeepSeek-R1 8B ─────────────────────────────────────────────
+DEEPSEEK_R1_MODEL_NAME  = "deepseek-r1:8b"
+DEEPSEEK_R1_OLLAMA_PULL = "ollama pull deepseek-r1:8b"
 
 # ── Константы Mistral (берём из mistral_config или fallback) ─────────────
 try:
@@ -610,6 +615,50 @@ class DeepSeekDownloadDialog(_BaseDownloadDialog):
             QtWidgets.QMessageBox.information(
                 self, "Готово",
                 f"✅ {message}\n\nМожете выбрать эту модель.",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+            self.accept()
+        else:
+            self.status_label.setText(f"❌ {message}")
+            if hasattr(self, "start_btn"):
+                self.start_btn.setEnabled(True)
+                self.start_btn.setText("⬇  Повторить")
+            self.cancel_btn.setText("✕  Закрыть")
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.reject)
+
+
+class DeepSeekR1DownloadDialog(_BaseDownloadDialog):
+    """Диалог скачивания DeepSeek-R1 8B (модель с цепочкой рассуждений)."""
+    MODEL_CMD   = DEEPSEEK_R1_OLLAMA_PULL
+    MODEL_LABEL = "🧠  Скачивание DeepSeek-R1 8B"
+    MODEL_SIZE  = "~4.9 GB"
+
+    @QtCore.pyqtSlot(bool, str)
+    def _on_download_finished(self, success: bool, message: str):
+        if success:
+            self.progress_bar.setValue(100)
+            self.status_label.setText("✅ Скачивание завершено!")
+            self.cancel_btn.setText("✓  Готово")
+            self.cancel_btn.setStyleSheet(
+                "QPushButton{background:rgba(55,155,75,0.72);color:#f0f8f0;"
+                "border:1px solid rgba(75,175,95,0.55);border-radius:11px;"
+                "font-size:13px;font-weight:600;}"
+                "QPushButton:hover{background:rgba(65,170,85,0.88);}"
+            )
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.accept)
+            if hasattr(self, "start_btn"):
+                self.start_btn.hide()
+            QtWidgets.QMessageBox.information(
+                self, "Готово",
+                f"✅ {message}\n\nDeepSeek-R1 8B готов к использованию!",
                 QtWidgets.QMessageBox.StandardButton.Ok,
             )
             self.accept()

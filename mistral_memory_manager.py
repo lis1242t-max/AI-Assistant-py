@@ -280,3 +280,23 @@ class MistralMemoryManager:
         """
         combined = f"[{key}] {value}"
         self.add_memory(combined)
+
+    def get_context_memory(self, chat_id, limit: int = 20) -> list:
+        """
+        Алиас для совместимости с ContextMemoryManager.
+        Возвращает список кортежей (key, value) — как ContextMemoryManager.
+        chat_id игнорируется (память глобальная, без привязки к чату).
+
+        Разбирает записи вида "[key] value" обратно в (key, value).
+        Незнакомые записи возвращаются как ("user_memory", content).
+        """
+        rows = self._get_recent_memories(limit)
+        result = []
+        for row in rows:
+            c = row.get("content", "")
+            m = re.match(r'^\[([^\]]+)\]\s*(.*)', c, re.DOTALL)
+            if m:
+                result.append((m.group(1), m.group(2)))
+            else:
+                result.append(("user_memory", c))
+        return result
