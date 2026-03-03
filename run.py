@@ -23,6 +23,11 @@ except ImportError:
 # Импорт менеджера чатов
 from chat_manager import ChatManager
 from context_memory_manager import ContextMemoryManager
+# Singleton для LLaMA/общей памяти — аналогично _DS_MEMORY и _MISTRAL_MEMORY
+# БЕЗ синглтона каждый get_memory_manager("llama") создаёт новый объект.
+# Хотя ContextMemoryManager читает из SQLite и данные не теряются,
+# единый объект гарантирует консистентность и упрощает отладку.
+_CTX_MEMORY = ContextMemoryManager()
 from ai_file_generator import (
     parse_generated_files,
     GeneratedFileWidget,
@@ -79,6 +84,47 @@ except Exception as e:
 # Platform detection (для совместимости с Windows)
 # -------------------------
 IS_WINDOWS = sys.platform == "win32"
+
+# ── Windows: включаем скруглённые углы через DWM ─────────────────────────────
+# На Windows 10/11 WA_TranslucentBackground + border-radius в CSS не даёт
+# нативных скруглений — углы отрисовываются квадратными поверх фона рабочего стола.
+# Решение: применяем DWM DWMWCP_ROUND через ctypes, а фон заполняем сами.
+def _apply_windows_rounded(widget, radius: int = 12):
+    """
+    Включает нативные скруглённые углы на Windows 11 через DWM API.
+    На Windows 10 и других платформах — молчаливо игнорируется.
+    Вызывать после show() виджета.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes, ctypes.wintypes
+        hwnd = int(widget.winId())
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2        # скруглённые
+        DWMWCP_ROUNDSMALL = 3   # чуть меньше скруглённые (для мелких попапов)
+        preference = DWMWCP_ROUNDSMALL if radius <= 10 else DWMWCP_ROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(ctypes.c_int(preference)),
+            ctypes.sizeof(ctypes.c_int)
+        )
+    except Exception:
+        pass  # Win10 / DWM недоступен — не критично
+
+
+def _fix_popup_on_windows(widget):
+    """
+    Для всплывающих меню/диалогов на Windows: убираем WA_TranslucentBackground
+    (он ломает рендер на Win10) и включаем нативные скруглённые углы через DWM.
+    """
+    if not IS_WINDOWS:
+        return
+    # WA_TranslucentBackground вызывает чёрные/белые углы на Win10 без Aero Glass
+    widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, False)
+
 
 # ── Директория приложения (для поиска ресурсов) ─────────────────────────────
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -321,65 +367,73 @@ SHORT_TEXT_THRESHOLD = 80  # символов
 # ИСПРАВЛЕНИЕ №2: Расширенный список сокращений для обработки
 # ════════════════════════════════════════════════════════════════
 # Словарь сокращений которые должны генерировать ответ
-SHORT_ACKNOWLEDGMENTS = {
-    # Русские сокращения
-    "ок": "👍",
-    "окей": "👍", 
-    "оке": "👍",
-    "пон": "Отлично!",
-    "понял": "👍",
-    "поняла": "👍",
-    "понятно": "Хорошо!",
-    "ясно": "👍",
-    "хорошо": "👍",
-    "норм": "👍",
-    "лад": "👍",
-    "ладно": "👍",
-    "да": "👍",
-    "ага": "👍",
-    "угу": "👍",
-    "есть": "👍",
-    "хз": "Что тебя интересует?",
-    "спс": "Рад помочь! 😊",
-    "спасибо": "Пожалуйста! 😊",
-    "благодарю": "Всегда рад помочь! 😊",
-    
-    # Английские сокращения
-    "ok": "👍",
-    "okay": "👍",
-    "k": "👍",
-    "kk": "👍",
-    "got it": "👍",
-    "i see": "👍",
-    "understood": "👍",
-    "sure": "👍",
-    "yeah": "👍",
-    "yes": "👍",
-    "yep": "👍",
-    "yup": "👍",
-    "cool": "😊",
-    "nice": "😊",
-    "great": "😊",
-    "awesome": "😊",
-    "thx": "You're welcome! 😊",
-    "thanks": "You're welcome! 😊",
-    "thank you": "You're welcome! 😊",
-    "idk": "What interests you?",
-}
+import random as _random
+
+# ─── Разговорные ответы без вызова АИ ────────────────────────────────────────
+# Используются когда сообщение — чисто социальное (спасибо, ок, привет…).
+# АИ при этом НЕ вызывается, чтобы исключить галлюцинации о предыдущем контексте.
+
+_CONV_RESPONSES_RU = [
+    "Пожалуйста! 😊",
+    "Рад помочь! 😊",
+    "Всегда пожалуйста! 😊",
+    "Обращайтесь! 😊",
+    "Не за что! 😊",
+]
+_CONV_RESPONSES_EN = [
+    "You're welcome! 😊",
+    "Happy to help! 😊",
+    "Anytime! 😊",
+    "Glad I could help! 😊",
+    "No problem! 😊",
+]
+_CONV_SIMPLE = ["👍", "😊", "👍"]
+
+def _conversational_response(text: str) -> str:
+    """Подобрать простой ответ на разговорное сообщение по тексту."""
+    t = text.lower()
+    is_ru = any(c in t for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
+    # Благодарность
+    if any(w in t for w in ("спасибо", "благодар", "спс", "thanks", "thx", "thank")):
+        return _random.choice(_CONV_RESPONSES_RU if is_ru else _CONV_RESPONSES_EN)
+    # Подтверждение / нейтральное
+    return _random.choice(_CONV_SIMPLE)
+
 
 def is_short_acknowledgment(text: str):
     """
-    Проверяет, является ли сообщение коротким подтверждением/сокращением.
-    Возвращает (True, ответ) если да, иначе (False, "")
+    Проверяет является ли сообщение чисто разговорным (без вопросов/команд).
+    Использует _is_conversational_message — единый детектор для всего приложения.
+    Возвращает (True, ответ) если да, иначе (False, "").
+    Примечание: _is_conversational_message определена ниже перед get_ai_response,
+    поэтому здесь используем её через обёртку с отложенной привязкой.
     """
-    text_lower = text.lower().strip()
-    
-    # Убираем знаки препинания для проверки
-    text_clean = text_lower.rstrip('!?.,:;')
-    
-    if text_clean in SHORT_ACKNOWLEDGMENTS:
-        return True, SHORT_ACKNOWLEDGMENTS[text_clean]
-    
+    stripped = text.strip()
+    if len(stripped) > 80:
+        return False, ""
+    if "?" in stripped[:-1]:
+        return False, ""
+    import re as _re
+    _pat = _re.compile(
+        r"""^(?:
+            спасибо[\w\s]{0,30}  | большое\s+спасибо | огромное\s+спасибо | благодар[\w]{1,10}[\s\w]{0,20} |
+            ок[её]?й? | хорошо | понял[аи]? | понятно | ясно | отлично | супер |
+            норм(?:ально)? | ладно | угу | ага | да | нет | конечно | договорились |
+            всё\s+(?:ясно|понятно|окей|хорошо) |
+            круто[\s!]* | класс[\s!]* | прекрасно[\s!]* | замечательно[\s!]* |
+            шикарно[\s!]* | бомба[\s!]* | огонь[\s!]* | красота[\s!]* |
+            привет[\w\s]{0,15} | здравствуй[\w\s]{0,15} | добрый\s+\w+ |
+            пон(?:ял[аи]?)? | спс | хз |
+            thanks?[\s\w]{0,25} | thank\s+you[\s\w]{0,25} | thx[\s!]* | ty[\s!]* |
+            ok(?:ay)? | k{1,2} | got\s+it | i\s+see | understood | sure |
+            ye[sp]|yup | cool[\s!]* | great[\s!]* | awesome[\s!]* |
+            nice[\s!]* | perfect[\s!]* | sounds?\s+good | alright | roger |
+            hi[\s\w]{0,10} | hello[\s\w]{0,10} | hey[\s\w]{0,10} | idk
+        )[!?.,\s]*$""",
+        _re.VERBOSE | _re.IGNORECASE | _re.UNICODE,
+    )
+    if _pat.match(stripped):
+        return True, _conversational_response(stripped)
     return False, ""
 
 
@@ -5026,13 +5080,14 @@ def get_memory_manager(model_key: str):
         return _DS_MEMORY
     if model_key == "mistral" and _MISTRAL_MEMORY is not None:
         return _MISTRAL_MEMORY
-    return ContextMemoryManager()
+    # ✅ ИСПРАВЛЕНО: возвращаем singleton, а не новый объект каждый раз
+    return _CTX_MEMORY
 
 
 def clear_chat_all_memories(chat_id: int):
-    """Очищает память чата сразу во ВСЕХ трёх менеджерах (LLaMA + DeepSeek + Mistral)."""
+    """Очищает память конкретного чата во ВСЕХ трёх менеджерах (LLaMA + DeepSeek + Mistral)."""
     try:
-        ContextMemoryManager().delete_chat_context(chat_id)
+        _CTX_MEMORY.delete_chat_context(chat_id)
         print(f"[MEMORY] LLaMA память чата {chat_id} удалена")
     except Exception as e:
         print(f"[MEMORY] LLaMA память: {e}")
@@ -5044,7 +5099,8 @@ def clear_chat_all_memories(chat_id: int):
         print(f"[MEMORY] DeepSeek память: {e}")
     try:
         if _MISTRAL_MEMORY is not None:
-            _MISTRAL_MEMORY.clear_all()
+            # ИСПРАВЛЕНО: передаём chat_id, иначе очищается только chat_id=0
+            _MISTRAL_MEMORY.clear_all(chat_id=chat_id)
             print(f"[MEMORY] Mistral память чата {chat_id} удалена")
     except Exception as e:
         print(f"[MEMORY] Mistral память: {e}")
@@ -5053,7 +5109,7 @@ def clear_chat_all_memories(chat_id: int):
 def clear_all_memories_global():
     """Полная очистка памяти ВСЕХ моделей для ВСЕХ чатов. Вызывать при удалении всех чатов."""
     try:
-        ContextMemoryManager().clear_all_context()
+        _CTX_MEMORY.clear_all_context()
         print("[MEMORY] Вся память LLaMA очищена")
     except Exception as e:
         print(f"[MEMORY] LLaMA clear_all: {e}")
@@ -5065,7 +5121,9 @@ def clear_all_memories_global():
         print(f"[MEMORY] DeepSeek clear_all: {e}")
     try:
         if _MISTRAL_MEMORY is not None:
-            _MISTRAL_MEMORY.clear_all()
+            # ИСПРАВЛЕНО: clear_all_context() удаляет ВСЕ чаты,
+            # а не только chat_id=0 как делал clear_all() без аргумента
+            _MISTRAL_MEMORY.clear_all_context()
             print("[MEMORY] Вся память Mistral очищена")
     except Exception as e:
         print(f"[MEMORY] Mistral clear_all: {e}")
@@ -5075,6 +5133,48 @@ def on_chat_switched_all_memories(new_chat_id: int):
     """Уведомляет все менеджеры памяти о смене чата."""
     if _DS_MEMORY is not None:
         _DS_MEMORY.on_chat_switch(new_chat_id)
+
+
+_CONVERSATIONAL_RE = re.compile(
+    r"""^(?:
+        # Благодарности RU
+        спасибо[\w\s]{0,30}  | благодар[\w]{1,10}[\s\w]{0,20} |
+        # Подтверждения RU
+        ок[её]?й? | хорошо | понял[аи]? | понятно | ясно | отлично | супер |
+        норм(?:ально)? | ладно | угу | ага | да | нет | конечно | договорились |
+        всё\s+(?:ясно|понятно|окей|хорошо) | отлично[,!\s]* |
+        # Приветствия RU
+        привет[\w\s]{0,15} | здравствуй[\w\s]{0,15} | добрый\s+\w+ |
+        # Восклицания RU
+        круто[\s!]* | класс[\s!]* | прекрасно[\s!]* | замечательно[\s!]* |
+        шикарно[\s!]* | бомба[\s!]* | огонь[\s!]* | красота[\s!]* |
+        # Благодарности EN
+        thanks?[\s\w]{0,25} | thank\s+you[\s\w]{0,25} | thx[\s!]* | ty[\s!]* |
+        # Подтверждения EN
+        ok(?:ay)? | got\s+it | i\s+see | understood | sure | yep | yup |
+        cool[\s!]* | great[\s!]* | awesome[\s!]* | nice[\s!]* | perfect[\s!]* |
+        sounds?\s+good | makes?\s+sense | alright | roger |
+        # Приветствия EN
+        hi[\s\w]{0,10} | hello[\s\w]{0,10} | hey[\s\w]{0,10}
+    )[!?.,\s]*$""",
+    re.VERBOSE | re.IGNORECASE | re.UNICODE,
+)
+
+def _is_conversational_message(text: str) -> bool:
+    """
+    Возвращает True если сообщение — чисто социальное/разговорное:
+    благодарность, подтверждение, приветствие, восклицание.
+    Для таких сообщений НЕ нужно вшивать file_analysis в системный промпт —
+    это главная причина галлюцинаций о содержимом файлов.
+    """
+    stripped = text.strip()
+    # Длинные сообщения (>80 символов) скорее всего содержат реальный вопрос
+    if len(stripped) > 80:
+        return False
+    # Если есть вопросительный знак внутри — скорее всего вопрос
+    if '?' in stripped[:-1]:
+        return False
+    return bool(_CONVERSATIONAL_RE.match(stripped))
 
 
 def get_ai_response(user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key: str = None):
@@ -5092,6 +5192,8 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
 
     # НОРМАЛИЗАЦИЯ МАТЕМАТИЧЕСКИХ СИМВОЛОВ
     # Заменяем специальные символы на стандартные ASCII
+    # Сохраняем оригинал для сравнения с историей (история хранит raw-текст)
+    _user_message_raw = user_message
     user_message = user_message.replace('×', '*')  # Умножение
     user_message = user_message.replace('÷', '/')  # Деление
     user_message = user_message.replace('−', '-')  # Минус (длинное тире)
@@ -5176,8 +5278,31 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     print(f"[GET_AI_RESPONSE] Выбран системный промпт: mode='{mode}', ai_mode='{ai_mode}'")
     # Выбираем промпт в зависимости от текущей модели
     if _mk in ("deepseek", "deepseek-r1"):
-        base_system = get_deepseek_system_prompt(detected_language, mode)
-        print(f"[GET_AI_RESPONSE] Используется промпт DeepSeek")
+        _ds_base = get_deepseek_system_prompt(detected_language, mode)
+        # Жёсткий префикс идентичности — предотвращает галлюцинацию "я GPT-4 от OpenAI".
+        # Маленькая 7b-модель без этого часто выдаёт данные обучения вместо правильного ответа.
+        if detected_language == "russian":
+            _identity_prefix = (
+                "Ты — ИИ-ассистент DeepSeek. "
+                "Ты НЕ GPT-4, НЕ ChatGPT, НЕ продукт OpenAI. "
+                "Ты создан компанией DeepSeek AI. "
+                "Отвечай коротко и по делу. "
+                "Ты помнишь всю историю нашего текущего разговора — она передана выше в сообщениях. "
+                "Если пользователь спрашивает что он только что написал или о чём шёл разговор — "
+                "посмотри в историю сообщений и ответь точно.\n\n"
+            )
+        else:
+            _identity_prefix = (
+                "You are DeepSeek AI assistant. "
+                "You are NOT GPT-4, NOT ChatGPT, NOT an OpenAI product. "
+                "You were created by DeepSeek AI. "
+                "Answer concisely. "
+                "You have full access to the current conversation history above. "
+                "If the user asks what they just wrote or what was discussed — "
+                "check the message history and answer precisely.\n\n"
+            )
+        base_system = _identity_prefix + _ds_base
+        print(f"[GET_AI_RESPONSE] Используется промпт DeepSeek (с префиксом идентичности)")
     elif _mk == "mistral":
         base_system = get_mistral_system_prompt(detected_language, mode)
         print(f"[GET_AI_RESPONSE] Используется промпт Mistral Nemo")
@@ -5219,27 +5344,34 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
     _day_after_en = _day_after.strftime("%B %d, %Y, %A")
 
     if detected_language == "russian":
-        _datetime_inject = (
-            f"\n\n⚡ СИСТЕМНЫЙ ФАКТ (абсолютно точно, из системных часов компьютера):\n"
-            f"• Сегодня: {_date_ru}\n"
-            f"• Завтра: {_tomorrow_ru}\n"
-            f"• Послезавтра: {_day_after_ru}\n"
-            f"• Время сейчас: {_time_ru}\n"
-            f"ОБЯЗАТЕЛЬНО используй эти данные при любых вопросах о дате, времени, дне недели.\n"
-            f"Если пользователь спрашивает про 'завтра' — это {_tomorrow_ru}.\n"
-            f"Твои обучающие данные о датах УСТАРЕЛИ — доверяй только этому системному факту."
-        )
+        if _mk in ("deepseek", "deepseek-r1"):
+            # Для DeepSeek — компактная однострочная инжекция даты
+            _datetime_inject = f"\n\nСегодня: {_date_ru}, время: {_time_ru}."
+        else:
+            _datetime_inject = (
+                f"\n\n⚡ СИСТЕМНЫЙ ФАКТ (абсолютно точно, из системных часов компьютера):\n"
+                f"• Сегодня: {_date_ru}\n"
+                f"• Завтра: {_tomorrow_ru}\n"
+                f"• Послезавтра: {_day_after_ru}\n"
+                f"• Время сейчас: {_time_ru}\n"
+                f"ОБЯЗАТЕЛЬНО используй эти данные при любых вопросах о дате, времени, дне недели.\n"
+                f"Если пользователь спрашивает про 'завтра' — это {_tomorrow_ru}.\n"
+                f"Твои обучающие данные о датах УСТАРЕЛИ — доверяй только этому системному факту."
+            )
     else:
-        _datetime_inject = (
-            f"\n\n⚡ SYSTEM FACT (exact, from computer system clock):\n"
-            f"• Today: {_date_en}\n"
-            f"• Tomorrow: {_tomorrow_en}\n"
-            f"• Day after tomorrow: {_day_after_en}\n"
-            f"• Current time: {_time_en}\n"
-            f"ALWAYS use this when answering questions about date, time, or day of week.\n"
-            f"If user asks about 'tomorrow' — that is {_tomorrow_en}.\n"
-            f"Your training data about dates is OUTDATED — trust only this system fact."
-        )
+        if _mk in ("deepseek", "deepseek-r1"):
+            _datetime_inject = f"\n\nToday: {_date_en}, time: {_time_en}."
+        else:
+            _datetime_inject = (
+                f"\n\n⚡ SYSTEM FACT (exact, from computer system clock):\n"
+                f"• Today: {_date_en}\n"
+                f"• Tomorrow: {_tomorrow_en}\n"
+                f"• Day after tomorrow: {_day_after_en}\n"
+                f"• Current time: {_time_en}\n"
+                f"ALWAYS use this when answering questions about date, time, or day of week.\n"
+                f"If user asks about 'tomorrow' — that is {_tomorrow_en}.\n"
+                f"Your training data about dates is OUTDATED — trust only this system fact."
+            )
     base_system = base_system + _datetime_inject
     print(f"[GET_AI_RESPONSE] 📅 Инжектирована дата: {_date_ru if detected_language == 'russian' else _date_en}")
     
@@ -5272,18 +5404,28 @@ def get_ai_response(user_message: str, current_language: str, deep_thinking: boo
                         print(f"[MEMORY] ✓ Loaded {len(user_memories)} memory records")
                 
                 # КРИТИЧНО: Добавляем контекст файлов из памяти
-                # НО только если в ТЕКУЩЕМ запросе нет своих файлов
-                if file_analyses and not (file_paths and len(file_paths) > 0):
+                # НО только если:
+                #   1. В ТЕКУЩЕМ запросе нет своих файлов
+                #   2. Сообщение НЕ является чисто разговорным (спасибо, ок, привет…)
+                #      Для разговорных сообщений file_analysis НЕ нужен —
+                #      именно он вызывает галлюцинации о содержимом файлов.
+                _skip_file_ctx = (
+                    (file_paths and len(file_paths) > 0)
+                    or _is_conversational_message(user_message)
+                )
+                if file_analyses and not _skip_file_ctx:
                     # Берём последний анализ файлов (самый свежий)
                     latest_file_context = file_analyses[-1]
                     if detected_language == "russian":
                         memory_context += f"\n\n📎 КОНТЕКСТ ИЗ ПРИКРЕПЛЁННЫХ ФАЙЛОВ:\n{latest_file_context}\n"
-                        memory_context += "\n(Используй этот контекст только если пользователь спрашивает о файлах. Не упоминай файлы если вопрос не связан с ними.)\n"
+                        memory_context += "\n(Используй этот контекст ТОЛЬКО если пользователь явно спрашивает о файлах. Не упоминай файлы если вопрос не связан с ними.)\n"
                         print(f"[MEMORY] ✓ Загружен контекст файлов ({len(latest_file_context)} символов)")
                     else:
                         memory_context += f"\n\n📎 CONTEXT FROM ATTACHED FILES:\n{latest_file_context}\n"
-                        memory_context += "\n(Use this context only if the user asks about files. Don't mention files if the question is unrelated.)\n"
+                        memory_context += "\n(Use this context ONLY if the user explicitly asks about files. Don't mention files if the question is unrelated.)\n"
                         print(f"[MEMORY] ✓ Loaded file context ({len(latest_file_context)} chars)")
+                elif file_analyses and _is_conversational_message(user_message):
+                    print(f"[MEMORY] ⏭ Пропуск file_analysis — разговорное сообщение: '{user_message[:40]}'"  )
         except Exception as e:
             print(f"[MEMORY] ✗ Ошибка загрузки памяти: {e}")
     
@@ -5387,8 +5529,35 @@ You ALWAYS read the full chat history before responding:
    • Remember and follow the condition in ALL subsequent responses
 ═══════════════════════════════════════════════════════════"""
 
+    # ══════════════════════════════════════════════════════════
+    # СБОРКА СИСТЕМНОГО ПРОМПТА
+    # DeepSeek — маленькая (7b) модель: огромный промпт вызывает
+    # галлюцинации и потерю контекста диалога.
+    # Для DeepSeek: только base + memory + math + role + язык.
+    # context_understanding и FILE_GENERATION_PROMPT — только для LLaMA/Mistral.
+    # FILE_GENERATION_PROMPT добавляем когда: прикреплён файл ИЛИ пользователь просит создать файл.
+    # ══════════════════════════════════════════════════════════
+    _has_files_in_request = bool(file_paths and len(file_paths) > 0)
+    _is_file_creation_request = detect_file_request(user_message)
+    _needs_file_gen_prompt = _has_files_in_request or _is_file_creation_request
+    _is_deepseek = _mk in ("deepseek", "deepseek-r1")
+
     if detected_language == "russian":
-        system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_ru + FILE_GENERATION_PROMPT + """
+        _lang_rule = (
+            "\n\nВАЖНО: отвечай строго на русском языке. "
+            "Не используй иностранные слова: вместо «your turn» — «ваш ход», "
+            "вместо «sorry» — «извините» и т.д."
+        )
+        if _is_deepseek:
+            # Компактный промпт для DeepSeek — не перегружаем маленькую модель
+            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
+            system_prompt = base_system + memory_context + math_prompt + role_instruction + _lang_rule + _file_gen_part
+        else:
+            # FILE_GENERATION_PROMPT — только когда реально просят файл.
+            # Если добавлять его ВСЕГДА, модель начинает генерировать файлы
+            # при любом обычном вопросе (видит инструкцию → применяет её).
+            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
+            system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_ru + _file_gen_part + """
 
 КРИТИЧЕСКИ ВАЖНО - ЯЗЫК ОТВЕТА:
 • Отвечай СТРОГО ТОЛЬКО на русском языке
@@ -5397,7 +5566,12 @@ You ALWAYS read the full chat history before responding:
 • Вместо иностранных слов используй ТОЛЬКО русские: "ваш ход", "попробуйте", "извините", "далее" и т.д.
 • Русские эквиваленты: however→однако, therefore→поэтому, important→важный, turn→ход, your→ваш, try→попробуйте"""
     else:
-        system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_en + FILE_GENERATION_PROMPT
+        if _is_deepseek:
+            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
+            system_prompt = base_system + memory_context + math_prompt + role_instruction + _file_gen_part
+        else:
+            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
+            system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_en + _file_gen_part
 
     final_user_message = user_message
 
@@ -5823,42 +5997,82 @@ Consider information from BOTH sources: search results AND attached files."""
         })
         print(f"[GET_AI_RESPONSE] Режим забывания: история не загружается")
     else:
-        # Загружаем историю из chat_manager если доступен, иначе из старой БД
-        # ВАЖНО: загружаем историю ДАЖЕ при включенном поиске для учета контекста
-        # DeepSeek получает только последние 15 сообщений — короткий контекст,
-        # чтобы модель не путалась в длинных переписках
-        _history_limit = 15 if _mk in ("deepseek", "deepseek-r1") else MAX_HISTORY_LOAD
-        if chat_manager and chat_id:
-            history = chat_manager.get_chat_messages(chat_id, limit=_history_limit)
-            print(f"[GET_AI_RESPONSE] Загружено сообщений из чата {chat_id}: {len(history)}")
+        # Загружаем историю диалога из memory_manager (primary) или chat_manager (fallback)
+        # memory_manager хранит только чистые повороты user/assistant — без мусора.
+        # Это гарантирует, что ИИ ВИДИТ СВОИ предыдущие ответы.
+        _history_limit = 20 if _mk in ("deepseek", "deepseek-r1") else MAX_HISTORY_LOAD
+
+        mem_mgr = get_memory_manager(_mk)
+        mem_messages = []
+        if chat_id and hasattr(mem_mgr, 'get_messages'):
+            try:
+                mem_messages = mem_mgr.get_messages(chat_id, limit=_history_limit)
+                print(f"[GET_AI_RESPONSE] Загружено {len(mem_messages)} сообщений из memory_manager ({_mk})")
+            except Exception as _mex:
+                print(f"[GET_AI_RESPONSE] ⚠️ memory_manager.get_messages: {_mex}")
+
+        # Fallback: если memory_manager пустой (старые чаты) — грузим из chat_manager
+        if not mem_messages:
+            if chat_manager and chat_id:
+                _fb_history = chat_manager.get_chat_messages(chat_id, limit=_history_limit)
+                print(f"[GET_AI_RESPONSE] Fallback: {len(_fb_history)} сообщений из chat_manager")
+                _fb = list(_fb_history)
+                if _fb and _fb[-1][0] == "user" and _fb[-1][1] in (_user_message_raw, user_message):
+                    _fb = _fb[:-1]
+                mem_messages = [
+                    {"role": r[0], "content": r[1]}
+                    for r in _fb if r[0] in ("user", "assistant")
+                ]
+            else:
+                _old_hist = load_history(limit=_history_limit)
+                print(f"[GET_AI_RESPONSE] Загружено {len(_old_hist)} сообщений из старой БД")
+                mem_messages = [
+                    {"role": r[0], "content": r[1]}
+                    for r in _old_hist if r[0] in ("user", "assistant")
+                ]
         else:
-            history = load_history(limit=_history_limit)
-            print(f"[GET_AI_RESPONSE] Загружено сообщений из истории: {len(history)}")
-        
-        # ВАЖНО: пропускаем последнее сообщение истории если оно совпадает с текущим
-        # запросом — сообщение пользователя сохраняется в БД ДО вызова ИИ,
-        # поэтому без этой защиты оно попадает в историю И добавляется ниже ещё раз.
-        # DeepSeek видит дубликат и думает что пользователь повторяется.
-        history_to_use = list(history)
-        if history_to_use and history_to_use[-1][0] == "user" and history_to_use[-1][1] == user_message:
-            history_to_use = history_to_use[:-1]
+            # memory_manager уже содержит текущий user_message (сохранён до вызова ИИ)
+            # Убираем последний элемент если он совпадает с текущим запросом (анти-дубль)
+            # ✅ ИСПРАВЛЕНО: сравниваем с _user_message_raw (то что реально сохранено в БД),
+            # а не с нормализованным user_message — иначе при спецсимволах антидубль не срабатывал
+            # и текущий запрос попадал в историю ДВАЖДЫ (raw + normalized).
+            if mem_messages and mem_messages[-1]["role"] == "user" and mem_messages[-1]["content"] in (_user_message_raw, user_message):
+                mem_messages = mem_messages[:-1]
 
         messages = [{"role": "system", "content": system_prompt}]
-        for msg_data in history_to_use:
-            role    = msg_data[0]
-            content = msg_data[1]
+        for _msg in mem_messages:
+            messages.append({"role": _msg["role"], "content": _msg["content"]})
+        messages.append({"role": "user", "content": final_user_message})
 
-            # Пропускаем системные сообщения
-            if role not in ["user", "assistant"]:
-                continue
-            messages.append({
-                "role": "user" if role == "user" else "assistant",
-                "content": content
-            })
-        messages.append({
-            "role": "user",
-            "content": final_user_message
-        })
+        # ── ASSISTANT PREFILL для файловых запросов ──────────────────
+        # Для маленьких моделей (7b) инструкции в промпте недостаточны —
+        # они игнорируют формат и выводят содержимое как обычный текст.
+        # Prefill буквально начинает ответ за модель: она вынуждена
+        # продолжать с того места где мы остановились, то есть внутри тега.
+        #
+        # ВАЖНО: DeepSeek R1 генерирует <think>...</think> ДО ответа.
+        # Prefill-сообщение assistant вставляется перед этим блоком —
+        # модель его игнорирует и пишет ответ после своего think.
+        # Поэтому для R1 prefill НЕ используем — только системный промпт + инструкция в сообщении.
+        if _file_injection and _mk != "deepseek-r1":  # R1 думает сам — prefill ломает её формат
+            import re as _re
+            _pf_match = _re.search(
+                r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
+                _file_injection, _re.IGNORECASE
+            )
+            if _pf_match:
+                _prefill_name = _pf_match.group(1)
+                if detected_language == "russian":
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"Вот файл!\n[FILE:{_prefill_name}]\n"
+                    })
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"Here's your file!\n[FILE:{_prefill_name}]\n"
+                    })
+                print(f"[GET_AI_RESPONSE] 📄 Prefill добавлен: [FILE:{_prefill_name}]")
 
         if use_search:
             print(f"[GET_AI_RESPONSE] Режим поиска: история загружена для учета контекста диалога")
@@ -5960,13 +6174,27 @@ Consider information from BOTH sources: search results AND attached files."""
     response_text = ""
     
     # ═══════════════════════════════════════════════════════════════
-    # DEEPSEEK R1: специфичные параметры Ollama для максимальной скорости
-    # num_ctx=4096 вместо дефолтного 8192 — вдвое меньше памяти под KV-кэш
-    # temperature=0.6 — рекомендовано командой DeepSeek для R1 distilled
-    # repeat_penalty=1.05 — минимальный, чтобы не тормозить сэмплинг
+    # DEEPSEEK: параметры Ollama для надёжной работы с историей диалога
+    #
+    # deepseek-llm:7b-chat — дефолтный num_ctx Ollama = 2048.
+    # Это КРИТИЧЕСКИ МАЛО: системный промпт + 3-4 сообщения истории
+    # уже не влезают → модель "забывает" предыдущие реплики и начинает
+    # галлюцинировать (отвечать мусором или говорить что она GPT-4).
+    # Решение: явно задаём num_ctx=4096 для обеих DeepSeek-моделей.
+    #
+    # deepseek-r1: temperature=0.6 рекомендована командой DeepSeek.
     # ═══════════════════════════════════════════════════════════════
     _extra_options: dict = {}
-    if _mk == "deepseek-r1":
+    if _mk == "deepseek":
+        _extra_options = {
+            "num_ctx": 4096,        # Хватит для системного промпта + ~15 реплик истории
+            "temperature": 0.7,
+            "repeat_penalty": 1.1,
+        }
+        if _is_file_request:
+            _extra_options["num_ctx"] = 8192
+        print(f"[GET_AI_RESPONSE] [DeepSeek 7b] Опции: {_extra_options}")
+    elif _mk == "deepseek-r1":
         _extra_options = {
             "num_ctx": 4096,          # Меньше контекст — быстрее KV-cache
             "temperature": 0.6,       # Рекомендовано DeepSeek для R1-distilled
@@ -6014,6 +6242,15 @@ Consider information from BOTH sources: search results AND attached files."""
             # Проверяем, что ответ не является ошибкой
             if not resp.startswith("[Ollama error]") and not resp.startswith("[Ollama timeout]") and not resp.startswith("[Ollama connection error]"):
                 print(f"[GET_AI_RESPONSE] Ollama ответил успешно. Длина ответа: {len(resp)}")
+                # Если был assistant prefill для файла — Ollama возвращает только продолжение,
+                # без самого prefill. Восстанавливаем его, чтобы парсер увидел полный [FILE:...][/FILE].
+                _prefill_msg = next(
+                    (m["content"] for m in reversed(messages) if m["role"] == "assistant"),
+                    None
+                )
+                if _prefill_msg and "[FILE:" in _prefill_msg and "[FILE:" not in resp:
+                    resp = _prefill_msg + resp
+                    print(f"[GET_AI_RESPONSE] 📄 Prefill восстановлен в ответе")
                 response_text = resp
             else:
                 print(f"[GET_AI_RESPONSE] Ollama вернул ошибку: {resp}")
@@ -6107,6 +6344,32 @@ Consider information from BOTH sources: search results AND attached files."""
     if _mk in ("deepseek", "deepseek-r1") and response_text and not response_text.startswith("❌"):
         # Постобработка файловых ответов (убираем дубли, мусорные заголовки)
         response_text = sanitize_deepseek_file_response(response_text)
+
+        # ── Fallback: модель написала содержимое без тегов [FILE:...][/FILE] ──
+        # Если был запрос на создание файла, но в ответе нет тегов FILE —
+        # пробуем обернуть весь ответ в правильный тег.
+        if _is_file_creation_request and _file_injection:
+            import re as _re_fb
+            _has_tag = _re_fb.search(r'\[FILE:', response_text, _re_fb.IGNORECASE)
+            if not _has_tag:
+                # Угадываем имя файла из инжекции
+                _fb_match = _re_fb.search(
+                    r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
+                    _file_injection, _re_fb.IGNORECASE
+                )
+                if _fb_match:
+                    _fb_name = _fb_match.group(1)
+                    # Убираем вводные фразы типа "Вот файл:", "Конечно!", "Создаю файл:" и пустые строки в начале
+                    _clean_resp = _re_fb.sub(
+                        r'^(вот\s+файл[:\s!]*|конечно[!\s]*|создаю\s+файл[:\s]*|готово[!\s]*|пожалуйста[!\s]*)',
+                        '', response_text.strip(), flags=_re_fb.IGNORECASE
+                    ).strip()
+                    if _clean_resp:
+                        response_text = ("Вот файл!\n"
+                                         f"[FILE:{_fb_name}]\n"
+                                         f"{_clean_resp}\n"
+                                         "[/FILE]")
+                        print(f"[GET_AI_RESPONSE] 📄 Fallback: обернули ответ в [FILE:{_fb_name}]")
         # ШАГ 1: Проверяем на мусор (scss-блоки, выдуманные формулы и т.п.)
         # Расширено: проверяем мусор даже если is_math_problem=False, но в запросе есть арифметика
         _should_check_garbage = is_math_problem
@@ -7556,8 +7819,15 @@ class MessageWidget(QtWidgets.QWidget):
     def _restore_copy_button(self, original_text, original_style):
         """Восстановление оригинального вида кнопки"""
         if self.copy_button:
-            self.copy_button.setText(original_text)
-            self.copy_button.setStyleSheet(original_style)
+            try:
+                # Python-ссылка может быть жива, а C++ объект Qt уже удалён
+                # (виджет удалён пока таймер 1500ms ещё не истёк).
+                # isWidgetType() бросает RuntimeError если объект удалён.
+                self.copy_button.setText(original_text)
+                self.copy_button.setStyleSheet(original_style)
+            except RuntimeError:
+                # C++ объект удалён — просто сбрасываем ссылку
+                self.copy_button = None
     
     def fade_out_and_delete(self):
         """
@@ -8442,11 +8712,21 @@ class SpellCheckLineEdit(QtWidgets.QLineEdit):
             self.update()
             return
 
-        fm      = self.fontMetrics()
-        chars   = self._misspelled  # символьные позиции
-        chars   = []
+        # Запускаем тяжёлую часть (spell.candidates) в фоновом потоке,
+        # чтобы не блокировать UI при большом количестве ошибок.
+        import threading
+        threading.Thread(target=self._spell_check_worker, args=(text,), daemon=True).start()
 
+    def _spell_check_worker(self, text: str):
+        """Фоновый поток: находит ошибки и суффесции, затем обновляет UI через QTimer."""
+        # Лимит: не больше 15 слов — остальные просто не подчёркиваем.
+        # candidates() может занимать ~30-50 мс на слово на больших словарях.
+        _MAX_MISSPELLED = 15
+
+        chars = []
         for m in re.finditer(r'[а-яёА-ЯЁa-zA-Z]{2,}', text):
+            if len(chars) >= _MAX_MISSPELLED:
+                break
             word     = m.group()
             start    = m.start()
             length   = len(word)
@@ -8458,23 +8738,33 @@ class SpellCheckLineEdit(QtWidgets.QLineEdit):
 
             try:
                 candidates  = spell.candidates(word_low) or set()
-                suggestions = sorted(candidates)[:5]
+                suggestions = sorted(candidates)[:4]
             except Exception:
                 suggestions = []
 
             chars.append((start, length, suggestions))
 
-        self._misspelled = chars
+        # Возвращаемся в основной поток через singleShot(0)
+        QtCore.QTimer.singleShot(0, lambda c=chars: self._apply_spell_results(c, text))
 
-        # Считаем пиксели здесь — вне paintEvent, cursorRect надёжен
+    def _apply_spell_results(self, chars: list, original_text: str):
+        """Применяет результаты spell-check в основном потоке."""
+        # Игнорируем результат если текст уже изменился
+        if self.text() != original_text:
+            return
+        self._misspelled = chars
+        fm = self.fontMetrics()
         squiggles = []
         for start, length, suggestions in chars:
             x0 = self._char_x(start)
-            x1 = x0 + fm.horizontalAdvance(text[start:start + length])
+            x1 = x0 + fm.horizontalAdvance(original_text[start:start + length])
             squiggles.append((x0, x1, suggestions))
-
         self._squiggles = squiggles
         self.update()
+
+    def _run_spell_check_sync(self):
+        """Заглушка — оставлена для совместимости, не используется."""
+        pass
 
     # ── QStyle content rect ───────────────────────────────────────────────
     def _text_content_rect(self) -> QtCore.QRect:
@@ -8617,6 +8907,108 @@ class SpellCheckLineEdit(QtWidgets.QLineEdit):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# ВЕКТОРНЫЕ ИКОНКИ ДЛЯ КНОПОК (Windows не рендерит эмодзи в кнопках)
+# Рисуем стрелки/квадрат через QPainter — красиво на всех платформах
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _make_arrow_right_icon(size: int, color: QtGui.QColor) -> QtGui.QIcon:
+    """Стрелка вправо → для кнопки отправить."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    pen = QtGui.QPen(color, size * 0.13, QtCore.Qt.PenStyle.SolidLine,
+                     QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx, cy = size / 2, size / 2
+    tip_x = size * 0.72
+    tail_x = size * 0.28
+    arm = size * 0.22
+    # Хвост
+    p.drawLine(QtCore.QPointF(tail_x, cy), QtCore.QPointF(tip_x, cy))
+    # Верхнее перо
+    p.drawLine(QtCore.QPointF(tip_x, cy), QtCore.QPointF(tip_x - arm, cy - arm))
+    # Нижнее перо
+    p.drawLine(QtCore.QPointF(tip_x, cy), QtCore.QPointF(tip_x - arm, cy + arm))
+    p.end()
+    return QtGui.QIcon(pm)
+
+
+def _make_stop_icon(size: int, color: QtGui.QColor) -> QtGui.QIcon:
+    """Квадрат ■ для кнопки остановить генерацию."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.setPen(QtCore.Qt.PenStyle.NoPen)
+    p.setBrush(QtGui.QBrush(color))
+    margin = size * 0.28
+    r = int(size * 0.10)
+    rect = QtCore.QRectF(margin, margin, size - margin * 2, size - margin * 2)
+    p.drawRoundedRect(rect, r, r)
+    p.end()
+    return QtGui.QIcon(pm)
+
+
+def _make_arrow_down_icon(size: int, color: QtGui.QColor) -> QtGui.QIcon:
+    """Стрелка вниз ↓ для кнопки скролла вниз."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    pen = QtGui.QPen(color, size * 0.13, QtCore.Qt.PenStyle.SolidLine,
+                     QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx = size / 2
+    tip_y = size * 0.72
+    tail_y = size * 0.28
+    arm = size * 0.22
+    p.drawLine(QtCore.QPointF(cx, tail_y), QtCore.QPointF(cx, tip_y))
+    p.drawLine(QtCore.QPointF(cx, tip_y), QtCore.QPointF(cx - arm, tip_y - arm))
+    p.drawLine(QtCore.QPointF(cx, tip_y), QtCore.QPointF(cx + arm, tip_y - arm))
+    p.end()
+    return QtGui.QIcon(pm)
+
+
+def _set_send_icon(btn: QtWidgets.QPushButton, color_hex: str = "#3a3a3a"):
+    """Устанавливает иконку стрелки вправо на кнопку отправки (Windows-safe)."""
+    if IS_WINDOWS:
+        icon = _make_arrow_right_icon(36, QtGui.QColor(color_hex))
+        btn.setIcon(icon)
+        btn.setIconSize(QtCore.QSize(28, 28))
+        btn.setText("")
+    else:
+        btn.setIcon(QtGui.QIcon())
+        btn.setText("→")
+
+
+def _set_stop_icon(btn: QtWidgets.QPushButton, color_hex: str = "#3a3a3a"):
+    """Устанавливает иконку стоп на кнопку отправки (Windows-safe)."""
+    if IS_WINDOWS:
+        icon = _make_stop_icon(36, QtGui.QColor(color_hex))
+        btn.setIcon(icon)
+        btn.setIconSize(QtCore.QSize(26, 26))
+        btn.setText("")
+    else:
+        btn.setIcon(QtGui.QIcon())
+        btn.setText("⏸")
+
+
+def _set_scroll_down_icon(btn: QtWidgets.QPushButton, color_hex: str = "#3a3a3a"):
+    """Устанавливает иконку стрелки вниз на кнопку скролла (Windows-safe)."""
+    if IS_WINDOWS:
+        icon = _make_arrow_down_icon(36, QtGui.QColor(color_hex))
+        btn.setIcon(icon)
+        btn.setIconSize(QtCore.QSize(28, 28))
+        btn.setText("")
+    else:
+        btn.setIcon(QtGui.QIcon())
+        btn.setText("⬇")
+
+
 # БАЗОВЫЙ КЛАСС: NoFocusButton
 # Кнопка без focus ring — переопределяет paintEvent чтобы убрать системный
 # focus rect, который не убирается через QSS на всех платформах
@@ -8648,6 +9040,112 @@ class NoFocusButton(QtWidgets.QPushButton):
 # Floating overlay кнопка "⬇ вниз" - НЕ участвует в layout
 # ═══════════════════════════════════════════════════════════════════════════
 
+class ChatListDelegate(QtWidgets.QStyledItemDelegate):
+    """
+    Делегат для двухстрочного отображения чатов:
+      Строка 1: название чата (жирный, основной цвет)
+      Строка 2: превью последнего сообщения (мелкий, серый)
+    Разделитель между пунктами — тонкая линия снизу каждого элемента.
+    """
+
+    def __init__(self, theme: str = "light", parent=None):
+        super().__init__(parent)
+        self._theme = theme
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        is_selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        is_hovered  = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        is_dark     = self._theme == "dark"
+
+        rect = option.rect
+
+        # ── Фон ──────────────────────────────────────────────────────
+        if is_selected:
+            bg = QtGui.QColor(139, 92, 246, 70) if is_dark else QtGui.QColor(102, 126, 234, 45)
+            border = QtGui.QColor(124, 77, 236) if is_dark else QtGui.QColor(82, 106, 214)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(bg)
+            r = QtCore.QRectF(rect).adjusted(2, 1, -2, -1)
+            painter.drawRoundedRect(r, 10, 10)
+            # Акцентная полоска слева
+            painter.setBrush(border)
+            painter.drawRoundedRect(QtCore.QRectF(rect.left() + 2, rect.top() + 6,
+                                                   3, rect.height() - 12), 2, 2)
+        elif is_hovered:
+            bg = QtGui.QColor(255, 255, 255, 30) if is_dark else QtGui.QColor(0, 0, 0, 12)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(bg)
+            r = QtCore.QRectF(rect).adjusted(2, 1, -2, -1)
+            painter.drawRoundedRect(r, 10, 10)
+
+        # ── Текст ─────────────────────────────────────────────────────
+        full_text = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
+        lines = full_text.split("\n", 1)
+        title   = lines[0]
+        preview = lines[1] if len(lines) > 1 else ""
+
+        title_color   = QtGui.QColor("#f0f0f0" if is_dark else "#1a1a1a")
+        preview_color = QtGui.QColor("#888888" if is_dark else "#888888")
+        if is_selected:
+            title_color   = QtGui.QColor("#ffffff" if is_dark else "#1a1a1a")
+            preview_color = QtGui.QColor("#cccccc" if is_dark else "#555555")
+
+        left_pad = 18 if is_selected else 14
+        text_x = rect.left() + left_pad
+        text_w = rect.width() - left_pad - 10
+
+        if preview:
+            # Две строки
+            title_font = QtGui.QFont(painter.font())
+            title_font.setPointSize(13)
+            title_font.setWeight(QtGui.QFont.Weight.DemiBold)
+            painter.setFont(title_font)
+            painter.setPen(title_color)
+            title_rect = QtCore.QRect(text_x, rect.top() + 9, text_w, 20)
+            painter.drawText(title_rect, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             title)
+
+            prev_font = QtGui.QFont(painter.font())
+            prev_font.setPointSize(11)
+            prev_font.setWeight(QtGui.QFont.Weight.Normal)
+            painter.setFont(prev_font)
+            painter.setPen(preview_color)
+            prev_rect = QtCore.QRect(text_x, rect.top() + 31, text_w, 18)
+            fm = QtGui.QFontMetrics(prev_font)
+            elided = fm.elidedText(preview, QtCore.Qt.TextElideMode.ElideRight, text_w)
+            painter.drawText(prev_rect, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             elided)
+        else:
+            # Одна строка
+            title_font = QtGui.QFont(painter.font())
+            title_font.setPointSize(13)
+            title_font.setWeight(QtGui.QFont.Weight.DemiBold if is_selected else QtGui.QFont.Weight.Medium)
+            painter.setFont(title_font)
+            painter.setPen(title_color)
+            title_rect = QtCore.QRect(text_x, rect.top(), text_w, rect.height())
+            painter.drawText(title_rect, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             title)
+
+        # ── Разделитель снизу (очень тонкий, только когда не выделен) ──
+        if not is_selected:
+            sep_color = QtGui.QColor(80, 80, 85, 40) if is_dark else QtGui.QColor(0, 0, 0, 18)
+            painter.setPen(QtGui.QPen(sep_color, 0.5))
+            sep_y = rect.bottom()
+            painter.drawLine(rect.left() + 14, sep_y, rect.right() - 14, sep_y)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        full_text = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
+        has_preview = "\n" in full_text
+        return QtCore.QSize(option.rect.width(), 58 if has_preview else 42)
+
+
 class ScrollToBottomButton(QtWidgets.QPushButton):
     """
     Floating overlay кнопка "⬇ вниз" для скроллинга к низу.
@@ -8660,7 +9158,7 @@ class ScrollToBottomButton(QtWidgets.QPushButton):
     """
     
     def __init__(self, parent=None):
-        super().__init__("⬇", parent)
+        super().__init__("" if IS_WINDOWS else "⬇", parent)
         
         self.setObjectName("scrollToBottomBtn")
         self.setFixedSize(50, 50)
@@ -8672,6 +9170,7 @@ class ScrollToBottomButton(QtWidgets.QPushButton):
         # Применяем стиль по умолчанию (светлая тема + glass)
         # На этом этапе добавится тень через graphicsEffect
         self.apply_theme_styles(theme="light", liquid_glass=True)
+        _set_scroll_down_icon(self)  # Windows-safe иконка
         
         # ═══════════════════════════════════════════════════════════════
         # ПЛАВНОЕ ПОЯВЛЕНИЕ/ИСЧЕЗНОВЕНИЕ через opacity
@@ -9989,6 +10488,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.chats_list.itemClicked.connect(self.switch_chat)
         self.chats_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.chats_list.customContextMenuRequested.connect(self.show_delete_panel)
+        # Кастомный делегат: двухстрочные элементы + разделители
+        self._chat_list_delegate = ChatListDelegate(theme="light", parent=self.chats_list)
+        self.chats_list.setItemDelegate(self._chat_list_delegate)
+        self.chats_list.setMouseTracking(True)  # нужно для hover
         # Предотвращаем выход hover-фона за границы виджета
         self.chats_list.setViewportMargins(6, 8, 6, 8)  # отступы со всех сторон — hover не вылезает
         self.chats_list.viewport().setAutoFillBackground(False)
@@ -10315,6 +10818,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.send_btn.setObjectName("sendBtn")
         font_btn = _apple_font(22, weight=QtGui.QFont.Weight.Bold)
         self.send_btn.setFont(font_btn)
+        _set_send_icon(self.send_btn)  # Windows-safe: вектор вместо эмодзи
         self.send_btn.setFixedSize(60, 60)
         self.send_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.send_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
@@ -10560,7 +11064,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     "sidebar_bg": "rgba(24, 24, 28, 0.65)",  # Тёмное стекло для sidebar
                     
                     "central_border": "rgba(50, 50, 55, 0.4)",  # Мягкие тёмные границы
-                    "sidebar_border": "rgba(50, 50, 55, 0.35)",
+                    "sidebar_border": "rgba(50, 50, 55, 0.12)",
                     
                     "text_primary": "#e6e6e6",  # Светлый текст для читаемости
                     "text_secondary": "#b0b0b0",
@@ -10600,7 +11104,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     "sidebar_bg": "rgb(28, 28, 31)",  # НЕПРОЗРАЧНЫЙ
                     
                     "central_border": "rgba(55, 55, 60, 0.9)",  # Чёткие границы
-                    "sidebar_border": "rgba(55, 55, 60, 0.85)",
+                    "sidebar_border": "rgba(55, 55, 60, 0.18)",
                     
                     "text_primary": "#f0f0f0",  # Очень светлый текст для контраста
                     "text_secondary": "#c0c0c0",
@@ -10642,7 +11146,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     "sidebar_bg": "rgba(255, 255, 255, 0.42)",
                     
                     "central_border": "rgba(255, 255, 255, 0.72)",
-                    "sidebar_border": "rgba(255, 255, 255, 0.55)",
+                    "sidebar_border": "rgba(0, 0, 0, 0.08)",
                     
                     "text_primary": "#222222",  # Тёмный текст для контраста
                     "text_secondary": "#3a3a3a",
@@ -10682,7 +11186,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     "sidebar_bg": "rgb(246, 246, 248)",  # НЕПРОЗРАЧНЫЙ светло-серый
                     
                     "central_border": "rgba(210, 210, 215, 0.95)",
-                    "sidebar_border": "rgba(210, 210, 215, 0.9)",
+                    "sidebar_border": "rgba(210, 210, 215, 0.20)",
                     
                     "text_primary": "#1a1a1a",  # Очень тёмный текст
                     "text_secondary": "#2a2a2a",
@@ -10778,28 +11282,27 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             background: transparent;
             border: none;
             outline: none;
-            padding: 0px;
-            border-radius: 12px;
+            padding: 4px 6px;
         }}
         #chatsList::item {{
-            padding: 12px 14px;
-            margin: 2px 0px;
+            padding: 10px 12px;
+            margin: 1px 0px;
             border-radius: 10px;
             border: none;
             color: {colors["text_secondary"]};
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 500;
-            line-height: 1.4;
         }}
         #chatsList::item:hover {{
             background: {colors["btn_bg"]};
-            border-left: 2px solid transparent;
+            color: {colors["text_primary"]};
         }}
         #chatsList::item:selected {{
             background: {colors["accent_primary"]};
             color: {colors["text_primary"]};
             font-weight: 600;
             border-left: 3px solid {colors["accent_hover"]};
+            padding-left: 9px;
         }}
 
         /* ── Settings button ── */
@@ -11163,6 +11666,17 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         """
         self.setStyleSheet(style)
+
+        # Windows: обновляем векторные иконки кнопок с правильным цветом темы
+        if IS_WINDOWS and hasattr(self, "send_btn"):
+            _icon_color = colors["text_tertiary"]
+            if not self.is_generating:
+                _set_send_icon(self.send_btn, _icon_color)
+            else:
+                _set_stop_icon(self.send_btn, _icon_color)
+        if IS_WINDOWS and hasattr(self, "scroll_to_bottom_btn"):
+            _icon_color = colors["text_tertiary"]
+            _set_scroll_down_icon(self.scroll_to_bottom_btn, _icon_color)
 
         try:
             self.scroll_area.viewport().setStyleSheet("background: transparent;")
@@ -12441,6 +12955,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
         menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        _fix_popup_on_windows(menu)  # Win10/11: убираем TranslucentBackground, включаем DWM-скруглённые
+        menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=16))
         
         # Адаптивные стили в зависимости от темы
         if is_dark:
@@ -13066,6 +13582,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
         menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        _fix_popup_on_windows(menu)  # Win10/11: убираем TranslucentBackground, включаем DWM-скруглённые
+        menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=20))
         
         # Адаптивные стили в зависимости от темы
         if is_dark:
@@ -14237,6 +14755,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Обновляем стили кнопки "вниз"
             if hasattr(self, 'scroll_to_bottom_btn'):
                 self.scroll_to_bottom_btn.apply_theme_styles(theme=theme, liquid_glass=liquid_glass)
+            # Обновляем тему делегата списка чатов
+            if hasattr(self, '_chat_list_delegate'):
+                self._chat_list_delegate.set_theme(theme)
+                self.chats_list.update()
             
             # Обновляем стили настроек
             if hasattr(self, 'settings_view'):
@@ -14402,7 +14924,16 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         # Показываем меню и обрабатываем выбор
         action = context_menu.exec(self.chats_list.mapToGlobal(pos))
-        
+
+        # ── Восстанавливаем выделение на реально активном чате ──────────
+        # Правый клик визуально выделяет item в QListWidget, но switch_chat
+        # не вызывается — поэтому вручную возвращаем курсор к current_chat_id.
+        for _i in range(self.chats_list.count()):
+            _it = self.chats_list.item(_i)
+            if _it and _it.data(QtCore.Qt.ItemDataRole.UserRole) == self.current_chat_id:
+                self.chats_list.setCurrentItem(_it)
+                break
+
         if action == delete_action:
             self.delete_chat_by_id(chat_id)
 
@@ -14499,15 +15030,39 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             traceback.print_exc()
     
     def load_chats_list(self):
-        """Загрузить список чатов"""
+        """Загрузить список чатов с превью последнего сообщения."""
         self.chats_list.clear()
         chats = self.chat_manager.get_all_chats()
-        
+
         for chat in chats:
-            item = QtWidgets.QListWidgetItem(chat['title'])
+            # Получаем последнее сообщение для превью
+            preview = ""
+            try:
+                msgs = self.chat_manager.get_chat_messages(chat['id'], limit=3)
+                # Берём последнее сообщение не от Системы
+                for m in reversed(msgs):
+                    role, text = m[0], m[1]
+                    if role in ("user", "assistant") and text:
+                        import re as _re
+                        clean = _re.sub(r'<[^>]+>', '', text)   # убираем HTML
+                        clean = _re.sub(r'\s+', ' ', clean).strip()
+                        preview = clean[:55] + ("…" if len(clean) > 55 else "")
+                        break
+            except Exception:
+                pass
+
+            # Двухстрочный текст: заголовок + превью через 
+
+            display = chat['title']
+            if preview:
+                display = chat['title'] + "\n" + preview
+
+            item = QtWidgets.QListWidgetItem(display)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, chat['id'])
+            # Фиксированная высота для двух строк
+            item.setSizeHint(QtCore.QSize(0, 58 if preview else 42))
             self.chats_list.addItem(item)
-            
+
             if chat['is_active']:
                 self.chats_list.setCurrentItem(item)
 
@@ -14905,7 +15460,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Сбрасываем UI
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
-            self.send_btn.setText("→")
+            _set_send_icon(self.send_btn)
             
             print(f"[SWITCH_CHAT] ✓ Генерация остановлена")
         
@@ -15257,7 +15812,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # ✅ ВОССТАНОВЛЕНИЕ: Возвращаем текст в поле ввода
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
-            self.send_btn.setText("→")
+            _set_send_icon(self.send_btn)
             
             if restored_text:
                 self.input_field.setText(restored_text)
@@ -15327,10 +15882,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 if messages and len(messages) == 2:
                     first_user_msg = messages[0][1] if len(messages[0]) > 1 and messages[0][0] == "user" else ""
                     if first_user_msg and isinstance(first_user_msg, str) and len(first_user_msg) > 0:
-                        chat_title = first_user_msg[:40]
-                        if len(first_user_msg) > 40:
-                            chat_title += "..."
-                        chat_title = chat_title[0].upper() + chat_title[1:] if len(chat_title) > 0 else "Новый чат"
+                        chat_title = self.chat_manager.generate_smart_title(first_user_msg)
                         self.chat_manager.update_chat_title(self.current_chat_id, chat_title)
                         self.load_chats_list()
             except Exception as e:
@@ -15529,6 +16081,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
             
+            # Сохраняем поворот диалога в memory_manager (для истории ИИ)
+            try:
+                _current_model = llama_handler.CURRENT_AI_MODEL_KEY
+                get_memory_manager(_current_model).save_message(self.current_chat_id, "user", user_text)
+            except Exception as _me:
+                print(f"[SEND] ⚠️ Ошибка сохранения user-сообщения в memory: {_me}")
+            
             # Сохраняем список файлов в контекстную память (для AI)
             if self.attached_files:
                 try:
@@ -15570,6 +16129,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
             
+            # Сохраняем поворот диалога в memory_manager (для истории ИИ)
+            try:
+                _current_model = llama_handler.CURRENT_AI_MODEL_KEY
+                get_memory_manager(_current_model).save_message(self.current_chat_id, "user", user_text)
+            except Exception as _me:
+                print(f"[SEND] ⚠️ Ошибка сохранения user-сообщения в memory (edit): {_me}")
+            
             # Сохраняем список файлов в контекстную память (для AI)
             if self.attached_files:
                 try:
@@ -15595,7 +16161,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             print("[SEND] Отредактированное сообщение отправлено")
 
         self.input_field.setEnabled(False)
-        self.send_btn.setText("⏸")
+        _set_stop_icon(self.send_btn)
         self.send_btn.setEnabled(True)
         self.is_generating = True
 
@@ -15797,7 +16363,15 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self._last_regen_widget = _regen_widget  # для save_message ниже
 
             # ── Парсим сгенерированные файлы из ответа ─────────────────────
-            response, _gen_files = parse_generated_files(response)
+            # КРИТИЧНО: вызываем только если в ответе реально есть теги файлов.
+            # parse_generated_files на каждом ответе → паттерн 5 (markdown code block)
+            # ловит случайные совпадения в обычных объяснениях кода или текста,
+            # и модель начинает "общаться через файлы" без всякого запроса.
+            _has_file_tags = "[FILE:" in response or "<FILE " in response or "[ФАЙЛ:" in response
+            if _has_file_tags:
+                response, _gen_files = parse_generated_files(response)
+            else:
+                _gen_files = []
             if _gen_files:
                 print(f"[FILE_GEN] ✓ Найдено файлов в ответе: {len(_gen_files)} → {[f['filename'] for f in _gen_files]}")
 
@@ -15834,6 +16408,29 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         except Exception as _ge:
                             print(f"[FILE_GEN] ⚠️ Ошибка обновления карточек при регенерации: {_ge}")
                     print("[HANDLE_RESPONSE] ✓ Ответ добавлен в историю перегенерации виджета")
+                    # Авто-скролл после перегенерации:
+                    # layout пересчитывает высоту асинхронно → ждём 120мс и скроллим.
+                    # Двойной таймер: первый активирует layout, второй скроллит уже с верным maximum().
+                    if getattr(self, "auto_scroll_enabled", False):
+                        def _regen_scroll():
+                            self.messages_layout.activate()
+                            self.messages_widget.updateGeometry()
+                            sb = self.scroll_area.verticalScrollBar()
+                            def _do():
+                                target = sb.maximum()
+                                cur = sb.value()
+                                if target <= cur:
+                                    return
+                                anim = QtCore.QPropertyAnimation(sb, b"value", self)
+                                anim.setDuration(350)
+                                anim.setStartValue(cur)
+                                anim.setEndValue(target)
+                                anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+                                anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+                                if hasattr(self, 'scroll_to_bottom_btn'):
+                                    self.scroll_to_bottom_btn.smooth_hide()
+                            QtCore.QTimer.singleShot(80, _do)
+                        QtCore.QTimer.singleShot(40, _regen_scroll)
                 except Exception as e:
                     print(f"[HANDLE_RESPONSE] ✗ Ошибка add_regen_entry: {e}, создаём новый виджет")
                     try:
@@ -15877,6 +16474,23 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         print(f"[HANDLE_RESPONSE] ✓ Сохранено с историей перегенерации ({len(_save_regen_hist)} вариантов)")
                     if _gen_files:
                         print(f"[HANDLE_RESPONSE] ✓ Сохранено {len(_gen_files)} файлов в БД")
+                    # Сохраняем ответ ИИ в memory_manager (для истории контекста)
+                    try:
+                        _resp_model_key = (
+                            self.current_worker.model_key
+                            if hasattr(self, 'current_worker') and self.current_worker
+                               and hasattr(self.current_worker, 'model_key')
+                            else llama_handler.CURRENT_AI_MODEL_KEY
+                        )
+                        get_memory_manager(_resp_model_key).save_message(
+                            self.current_chat_id, "assistant",
+                            # Сохраняем ЧИСТЫЙ текст без [FILE:...] тегов.
+                            # Если сохранить сырой ответ с тегами — модель видит их
+                            # в истории и начинает генерировать файлы при каждом запросе.
+                            response  # response уже очищен parse_generated_files выше
+                        )
+                    except Exception as _me:
+                        print(f"[HANDLE_RESPONSE] ⚠️ Ошибка сохранения assistant в memory: {_me}")
                 else:
                     print(f"[HANDLE_RESPONSE] ✗ Нет chat_manager или current_chat_id")
             except Exception as e:
@@ -15902,10 +16516,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 if messages and len(messages) == 2:
                     first_user_msg = messages[0][1] if len(messages[0]) > 1 and messages[0][0] == "user" else ""
                     if first_user_msg and isinstance(first_user_msg, str) and len(first_user_msg) > 0:
-                        chat_title = first_user_msg[:40]
-                        if len(first_user_msg) > 40:
-                            chat_title += "..."
-                        chat_title = chat_title[0].upper() + chat_title[1:] if len(chat_title) > 0 else "Новый чат"
+                        chat_title = self.chat_manager.generate_smart_title(first_user_msg)
                         self.chat_manager.update_chat_title(self.current_chat_id, chat_title)
                         self.load_chats_list()
             except Exception as e:
@@ -15920,7 +16531,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             try:
                 self.is_generating = False  # Гарантированно сбрасываем флаг генерации
                 self.send_btn.setEnabled(True)
-                self.send_btn.setText("→")
+                _set_send_icon(self.send_btn)
                 self.input_field.setEnabled(True)
                 self.input_field.setFocus()
                 self.activateWindow()
@@ -16035,7 +16646,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Отправляем запрос заново
         self._is_regenerating = True  # флаг: идёт перегенерация (не обычный запрос)
         self.input_field.setEnabled(False)
-        self.send_btn.setText("⏸")
+        _set_stop_icon(self.send_btn)
         self.send_btn.setEnabled(True)
         self.is_generating = True
         
@@ -16199,14 +16810,34 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         print(f"[EDIT] Редактируем последний запрос: {last_user_msg[:50]}...")
         
-        # Удаляем последние 2 виджета (user + assistant)
+        # Удаляем последние 2 виджета (user + assistant) из layout И из памяти Qt.
+        # ВАЖНО: deleteLater() без removeWidget() не убирает виджет из layout немедленно —
+        # count() не уменьшается, и следующий new message добавляется ПОСЛЕ "удалённого" виджета.
+        # Правильный порядок: removeWidget() → deleteLater().
         removed_count = 0
-        while self.messages_layout.count() > 1 and removed_count < 2:
-            last_item = self.messages_layout.itemAt(self.messages_layout.count() - 2)
-            if last_item and last_item.widget():
-                last_item.widget().deleteLater()
+        # Собираем виджеты которые нужно удалить (до -2 пропускаем stretch)
+        to_remove = []
+        total = self.messages_layout.count()
+        # Итерируем с конца, пропуская последний spacer/stretch
+        for i in range(total - 1, -1, -1):
+            if removed_count >= 2:
+                break
+            item = self.messages_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                to_remove.append(w)
                 removed_count += 1
-        
+
+        for w in to_remove:
+            self.messages_layout.removeWidget(w)
+            w.hide()
+            w.deleteLater()
+
+        self.messages_layout.invalidate()
+        self.messages_layout.activate()
+
         print(f"[EDIT] ✓ Удалено виджетов: {removed_count}")
         
         # Удаляем последние 2 сообщения из БД текущего чата
@@ -16232,8 +16863,11 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         if hasattr(self, 'last_message_deep_thinking') and hasattr(self, 'last_message_use_search'):
             self.deep_thinking = self.last_message_deep_thinking
             self.use_search = self.last_message_use_search
-            self.think_toggle.setChecked(self.deep_thinking)
-            self.search_toggle.setChecked(self.use_search)
+            # Обновляем виджеты-тогглы если они существуют в текущем UI
+            if hasattr(self, 'think_toggle') and self.think_toggle is not None:
+                self.think_toggle.setChecked(self.deep_thinking)
+            if hasattr(self, 'search_toggle') and self.search_toggle is not None:
+                self.search_toggle.setChecked(self.use_search)
             print(f"[EDIT] Восстановлены режимы: думать={self.deep_thinking}, поиск={self.use_search}")
         else:
             print(f"[EDIT] Текущие режимы: думать={self.deep_thinking}, поиск={self.use_search}")
@@ -16872,9 +17506,11 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             cur.execute("DELETE FROM chat_messages")
             cur.execute("DELETE FROM chats")
             
-            # Сбрасываем автоинкремент
-            cur.execute("DELETE FROM sqlite_sequence WHERE name='chats'")
-            cur.execute("DELETE FROM sqlite_sequence WHERE name='chat_messages'")
+            # ИСПРАВЛЕНО: НЕ сбрасываем sqlite_sequence.
+            # Сброс опасен: новые чаты получали бы те же ID (1, 2, 3...) что и
+            # удалённые, и если память в памяти-БД не очистилась по любой причине,
+            # данные старого чата привязывались бы к новому с тем же ID.
+            # Монотонный рост ID полностью исключает такие коллизии.
             
             # Создаём один чистый чат
             from datetime import datetime as _dt

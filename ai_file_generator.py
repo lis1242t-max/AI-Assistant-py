@@ -44,40 +44,12 @@ _EXT_ICONS: dict[str, str] = {
 # СИСТЕМНЫЙ ПРОМПТ
 # ───────────────────────────────────────────────────────────────────────
 FILE_GENERATION_PROMPT = """
-═══════════════════════════════════════════════════════════════════
-📄 ГЕНЕРАЦИЯ ФАЙЛОВ — СТРОГИЙ ФОРМАТ
-═══════════════════════════════════════════════════════════════════
-
-Когда пользователь просит создать, написать или сохранить файл —
-ОБЯЗАТЕЛЬНО используй ТОЧНО этот формат:
-
-[FILE:имя_файла.расширение]
+Для создания файла используй формат (теги НЕ переводить на русский!):
+Текст ответа.
+[FILE:имя.расширение]
 содержимое файла здесь
 [/FILE]
-
-ЗАКРЫВАЮЩИЙ ТЕГ — ВСЕГДА [/FILE], а НЕ [FILE:имя_файла.расширение]!
-
-❌ НЕПРАВИЛЬНО (закрыл тем же тегом):
-[FILE:jokes.txt]
-содержимое
-[FILE:jokes.txt]
-
-✅ ПРАВИЛЬНО (закрыл через [/FILE]):
-[FILE:jokes.txt]
-содержимое
-[/FILE]
-
-ПРИМЕР ПРАВИЛЬНОГО ОТВЕТА:
-Вот файл с приколами:
-[FILE:jokes.txt]
-1. Почему программисты путают Хэллоуин и Рождество?
-   Потому что Oct 31 == Dec 25.
-
-2. Как называется кот программиста? try-catch.
-
-3. Бесконечный цикл — это бесценно. Для всего остального есть break.
-[/FILE]
-Файл готов! Можешь скачать его кнопкой ниже.
+Важно: пиши [FILE:...] и [/FILE] только латиницей. Не писать [ФАЙЛ:] или [/ФАЙЛ].
 """
 
 
@@ -136,8 +108,29 @@ def build_file_injection(user_text: str, language: str = "russian") -> str:
     )
     ext_match = _EXT_RE.search(user_text)
 
+    # Ищем имя файла без расширения в разных формулировках.
+    # ВАЖНО: пользователи часто путают латинскую "c" и кириллическую "с",
+    # поэтому паттерн "[сc]\s+именем" ловит оба варианта.
+    bare_name_match = re.search(
+        r'(?:'
+        r'название\s+файла|имя\s+файла|назови\s+файл|назвать\s+файл'
+        r'|файл\s+будет\s+называться|назови\s+его|называемый'
+        r'|[сc]\s+именем|файл\s+[сc]\s+названием'   # лат. c / кир. с
+        r'|file\s+name(?:\s+(?:will\s+be|is|be))?|file\s+named|file\s+called'
+        r'|filename|named|called'
+        r')\s*(?:будет\s+|как\s+|:\s*|=\s*|\s+)([\w\-]+)',
+        user_text, re.IGNORECASE
+    )
+
     if name_match:
         suggested_name = name_match.group(1).lower()
+    elif bare_name_match:
+        bare = bare_name_match.group(1).strip().lower()
+        # Добавляем расширение из запроса или .txt по умолчанию
+        if ext_match:
+            suggested_name = f"{bare}.{ext_match.group(1).lower()}"
+        else:
+            suggested_name = f"{bare}.txt"
     elif ext_match:
         ext = ext_match.group(1).lower()
         suggested_name = f"output.{ext}"
@@ -146,25 +139,25 @@ def build_file_injection(user_text: str, language: str = "russian") -> str:
 
     if language == "russian":
         return (
-            f"\n\n"
-            f"⚠️ ОБЯЗАТЕЛЬНО СОЗДАЙ ФАЙЛ в точно таком формате:\n"
+            f"\n\nСоздай файл СТРОГО в этом формате — без пропусков и без сокращений:\n"
+            f"Вот файл!\n"
             f"[FILE:{suggested_name}]\n"
-            f"содержимое файла\n"
-            f"[/FILE]\n\n"
-            f"❌ ЗАПРЕЩЕНО закрывать файл так: [FILE:{suggested_name}] — это неправильно!\n"
-            f"✅ ТОЛЬКО ТАК закрывай файл: [/FILE]\n"
-            f"Закрывающий тег всегда [/FILE] — без имени файла внутри!"
+            f"<здесь ПОЛНОЕ содержимое файла — все пункты, весь текст, ничего не пропускать>\n"
+            f"[/FILE]\n"
+            f"КРИТИЧНО: тег [FILE:{suggested_name}] — на отдельной строке. "
+            f"Всё содержимое — между тегами. Закрывающий тег [/FILE] — на отдельной строке в конце. "
+            f"Без [/FILE] файл НЕ будет создан! Теги писать ТОЛЬКО латиницей. "
+            f"НЕ сокращать содержимое — включить ВСЁ что просил пользователь."
         )
     else:
         return (
-            f"\n\n"
-            f"⚠️ YOU MUST CREATE THE FILE in exactly this format:\n"
+            f"\n\nCreate the file STRICTLY in this format — include ALL content, nothing omitted:\n"
+            f"Here's your file!\n"
             f"[FILE:{suggested_name}]\n"
-            f"file content here\n"
-            f"[/FILE]\n\n"
-            f"❌ WRONG closing tag: [FILE:{suggested_name}]\n"
-            f"✅ CORRECT closing tag: [/FILE]\n"
-            f"The closing tag is always [/FILE] — no filename inside!"
+            f"<full file content here — every item, every line, nothing skipped>\n"
+            f"[/FILE]\n"
+            f"CRITICAL: [FILE:{suggested_name}] on its own line. All content between tags. "
+            f"[/FILE] on its own line at the end. Tags in Latin only. Do NOT abbreviate."
         )
 
 
@@ -231,6 +224,19 @@ _FILE_PATTERNS: list[tuple[re.Pattern, int, int]] = [
         r'\[FILE:' + _FNAME + r'\](.*?)\[/FILE\]',
         re.DOTALL | re.IGNORECASE
     ), 1, 2),
+
+    # 7. Без закрывающего тега — [FILE:name] или [FILE:name]\n content до конца/следующего блока
+    #    Самый частый случай когда модель пишет тег но забывает [/FILE]
+    (re.compile(
+        r'\[FILE:' + _FNAME + r'\]\s*\n(.*?)(?=\[FILE:|\[/FILE\]|\Z)',
+        re.DOTALL | re.IGNORECASE
+    ), 1, 2),
+
+    # 8. Инлайн без закрывающего тега: [FILE:name] content (всё до конца или до \n\n)
+    (re.compile(
+        r'\[FILE:' + _FNAME + r'\]\s+(.+?)(?:\[/FILE\]|\n\n|\Z)',
+        re.DOTALL | re.IGNORECASE
+    ), 1, 2),
 ]
 
 
@@ -241,6 +247,11 @@ def parse_generated_files(text: str) -> Tuple[str, List[Dict]]:
     Возвращает: (clean_text, files)
     files — список {"filename": str, "content": str, "ext": str}
     """
+    # Нормализуем русские теги → английские ДО парсинга.
+    # DeepSeek 7b иногда переводит [FILE:name] → [ФАЙЛ:name], [/FILE] → [/ФАЙЛ].
+    text = re.sub(r'\[ФАЙЛ:', '[FILE:', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/ФАЙЛ\]', '[/FILE]', text, flags=re.IGNORECASE)
+
     files: List[Dict] = []
     matched_spans: List[Tuple[int, int]] = []
 

@@ -243,6 +243,71 @@ class ChatManager:
         conn.commit()
         conn.close()
 
+    # ── Умная генерация заголовка ────────────────────────────────────────────
+    @staticmethod
+    def generate_smart_title(user_message: str) -> str:
+        """
+        Генерирует осмысленное название чата из первого сообщения пользователя.
+        Социальные фразы (привет, спасибо, ок…) → тематический заголовок.
+        Запросы определяются по ключевым словам.
+        Длинные сообщения обрезаются аккуратно по слову.
+        """
+        import re as _re
+
+        msg     = user_message.strip()
+        msg_low = msg.lower().rstrip("!?.,;: ")
+
+        # 1. Социальные фразы → тематический заголовок
+        _SOCIAL = [
+            (r"^(привет|здравствуй|добрый\s+\w+|хай|хей|йоу|ку|хелло)", "Новый разговор"),
+            (r"^(hi|hello|hey|yo|sup)\b",                                  "New conversation"),
+            (r"^(спасибо|благодар|спс)\b",                                 "Разговор"),
+            (r"^(thanks|thank\s+you|thx)\b",                              "Conversation"),
+            (r"^(ок|окей|хорошо|понял|ясно|угу|ага|да|нет|норм|ладно)\b", "Разговор"),
+            (r"^(ok|okay|sure|got\s+it|yes|no|yep|yup|roger)\b",          "Conversation"),
+            (r"^(круто|отлично|супер|класс|бомба|огонь|шикарно|прекрасно)", "Разговор"),
+            (r"^(cool|great|awesome|nice|perfect|wow)\b",                  "Conversation"),
+        ]
+        for pat, ttl in _SOCIAL:
+            if _re.match(pat, msg_low, _re.IGNORECASE):
+                return ttl
+
+        # 2. Тематические ключевые слова
+        _TOPICS = [
+            (r"создай\s+файл|сгенерируй\s+файл|сделай\s+файл",                  "Создание файла"),
+            (r"create\s+(a\s+)?file|make\s+(a\s+)?file",                       "Creating a file"),
+            (r"(напиши|создай|сделай)\s+(код|скрипт|программу|функцию|класс)",    "Написание кода"),
+            (r"(write|create|make)\s+(code|script|program|function|class)",       "Writing code"),
+            (r"переведи|перевод",                                                   "Перевод"),
+            (r"translat(e|ion)",                                                    "Translation"),
+            (r"объясни|расскажи\s+о\b|что\s+такое",                             "Объяснение темы"),
+            (r"explain|tell\s+me\s+about|what\s+is\b",                         "Explanation"),
+            (r"помоги|помощь|как\s+(мне\s+|можно\s+)?",                         "Вопрос и помощь"),
+            (r"help\s+(me\s+)?(with\s+)?|how\s+(do|can)\b",                   "Help & question"),
+            (r"список|перечисли|примеры|топ\b",                                   "Список / подборка"),
+            (r"\blist\b|enumerate|examples?\b|\btop\b",                       "List / examples"),
+            (r"напиши\s+(письмо|текст|пост|статью|эссе|резюме|описание)",         "Написание текста"),
+            (r"write\s+(a\s+)?(letter|text|post|article|essay|resume|description)", "Writing text"),
+            (r"посчитай|вычисли|реши\b|сколько\s+будет",                         "Математика"),
+            (r"\b(calculate|compute|solve)\b|how\s+much\b",                    "Math"),
+            (r"\b(найди|поищи|погугли)\b",                                       "Поиск информации"),
+            (r"\b(find|search|look\s+up|google)\b",                             "Search"),
+        ]
+        for pat, ttl in _TOPICS:
+            if _re.search(pat, msg_low, _re.IGNORECASE):
+                return ttl
+
+        # 3. Обрезка — берём суть до первой точки/переноса
+        clean = _re.sub(r"^[\s\-\u2013\u2014\u2022*#]+", "", msg)
+        first = _re.split(r"[.\n]", clean)[0].strip()
+        if 6 <= len(first) <= 50:
+            return first[:50]
+        if len(clean) <= 42:
+            return clean
+        cut = clean[:42]
+        sp  = cut.rfind(" ")
+        return (cut[:sp] if sp > 20 else cut) + "\u2026"
+
     def update_chat_title(self, chat_id: int, title: str):
         """Обновить название чата"""
         conn = sqlite3.connect(CHATS_DB)

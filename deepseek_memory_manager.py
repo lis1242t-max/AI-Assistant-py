@@ -4,13 +4,18 @@
 # Отдельная контекстная память для DeepSeek.
 # Полностью изолирована от памяти LLaMA (context_memory.db).
 # Своя БД: deepseek_memory.db
+#
+# ИСПРАВЛЕНО: убрана хрупкая логика _current_chat_id внутри save_context_memory.
+# Раньше: если синглтон "забывал" предыдущий chat_id (рестарт, баг),
+#          on_chat_switch не срабатывал → память чужого чата просачивалась.
+# Теперь: все DB-операции явно фильтруют по chat_id переданному аргументом.
+#          on_chat_switch — только явный вызов из run.py, не авто-триггер.
 # ═══════════════════════════════════════════════════════════════════
 
 import sqlite3
 from datetime import datetime
 from typing import List, Tuple, Optional
 
-# Отдельная БД — не пересекается с LLaMA (context_memory.db)
 DEEPSEEK_MEMORY_DB = "deepseek_memory.db"
 
 
@@ -20,13 +25,11 @@ class DeepSeekMemoryManager:
     Работает исключительно с deepseek_memory.db.
     Не читает и не пишет в context_memory.db (LLaMA).
 
-    Новое: при смене чата (on_chat_switch) память предыдущего чата
-    автоматически очищается, чтобы DeepSeek не путал контексты.
+    Изоляция по chat_id обеспечивается на уровне каждого SQL-запроса,
+    а не через хрупкое состояние _current_chat_id.
     """
 
     def __init__(self):
-        # Текущий активный chat_id — отслеживается для детекции смены
-        self._current_chat_id: Optional[int] = None
         self._init_db()
 
     # ─── Инициализация БД ────────────────────────────────────────────
@@ -48,7 +51,6 @@ class DeepSeekMemoryManager:
             CREATE INDEX IF NOT EXISTS idx_ds_chat
             ON deepseek_memory(chat_id)
         """)
-        # ── Таблица реальной истории диалога (user/assistant повороты) ───────
         cur.execute("""
             CREATE TABLE IF NOT EXISTS deepseek_messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,49 +66,37 @@ class DeepSeekMemoryManager:
         """)
         conn.commit()
         conn.close()
+        print(f"[DS_MEMORY] ✓ БД инициализирована: {DEEPSEEK_MEMORY_DB}")
 
-    # ─── Смена чата (НОВОЕ) ─────────────────────────────────────────
+    # ─── Смена / очистка чата ───────────────────────────────────────
 
     def on_chat_switch(self, new_chat_id: int):
         """
-        Вызывать при переключении на другой чат или создании нового.
-        Автоматически очищает память предыдущего чата,
-        чтобы DeepSeek не тянул старый контекст.
-
-        Пример вызова из run.py:
-            ds_memory.on_chat_switch(new_chat_id)
+        Вызывать явно из run.py при переключении на другой чат.
+        Ничего не удаляет — только логирует.
+        Изоляция памяти обеспечивается через chat_id в каждом запросе,
+        а не через очистку при переключении.
         """
-        if self._current_chat_id is not None and self._current_chat_id != new_chat_id:
-            print(f"[DS_MEMORY] Смена чата: {self._current_chat_id} → {new_chat_id}. "
-                  f"Очистка памяти предыдущего чата.")
-            self.clear_context_memory(self._current_chat_id)
-        self._current_chat_id = new_chat_id
+        print(f"[DS_MEMORY] Переключение на чат {new_chat_id} (изоляция по chat_id активна)")
 
     def on_chat_cleared(self, chat_id: int):
         """
         Вызывать когда пользователь нажал «Очистить чат» или «Новый чат».
-        Сбрасывает память DeepSeek для этого чата и сбрасывает текущий ID.
+        Сбрасывает память DeepSeek для этого чата.
         """
         self.clear_context_memory(chat_id)
-        if self._current_chat_id == chat_id:
-            self._current_chat_id = None
         print(f"[DS_MEMORY] Чат {chat_id} очищен — память сброшена.")
 
     # ─── Запись ──────────────────────────────────────────────────────
 
     def save_context_memory(self, chat_id: int, entry_type: str, content: str):
         """
-        Сохранить запись в память DeepSeek.
+        Сохранить запись в память DeepSeek для данного chat_id.
         entry_type: "user_memory" | "file_analysis" | "search_meta" | "message_files"
 
-        Автоматически отслеживает смену чата.
+        Изоляция: запись всегда привязана к переданному chat_id.
+        Никаких побочных эффектов (очисток, переключений) не происходит.
         """
-        # Если chat_id изменился — очищаем старую память
-        if self._current_chat_id is not None and self._current_chat_id != chat_id:
-            self.on_chat_switch(chat_id)
-        else:
-            self._current_chat_id = chat_id
-
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
         now = datetime.utcnow().isoformat()
@@ -127,9 +117,6 @@ class DeepSeekMemoryManager:
         role: "user" | "assistant"
         Вызывать ПОСЛЕ каждого сообщения пользователя и ПОСЛЕ каждого ответа DeepSeek.
         """
-        if self._current_chat_id is None:
-            self._current_chat_id = chat_id
-
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
         now = datetime.utcnow().isoformat()
@@ -146,7 +133,7 @@ class DeepSeekMemoryManager:
         """
         Получить историю диалога в формате [{"role": ..., "content": ...}, ...].
         Готов для прямой передачи в Ollama API как поле 'messages'.
-        limit=20 — последние 20 сообщений (10 пар вопрос-ответ).
+        Только для данного chat_id — кросс-чат утечка исключена.
         """
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
@@ -158,7 +145,7 @@ class DeepSeekMemoryManager:
         )
         rows = cur.fetchall()
         conn.close()
-        # Разворачиваем: были получены от новых к старым, нужно от старых к новым
+        # Разворачиваем: получены от новых к старым, нужно от старых к новым
         return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
 
     # ─── Чтение ──────────────────────────────────────────────────────
@@ -167,7 +154,7 @@ class DeepSeekMemoryManager:
         """
         Получить контекстную память чата DeepSeek.
         Возвращает список (entry_type, content, created_at) от старых к новым.
-        Лимит по умолчанию 12 — DeepSeek не нужна длинная история.
+        Только для данного chat_id.
         """
         conn = sqlite3.connect(DEEPSEEK_MEMORY_DB)
         cur = conn.cursor()
@@ -194,11 +181,12 @@ class DeepSeekMemoryManager:
         msg_deleted = cur.rowcount
         conn.commit()
         conn.close()
-        print(f"[DS_MEMORY] Очищено {meta_deleted} метазаписей и {msg_deleted} сообщений для chat_id={chat_id}")
+        print(f"[DS_MEMORY] Очищено {meta_deleted} метазаписей и {msg_deleted} "
+              f"сообщений для chat_id={chat_id}")
 
     def delete_chat_context(self, chat_id: int):
         """Псевдоним clear_context_memory — для совместимости с вызовами delete_chat."""
-        self.on_chat_cleared(chat_id)
+        self.clear_context_memory(chat_id)
 
     # ─── Очистка всех чатов ─────────────────────────────────────────
 
@@ -215,6 +203,4 @@ class DeepSeekMemoryManager:
             pass
         conn.commit()
         conn.close()
-        # Сбрасываем и текущий chat_id
-        self._current_chat_id = None
         print("[DS_MEMORY] Очищена ВСЯ память DeepSeek (метаданные + история диалогов)")
