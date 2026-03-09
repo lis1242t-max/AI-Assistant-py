@@ -337,24 +337,33 @@ REQUIRED_FILES = {
 }
 
 OPTIONAL_FILES = {
-    "deepseek_config.py":         "Конфигурация DeepSeek",
     "deepseek_memory_manager.py": "Память DeepSeek",
     "vision_handler.py":          "Обработка изображений (Vision)",
     "forbidden_english_words.py": "Фильтр английских слов",
 }
 
+# Файлы, которые могут лежать в подпапках проекта.
+# Формат: { "имя_файла.py": ("описание", ["папка1", "папка2", ...]) }
+# Поиск идёт сначала в корне, затем по указанным подпапкам.
+SUBDIR_OPTIONAL_FILES = {
+    "deepseek_config.py": ("Конфигурация DeepSeek", ["ai_config"]),
+    "mistral_config.py":  ("Конфигурация Mistral",  ["ai_config"]),
+    "qwen_config.py":     ("Конфигурация Qwen",     ["ai_config"]),
+}
+
+
+def _find_file_in_dirs(base, fname: str, subdirs: list) -> bool:
+    """Возвращает True если файл найден в base или в одной из subdirs."""
+    if (base / fname).is_file():
+        return True
+    return any((base / sub / fname).is_file() for sub in subdirs)
+
 
 def check_required_files(base_dir: str = None) -> dict:
     """
     Проверяет наличие обязательных и опциональных файлов.
-
-    Returns:
-        {
-          "ok": bool,               # все обязательные есть
-          "missing_required": list,
-          "missing_optional": list,
-          "error": str | None,
-        }
+    Файлы из SUBDIR_OPTIONAL_FILES ищутся также в подпапках (ai_config и др.),
+    чтобы не ругаться на конфиги, перемещённые в подпапку.
     """
     base = Path(base_dir) if base_dir else APP_DIR
     result = {
@@ -373,6 +382,14 @@ def check_required_files(base_dir: str = None) -> dict:
         if not (base / fname).is_file():
             result["missing_optional"].append(fname)
             _plog("FILES", f"⚠️ Отсутствует опциональный файл: {fname} — {desc}")
+
+    for fname, (desc, subdirs) in SUBDIR_OPTIONAL_FILES.items():
+        if not _find_file_in_dirs(base, fname, subdirs):
+            result["missing_optional"].append(fname)
+            locations = ", ".join(["корень"] + subdirs)
+            _plog("FILES", f"⚠️ Не найден: {fname} — {desc} (искали в: {locations})")
+        else:
+            _plog("FILES", f"✅ {fname} найден")
 
     if result["missing_required"]:
         result["ok"] = False

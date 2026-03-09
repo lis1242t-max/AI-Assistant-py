@@ -16,7 +16,7 @@ __pycache__/
 
 # Настройки приложения
 app_settings.json
-
+user_subtext.json
 # Бинарники Ollama
 bin/
 

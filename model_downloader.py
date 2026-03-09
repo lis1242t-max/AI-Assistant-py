@@ -10,6 +10,7 @@ model_downloader.py — диалоги и утилиты для скачиван
     DeepSeekDownloadDialog(parent)
     DeepSeekR1DownloadDialog(parent)
     MistralDownloadDialog(parent)
+    QwenDownloadDialog(parent)
 """
 
 import os
@@ -26,7 +27,7 @@ IS_WINDOWS = sys.platform == "win32"
 
 # ── Константы DeepSeek (берём из deepseek_config или fallback) ───────────
 try:
-    from deepseek_config import DEEPSEEK_MODEL_NAME, DEEPSEEK_OLLAMA_PULL
+    from ai_config.deepseek_config import DEEPSEEK_MODEL_NAME, DEEPSEEK_OLLAMA_PULL
 except ImportError:
     DEEPSEEK_MODEL_NAME = "deepseek-llm:7b-chat"
     DEEPSEEK_OLLAMA_PULL = "ollama pull deepseek-llm:7b-chat"
@@ -37,10 +38,17 @@ DEEPSEEK_R1_OLLAMA_PULL = "ollama pull deepseek-r1:8b"
 
 # ── Константы Mistral (берём из mistral_config или fallback) ─────────────
 try:
-    from mistral_config import MISTRAL_MODEL_NAME, MISTRAL_OLLAMA_PULL
+    from ai_config.mistral_config import MISTRAL_MODEL_NAME, MISTRAL_OLLAMA_PULL
 except ImportError:
     MISTRAL_MODEL_NAME = "mistral-nemo:12b"
     MISTRAL_OLLAMA_PULL = "ollama pull mistral-nemo:12b"
+
+# ── Константы Qwen 3 ────────────────────────────────────────────────────
+try:
+    from ai_config.qwen_config import QWEN_MODEL_NAME, QWEN_OLLAMA_PULL
+except ImportError:
+    QWEN_MODEL_NAME  = "qwen3:14b"
+    QWEN_OLLAMA_PULL = "ollama pull qwen3:14b"
 
 # ── OLLAMA_HOST (берём из llama_handler или fallback) ───────────────────
 try:
@@ -254,19 +262,23 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
         if parent and hasattr(parent, "current_theme"):
             self._is_dark = parent.current_theme == "dark"
 
+        # Немодальное окно — пользователь работает пока идёт загрузка
         if IS_WINDOWS:
             self.setWindowFlags(
-                QtCore.Qt.WindowType.Dialog |
+                QtCore.Qt.WindowType.Window |
                 QtCore.Qt.WindowType.WindowTitleHint |
-                QtCore.Qt.WindowType.WindowCloseButtonHint
+                QtCore.Qt.WindowType.WindowCloseButtonHint |
+                QtCore.Qt.WindowType.WindowStaysOnTopHint
             )
         else:
             self.setWindowFlags(
-                QtCore.Qt.WindowType.Dialog |
-                QtCore.Qt.WindowType.FramelessWindowHint
+                QtCore.Qt.WindowType.Window |
+                QtCore.Qt.WindowType.FramelessWindowHint |
+                QtCore.Qt.WindowType.WindowStaysOnTopHint
             )
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
+        self.setModal(False)
         self._build_ui()
         self.download_finished.connect(self._on_download_finished)
 
@@ -474,12 +486,17 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 self._set_status(0, "✅ Папка настроена. Начинаем скачивание…")
 
             # Шаг 2: ollama pull
+            # stderr=STDOUT объединяет оба потока — нужно для HuggingFace моделей,
+            # которые пишут прогресс в stderr. encoding+errors для безопасности.
             cmd = self.MODEL_CMD.split()
             kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, bufsize=1)
+                          text=True, bufsize=1, encoding="utf-8", errors="replace")
             if IS_WINDOWS:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             self._download_process = subprocess.Popen(cmd, **kwargs)
+
+            _saw_progress   = False  # видели хоть один % — признак успешного начала
+            _last_line      = ""     # последняя непустая строка вывода
 
             for line in self._download_process.stdout:
                 if self._cancelled:
@@ -487,19 +504,24 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 line = line.strip()
                 if not line:
                     continue
+                _last_line = line
                 pct_m = _re.search(r'(\d+)%', line)
                 if pct_m:
-                    pct     = int(pct_m.group(1))
-                    size_m  = _re.search(r'([\d.]+)\s*GB/([\d.]+)\s*GB', line)
-                    spd_m   = _re.search(r'([\d.]+)\s*(MB|KB)/s', line)
-                    eta_m   = _re.search(r'(\d+m\d+s|\d+s)', line)
-                    parts   = [f"{pct}%"]
+                    _saw_progress = True
+                    pct    = int(pct_m.group(1))
+                    size_m = _re.search(r'([\d.]+)\s*GB/([\d.]+)\s*GB', line)
+                    spd_m  = _re.search(r'([\d.]+)\s*(MB|KB)/s', line)
+                    eta_m  = _re.search(r'(\d+m\d+s|\d+s)', line)
+                    parts  = [f"{pct}%"]
                     if size_m: parts.append(f"({size_m.group(1)} / {size_m.group(2)} GB)")
                     if spd_m:  parts.append(f"— {spd_m.group(1)} {spd_m.group(2)}/s")
                     if eta_m:  parts.append(f"| осталось ~{eta_m.group(1)}")
                     self._set_status(pct, " ".join(parts))
-                elif any(w in line.lower() for w in ("success", "done", "complete")):
-                    self._set_status(100, "✅ Готово!")
+                elif any(w in line.lower() for w in ("success", "done", "complete",
+                                                       "writing manifest", "verifying sha256",
+                                                       "pulling manifest", "already exists")):
+                    _saw_progress = True
+                    self._set_status(99, "✅ Финализация…")
 
             ret = self._download_process.wait()
             if self._cancelled:
@@ -507,7 +529,43 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
             elif ret == 0:
                 self.download_finished.emit(True, "Скачивание завершено!")
             else:
-                self.download_finished.emit(False, f"Ошибка скачивания (код {ret})")
+                # HuggingFace-модели в Ollama иногда возвращают код 1 даже при успехе.
+                # Трёхступенчатая проверка:
+                # 1. Вывод выглядит успешно (видели прогресс, нет слов "error")
+                # 2. /api/tags — модель есть по полному имени
+                # 3. /api/tags — модель есть по базовому имени (без тега и пути)
+                _model_ok   = False
+                _last_low   = _last_line.lower()
+                _error_words = ("error", "failed", "cannot", "refused", "not found",
+                                "не удал", "ошибка")
+
+                # Проверка 1: по контексту вывода
+                if _saw_progress and not any(w in _last_low for w in _error_words):
+                    _model_ok = True
+
+                # Проверка 2 и 3: через /api/tags
+                if not _model_ok:
+                    try:
+                        _cmd_model = self.MODEL_CMD.replace("ollama pull ", "").strip()
+                        _cmd_low   = _cmd_model.lower()
+                        # Базовое имя: namespace/ModelName:tag → modelname
+                        _base      = _re.sub(r'[-_]gguf.*$', '',
+                                             _cmd_low.split("/")[-1].split(":")[0])
+                        _tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=8).json()
+                        _names = [m.get("name", "").lower()
+                                  for m in _tags.get("models", [])]
+                        _model_ok = any(
+                            _cmd_low in n or n in _cmd_low or _base in n
+                            for n in _names
+                        )
+                    except Exception:
+                        pass
+
+                if _model_ok:
+                    self.download_finished.emit(True, "Скачивание завершено!")
+                else:
+                    err_detail = _last_line[:120] if _last_line else f"код {ret}"
+                    self.download_finished.emit(False, f"Ошибка скачивания: {err_detail}")
         except FileNotFoundError:
             self.download_finished.emit(
                 False, "Ollama не найдена. Убедитесь что Ollama установлена и запущена."
@@ -535,7 +593,7 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 self._download_process.terminate()
             except Exception:
                 pass
-        self.reject()
+        self.close()
 
     @QtCore.pyqtSlot(bool, str)
     def _on_download_finished(self, success: bool, message: str):
@@ -553,7 +611,7 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.accept)
+            self.cancel_btn.clicked.connect(self.close)
             if hasattr(self, "start_btn"):
                 self.start_btn.hide()
             QtWidgets.QMessageBox.information(
@@ -561,7 +619,7 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 f"✅ {message}\n\nМожете начинать общение.",
                 QtWidgets.QMessageBox.StandardButton.Ok,
             )
-            self.accept()
+            self.close()
         else:
             self.status_label.setText(f"❌ {message}")
             if hasattr(self, "start_btn"):
@@ -572,7 +630,7 @@ class _BaseDownloadDialog(QtWidgets.QDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.reject)
+            self.cancel_btn.clicked.connect(self.close)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -609,7 +667,7 @@ class DeepSeekDownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.accept)
+            self.cancel_btn.clicked.connect(self.close)
             if hasattr(self, "start_btn"):
                 self.start_btn.hide()
             QtWidgets.QMessageBox.information(
@@ -617,7 +675,7 @@ class DeepSeekDownloadDialog(_BaseDownloadDialog):
                 f"✅ {message}\n\nМожете выбрать эту модель.",
                 QtWidgets.QMessageBox.StandardButton.Ok,
             )
-            self.accept()
+            self.close()
         else:
             self.status_label.setText(f"❌ {message}")
             if hasattr(self, "start_btn"):
@@ -628,7 +686,7 @@ class DeepSeekDownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.reject)
+            self.cancel_btn.clicked.connect(self.close)
 
 
 class DeepSeekR1DownloadDialog(_BaseDownloadDialog):
@@ -653,7 +711,7 @@ class DeepSeekR1DownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.accept)
+            self.cancel_btn.clicked.connect(self.close)
             if hasattr(self, "start_btn"):
                 self.start_btn.hide()
             QtWidgets.QMessageBox.information(
@@ -661,7 +719,7 @@ class DeepSeekR1DownloadDialog(_BaseDownloadDialog):
                 f"✅ {message}\n\nDeepSeek-R1 8B готов к использованию!",
                 QtWidgets.QMessageBox.StandardButton.Ok,
             )
-            self.accept()
+            self.close()
         else:
             self.status_label.setText(f"❌ {message}")
             if hasattr(self, "start_btn"):
@@ -672,7 +730,7 @@ class DeepSeekR1DownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.reject)
+            self.cancel_btn.clicked.connect(self.close)
 
 
 class MistralDownloadDialog(_BaseDownloadDialog):
@@ -697,7 +755,7 @@ class MistralDownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.accept)
+            self.cancel_btn.clicked.connect(self.close)
             if hasattr(self, "start_btn"):
                 self.start_btn.hide()
             QtWidgets.QMessageBox.information(
@@ -705,7 +763,7 @@ class MistralDownloadDialog(_BaseDownloadDialog):
                 f"✅ {message}\n\nMistral Nemo готов к использованию!",
                 QtWidgets.QMessageBox.StandardButton.Ok,
             )
-            self.accept()
+            self.close()
         else:
             self.status_label.setText(f"❌ {message}")
             if hasattr(self, "start_btn"):
@@ -716,7 +774,51 @@ class MistralDownloadDialog(_BaseDownloadDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.reject)
+            self.cancel_btn.clicked.connect(self.close)
+
+class QwenDownloadDialog(_BaseDownloadDialog):
+    """Диалог скачивания Qwen 3 14B."""
+    MODEL_CMD   = QWEN_OLLAMA_PULL
+    MODEL_LABEL = "🌟  Скачивание Qwen"
+    MODEL_SIZE  = "~9 GB"
+
+    @QtCore.pyqtSlot(bool, str)
+    def _on_download_finished(self, success: bool, message: str):
+        if success:
+            self.progress_bar.setValue(100)
+            self.status_label.setText("✅ Скачивание завершено!")
+            self.cancel_btn.setText("✓  Готово")
+            self.cancel_btn.setStyleSheet(
+                "QPushButton{background:rgba(55,155,75,0.72);color:#f0f8f0;"
+                "border:1px solid rgba(75,175,95,0.55);border-radius:11px;"
+                "font-size:13px;font-weight:600;}"
+                "QPushButton:hover{background:rgba(65,170,85,0.88);}"
+            )
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.close)
+            if hasattr(self, "start_btn"):
+                self.start_btn.hide()
+            QtWidgets.QMessageBox.information(
+                self, "Готово",
+                f"✅ {message}\n\nQwen 3 готов к использованию!",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+            self.close()
+        else:
+            self.status_label.setText(f"❌ {message}")
+            if hasattr(self, "start_btn"):
+                self.start_btn.setEnabled(True)
+                self.start_btn.setText("⬇  Повторить")
+            self.cancel_btn.setText("✕  Закрыть")
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(self.close)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ДИАЛОГ СКАЧИВАНИЯ САМОЙ ПРОГРАММЫ OLLAMA
@@ -1145,7 +1247,7 @@ class OllamaDownloadDialog(QtWidgets.QDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.accept)
+            self.cancel_btn.clicked.connect(self.close)
         else:
             self.status_label.setText(f"❌ {message}")
             self.start_btn.setEnabled(True)
@@ -1157,7 +1259,7 @@ class OllamaDownloadDialog(QtWidgets.QDialog):
                 self.cancel_btn.clicked.disconnect()
             except Exception:
                 pass
-            self.cancel_btn.clicked.connect(self.reject)
+            self.cancel_btn.clicked.connect(self.close)
 
     def _on_cancel(self):
         self._cancelled = True

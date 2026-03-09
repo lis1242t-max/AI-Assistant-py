@@ -1,0 +1,57 @@
+
+============================================================
+[2026-03-09 11:31:48] [MAIN_WINDOW] NameError: name 'create_app_icon' is not defined
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 12141, in main
+    app_icon = create_app_icon()
+               ^^^^^^^^^^^^^^^
+NameError: name 'create_app_icon' is not defined
+
+
+============================================================
+[2026-03-09 11:35:20] [MAIN_WINDOW] NameError: name 'CURRENT_LANGUAGE' is not defined
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 12171, in main
+    window = MainWindow()
+             ^^^^^^^^^^^^
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 4596, in __init__
+    self.current_language = CURRENT_LANGUAGE
+                            ^^^^^^^^^^^^^^^^
+NameError: name 'CURRENT_LANGUAGE' is not defined
+
+
+============================================================
+[2026-03-09 14:30:24] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 892, in draw
+    pixmap = self.sourcePixmap(
+             ^^^^^^^^^^^^^^^^^^
+TypeError: sourcePixmap(self, system: Qt.CoordinateSystem = Qt.LogicalCoordinates, mode: QGraphicsEffect.PixmapPadMode = QGraphicsEffect.PadToEffectiveBoundingRect) -> (QPixmap, Optional[QPoint]): argument 2 has unexpected type 'QPoint'
+
+============================================================
+[2026-03-09 14:30:57] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 892, in draw
+    pixmap = self.sourcePixmap(
+             ^^^^^^^^^^^^^^^^^^
+TypeError: sourcePixmap(self, system: Qt.CoordinateSystem = Qt.LogicalCoordinates, mode: QGraphicsEffect.PixmapPadMode = QGraphicsEffect.PadToEffectiveBoundingRect) -> (QPixmap, Optional[QPoint]): argument 2 has unexpected type 'QPoint'
+
+============================================================
+[2026-03-09 14:48:24] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 10458, in switch_chat
+    self.load_current_chat()
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 10132, in load_current_chat
+    message_widget.opacity_effect.setOpacity(1.0)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_SlideOpacityEffect' object has no attribute 'setOpacity'. Did you mean: '_set_opacity'?
+
+============================================================
+[2026-03-09 14:48:35] НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ
+Traceback (most recent call last):
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 10458, in switch_chat
+    self.load_current_chat()
+  File "/Users/kirillkaravaev/ai asissasnt/run.py", line 10132, in load_current_chat
+    message_widget.opacity_effect.setOpacity(1.0)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_SlideOpacityEffect' object has no attribute 'setOpacity'. Did you mean: '_set_opacity'?

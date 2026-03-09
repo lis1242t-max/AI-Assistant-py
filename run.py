@@ -12,6 +12,26 @@ from typing import Any
 from PyQt6 import QtWidgets, QtGui, QtCore
 import requests
 import json
+
+# ── Директория приложения и настройка путей ─────────────────────────────────
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+# Явно добавляем папку ai_config (там лежат deepseek_config, mistral_config, qwen_config)
+_AI_CONFIG_DIR = os.path.join(APP_DIR, "ai_config")
+if os.path.isdir(_AI_CONFIG_DIR) and _AI_CONFIG_DIR not in sys.path:
+    sys.path.insert(1, _AI_CONFIG_DIR)
+    print(f"[PATH] ✓ ai_config добавлен в sys.path")
+
+# Дополнительно сканируем остальные подпапки проекта (на случай будущих переносов)
+_SKIP_DIRS = {"__pycache__", ".git", ".hg", ".venv", "venv", "env",
+              "node_modules", "dist", "build", ".idea", ".vscode", "ai_config"}
+for _dp, _dns, _fns in os.walk(APP_DIR, topdown=True):
+    _dns[:] = [d for d in _dns if d not in _SKIP_DIRS and not d.startswith(".")]
+    if _dp != APP_DIR and any(f.endswith(".py") for f in _fns) and _dp not in sys.path:
+        sys.path.insert(1, _dp)
+        print(f"[PATH] + {os.path.relpath(_dp, APP_DIR)}")
 try:
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
     from OpenGL.GL import *
@@ -35,6 +55,27 @@ from ai_file_generator import (
     detect_file_request,
     build_file_injection,
 )
+
+# ── Улучшенный подтекст — персональные предпочтения общения ─────────────────
+try:
+    from enhanced_subtext import get_subtext_injection, get_subtext_reminder, SubtextSettingBlock, subtext_track_message, SubtextManager as _SubtextManager
+    _SUBTEXT_AVAILABLE = True
+    print("[IMPORT] ✓ enhanced_subtext загружен")
+except ImportError:
+    _SUBTEXT_AVAILABLE = False
+    def get_subtext_injection(): return ""
+    def get_subtext_reminder(): return ""
+    def subtext_track_message(msg): pass
+    class _SubtextManager:
+        @staticmethod
+        def load(): return {}
+    SubtextSettingBlock = None
+    print("[IMPORT] ⚠️ enhanced_subtext.py не найден — функция недоступна")
+
+# Постпроцессинг ответов (применяет фильтры к готовому тексту)
+# mx_pipe удалён
+
+# ui_render_hooks удалён
 
 # Отдельная память для DeepSeek — изолирована от LLaMA (deepseek_memory.db)
 try:
@@ -126,8 +167,6 @@ def _fix_popup_on_windows(widget):
     widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, False)
 
 
-# ── Директория приложения (для поиска ресурсов) ─────────────────────────────
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Логотипы моделей встроены как base64 ─────────────────────────────────────
 # Для надёжности: не зависят от расположения файлов на диске.
@@ -159,23 +198,36 @@ _MODEL_LOGOS_B64 = {
 }
 # DeepSeek R1 использует тот же логотип что и DeepSeek
 _MODEL_LOGOS_B64["deepseek-r1"] = _MODEL_LOGOS_B64["deepseek"]
+# Qwen логотип (встроен как base64; также подхватывается из logo/qwen_logo.png)
+_MODEL_LOGOS_B64["qwen"] = "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"
 
 def _get_model_logo_pixmap(model_key: str, size: int = 30) -> "QtGui.QPixmap":
-    """Возвращает QPixmap логотипа модели. Сначала ищет файл, затем base64."""
+    """Возвращает QPixmap логотипа модели.
+    Порядок поиска:
+      1. logo/{model_key}_logo.png     ← папка пользователя (приоритет)
+      2. assets/logos/{model_key}_logo.png
+      3. встроенный base64
+    """
     from PyQt6 import QtGui, QtCore
-    # Попытка 1: файл рядом с run.py
-    file_path = os.path.join(APP_DIR, "assets", "logos", f"{model_key}_logo.png")
-    px = QtGui.QPixmap(file_path)
-    if not px.isNull():
-        return px.scaled(size, size,
-                         QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                         QtCore.Qt.TransformationMode.SmoothTransformation)
-    # Попытка 2: встроенный base64
+
+    _search_paths = [
+        os.path.join(APP_DIR, "logo",          f"{model_key}_logo.png"),
+        os.path.join(APP_DIR, "assets", "logos", f"{model_key}_logo.png"),
+    ]
+    for file_path in _search_paths:
+        px = QtGui.QPixmap(file_path)
+        if not px.isNull():
+            return px.scaled(size, size,
+                             QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                             QtCore.Qt.TransformationMode.SmoothTransformation)
+
+    # Встроенный base64
     b64 = _MODEL_LOGOS_B64.get(model_key, "")
     if b64:
         data = _b64.b64decode(b64)
         px2 = QtGui.QPixmap()
-        px2.loadFromData(data, "PNG")
+        # JPEG или PNG — loadFromData определяет формат автоматически
+        px2.loadFromData(data)
         if not px2.isNull():
             return px2.scaled(size, size,
                               QtCore.Qt.AspectRatioMode.KeepAspectRatio,
@@ -236,6 +288,24 @@ if "deepseek-r1" not in llama_handler.SUPPORTED_MODELS:
     )
     SUPPORTED_MODELS["deepseek-r1"] = llama_handler.SUPPORTED_MODELS["deepseek-r1"]
 
+# ── Регистрируем Qwen 3 как отдельную модель ───────────────────────────────
+if "qwen" not in llama_handler.SUPPORTED_MODELS:
+    llama_handler.SUPPORTED_MODELS["qwen"] = (
+        "qwen3:14b",
+        "Qwen 3",
+    )
+    SUPPORTED_MODELS["qwen"] = llama_handler.SUPPORTED_MODELS["qwen"]
+
+
+# ── Регистрируем Mistral Nemo как отдельную модель ──────────────────────────
+# Без этого change_ai_model("mistral") завершается с "Неизвестная модель"
+# (проверка model_key not in SUPPORTED_MODELS на строке ~12179).
+if "mistral" not in llama_handler.SUPPORTED_MODELS:
+    llama_handler.SUPPORTED_MODELS["mistral"] = (
+        "mistral-nemo:12b",  # будет перезаписано после импорта mistral_config
+        "Mistral Nemo",
+    )
+    SUPPORTED_MODELS["mistral"] = llama_handler.SUPPORTED_MODELS["mistral"]
 
 # Импортируем конфигурацию Mistral Nemo
 try:
@@ -255,6 +325,29 @@ except ImportError:
     MISTRAL_DISPLAY_NAME  = "Mistral Nemo"
     MISTRAL_OLLAMA_PULL   = "ollama pull mistral-nemo:12b"
 
+# Обновляем SUPPORTED_MODELS["mistral"] с реальным именем модели
+llama_handler.SUPPORTED_MODELS["mistral"] = (MISTRAL_MODEL_NAME, MISTRAL_DISPLAY_NAME)
+SUPPORTED_MODELS["mistral"] = llama_handler.SUPPORTED_MODELS["mistral"]
+print(f"[INIT] SUPPORTED_MODELS['mistral'] = {SUPPORTED_MODELS['mistral']}")
+
+# Импортируем конфигурацию Qwen 3
+try:
+    from qwen_config import (
+        get_qwen_system_prompt,
+        clean_qwen_response,
+        QWEN_MODEL_NAME,
+        QWEN_DISPLAY_NAME,
+        QWEN_OLLAMA_PULL,
+    )
+    print("[IMPORT] ✓ qwen_config загружен")
+except ImportError:
+    print("[IMPORT] ⚠️ qwen_config.py не найден — Qwen недоступен")
+    def get_qwen_system_prompt(language, mode): return ""
+    def clean_qwen_response(text): return text
+    QWEN_MODEL_NAME   = "qwen3:14b"
+    QWEN_DISPLAY_NAME = "Qwen 3"
+    QWEN_OLLAMA_PULL  = "ollama pull qwen3:14b"
+
 # Импортируем менеджер памяти Mistral
 try:
     from mistral_memory_manager import MistralMemoryManager
@@ -267,6 +360,16 @@ except ImportError:
     print("[IMPORT] ⚠️ mistral_memory_manager.py не найден — используется общая память")
     MistralMemoryManager = None
     _MISTRAL_MEMORY = None
+
+# Импортируем менеджер памяти Qwen
+try:
+    from qwen_memory_manager import QwenMemoryManager
+    _QWEN_MEMORY = QwenMemoryManager()
+    print("[IMPORT] ✓ qwen_memory_manager загружен (singleton)")
+except ImportError:
+    print("[IMPORT] ⚠️ qwen_memory_manager.py не найден — используется общая память")
+    QwenMemoryManager = None
+    _QWEN_MEMORY = None
 
 # Импортируем конфигурацию DeepSeek
 try:
@@ -358,7 +461,10 @@ from error_handler import (
 
 # Google / DuckDuckGo helper config
 DB_FILE = "chat_memory.db" 
-MAX_HISTORY_LOAD = 50
+MAX_HISTORY_LOAD = 15
+
+# Текущий язык интерфейса — изменяется при авто-определении языка пользователя
+CURRENT_LANGUAGE = "russian"
 
 # Threshold to decide whether text is "short"
 SHORT_TEXT_THRESHOLD = 80  # символов
@@ -443,6000 +549,63 @@ def is_short_acknowledgment(text: str):
 # Adaptive Intelligent Web Search System
 # -------------------------
 
-# Intent analysis keywords for automatic search
-INTERNET_REQUIRED_KEYWORDS = {
-    # Time-sensitive queries
-    "time": ["сейчас", "now", "today", "сегодня", "текущий", "current", "latest", "последний", "актуальный"],
-    # Weather queries
-    "weather": ["погода", "weather", "температура", "temperature", "forecast", "прогноз"],
-    # News and events
-    "news": ["новости", "news", "события", "events", "что случилось", "what happened"],
-    # Location-based
-    "location": ["где", "where", "адрес", "address", "location", "местонахождение", "как добраться"],
-    # Real-time data
-    "realtime": ["курс", "rate", "цена", "price", "стоимость", "cost", "котировки", "quotes"],
-    # Software/releases
-    "software": ["обновление", "update", "релиз", "release", "версия", "version", "новая версия"],
-    # Recipes and cooking
-    "recipes": ["рецепт", "recipe", "как приготовить", "how to cook", "как готовить", "готовить", "приготовить", "блюдо", "dish"],
-    # Search explicitly — все варианты как пользователь может попросить поискать
-    "search": [
-        "найди", "search", "поиск", "найти", "погугли", "загугли", "google",
-        "посмотри в интернете", "посмотри в инете", "посмотри в сети",
-        "поищи в интернете", "поищи в инете", "поищи в сети",
-        "поищи", "поищи информацию", "ищи", "найди в интернете",
-        "check online", "look up", "загляни в интернет",
-        "что говорит интернет", "что пишут", "что пишет интернет",
-        "найди информацию", "есть ли в интернете", "поищи онлайн"
-    ]
-}
 
-# Keywords that indicate NO internet search needed
-NO_INTERNET_KEYWORDS = {
-    "math": ["вычисли", "calculate", "посчитай", "сложи", "умножь", "раздели"],
-    "creative": ["напиши", "write", "создай", "create", "придумай", "сочини", "compose"],
-    "translation": ["переведи", "translate", "перевод", "translation"],
-    "code": ["код", "code", "программа", "program", "скрипт", "script", "функция", "function"],
-    "rewrite": ["перефразируй", "rephrase", "переформулируй", "перепиши", "rewrite"]
-}
-
-def analyze_intent_for_search(user_message: str, forced_search: bool = False, chat_history: list = None) -> dict:
-    """
-    Анализирует намерение пользователя и решает, нужен ли поиск в интернете.
-    
-    Возвращает словарь:
-    {
-        "requires_search": bool,
-        "confidence": float (0.0-1.0),
-        "reason": str,
-        "forced": bool
-    }
-    """
-    
-    # ПРИОРИТЕТ 0: Команда ОТКЛЮЧИТЬ поиск (выше всего остального)
-    STOP_SEARCH_PHRASES = [
-        "прекрати искать", "перестань искать", "не ищи", "не надо искать",
-        "отключи поиск", "выключи поиск", "без поиска", "не используй интернет",
-        "не лезь в интернет", "не ищи в интернете", "не ищи в инете",
-        "stop searching", "don't search", "no internet", "disable search",
-        "не нужно искать", "не ищи ничего", "ответь без поиска",
-    ]
-    message_lower_pre = user_message.lower().strip()
-    if any(phrase in message_lower_pre for phrase in STOP_SEARCH_PHRASES):
-        return {
-            "requires_search": False,
-            "confidence": 0.0,
-            "reason": "stop_search_command",
-            "forced": False
-        }
-
-    # ПРИОРИТЕТ 1: Принудительный поиск
-    if forced_search:
-        return {
-            "requires_search": True,
-            "confidence": 1.0,
-            "reason": "forced_search_override",
-            "forced": True
-        }
-    
-    message_lower = message_lower_pre
-    
-    # ПРИОРИТЕТ 2: Явные фразы "посмотри/поищи в интернете/инете/сети"
-    EXPLICIT_SEARCH_PHRASES = [
-        "посмотри в инете", "посмотри в интернете", "посмотри в сети",
-        "поищи в инете", "поищи в интернете", "поищи в сети",
-        "загугли", "погугли", "найди в интернете", "найди в инете",
-        "поищи", "поищи информацию", "найди информацию",
-        "что пишут", "что пишет интернет", "что говорит интернет",
-        "загляни в интернет", "check online", "look it up",
-        "есть ли в интернете", "поищи онлайн", "найди онлайн",
-        "скажи что пишут", "посмотри что пишут",
-    ]
-    if any(phrase in message_lower for phrase in EXPLICIT_SEARCH_PHRASES):
-        return {
-            "requires_search": True,
-            "confidence": 1.0,
-            "reason": "explicit_search_request",
-            "forced": False
-        }
-    
-    # Счётчики совпадений (только по текущему сообщению, без истории)
-    internet_score = 0
-    no_internet_score = 0
-    
-    # Проверяем ключевые слова для интернет-запросов (только текущее сообщение)
-    for category, keywords in INTERNET_REQUIRED_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in message_lower:
-                internet_score += 1
-    
-    # Проверяем ключевые слова против интернета
-    for category, keywords in NO_INTERNET_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in message_lower:
-                no_internet_score += 1
-    
-    # Специальные паттерны
-    # Вопросы "что это", "кто такой" - ВСЕГДА требуют поиска (приоритет!)
-    # Это важно для незнакомых концепций, игр, терминов (например "Акинатор")
-    if any(pattern in message_lower for pattern in ["что такое", "кто такой", "кто такая", "что это", "кто это", "what is", "who is", "what's"]):
-        # Очень высокий приоритет для таких вопросов - сразу возвращаем True
-        return {
-            "requires_search": True,
-            "confidence": 1.0,
-            "reason": "definition_or_identity_query",
-            "forced": False
-        }
-    
-    # Математические выражения - не требуют поиска
-    if any(char in message_lower for char in ["=", "+", "-", "*", "/", "^"]):
-        no_internet_score += 2
-
-    # Временные слова + любая тема → скорее всего нужна свежая инфа из интернета
-    temporal_words_ru = ['завтра', 'послезавтра', 'вчера', 'сегодня', 'на этой неделе', 'на следующей неделе']
-    temporal_words_en = ['tomorrow', 'day after tomorrow', 'yesterday', 'today', 'this week', 'next week']
-    temporal_words = temporal_words_ru + temporal_words_en
-    if any(tw in message_lower for tw in temporal_words):
-        internet_score += 2  # Временные слова увеличивают вероятность поиска
-    
-    # Решение: порог >= 2 чтобы избежать ложных срабатываний
-    total_score = internet_score - no_internet_score
-    
-    if total_score >= 2:
-        confidence = min(1.0, total_score / 5.0)
-        return {
-            "requires_search": True,
-            "confidence": confidence,
-            "reason": "intent_analysis_positive",
-            "forced": False
-        }
-    else:
-        return {
-            "requires_search": False,
-            "confidence": 0.0,
-            "reason": "intent_analysis_negative",
-            "forced": False
-        }
-
-# -------------------------
-# Icon creation
-# -------------------------
-def create_app_icon():
-    """
-    Рисует иконку 1024×1024 и возвращает QPixmap.
-    Форма: настоящие macOS continuous corners (radius = 22.37%).
-    """
-    import math
-    from PyQt6.QtGui  import (QPixmap, QPainter, QColor, QRadialGradient,
-                               QLinearGradient, QPen, QBrush, QPainterPath)
-    from PyQt6.QtCore import Qt, QRectF, QPointF
-
-    SIZE   = 1024
-    pixmap = QPixmap(SIZE, SIZE)
-    pixmap.fill(Qt.GlobalColor.transparent)
-
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing,          True)
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-    cx = cy = SIZE / 2.0
-    # Настоящие macOS иконки заполняют весь canvas целиком — PAD = 0.
-    # Скругление само является формой, прозрачных отступов нет.
-    # RADIUS = 22.37% от SIZE — стандарт Apple continuous corners.
-    PAD    = 0
-    W_ICON = SIZE
-    RADIUS = SIZE * 0.2237            # ~229px при SIZE=1024
-
-    def macos_path(rect: QRectF, r: float) -> QPainterPath:
-        path = QPainterPath()
-        l, t, w, h = rect.left(), rect.top(), rect.width(), rect.height()
-        k  = r * 0.89
-        k2 = r * (1 - 0.5523)
-        path.moveTo(l + r, t)
-        path.lineTo(l + w - r, t)
-        path.cubicTo(l+w-k, t,      l+w, t+k2,     l+w, t+r)
-        path.lineTo(l+w, t+h-r)
-        path.cubicTo(l+w, t+h-k2,   l+w-k, t+h,    l+w-r, t+h)
-        path.lineTo(l+r, t+h)
-        path.cubicTo(l+k, t+h,      l, t+h-k2,     l, t+h-r)
-        path.lineTo(l, t+r)
-        path.cubicTo(l, t+k2,       l+k, t,         l+r, t)
-        path.closeSubpath()
-        return path
-
-    icon_rect = QRectF(0, 0, SIZE, SIZE)
-    icon_path = macos_path(icon_rect, RADIUS)
-
-    # Фон
-    bg = QLinearGradient(0, 0, SIZE, SIZE)
-    bg.setColorAt(0.00, QColor(100, 65, 230))
-    bg.setColorAt(0.35, QColor( 65, 45, 195))
-    bg.setColorAt(0.70, QColor( 35, 22, 150))
-    bg.setColorAt(1.00, QColor( 20, 12, 100))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(bg))
-    p.drawPath(icon_path)
-
-    # Голубой акцент
-    accent = QRadialGradient(cx*0.55, cy*0.45, SIZE*0.52)
-    accent.setColorAt(0.0, QColor(140,110,255,110))
-    accent.setColorAt(0.5, QColor( 70,150,255, 55))
-    accent.setColorAt(1.0, QColor(  0,  0,  0,  0))
-    p.setBrush(QBrush(accent))
-    p.drawPath(icon_path)
-
-    # Блик
-    p.setClipPath(icon_path)
-    hi = QRadialGradient(cx, SIZE*0.06, SIZE*0.5)
-    hi.setColorAt(0.00, QColor(255,255,255, 70))
-    hi.setColorAt(0.50, QColor(255,255,255, 16))
-    hi.setColorAt(1.00, QColor(255,255,255,  0))
-    p.setBrush(QBrush(hi))
-    p.drawPath(icon_path)
-    p.setClipping(False)
-
-    # Обводка
-    border = QLinearGradient(0, 0, SIZE, SIZE)
-    border.setColorAt(0.0, QColor(255,255,255, 80))
-    border.setColorAt(0.5, QColor(200,185,255, 30))
-    border.setColorAt(1.0, QColor(120,105,220, 15))
-    bp = QPen(QBrush(border), SIZE*0.005)
-    bp.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(bp)
-    p.drawPath(macos_path(
-        QRectF(SIZE*0.002, SIZE*0.002,
-               SIZE-SIZE*0.004, SIZE-SIZE*0.004),
-        RADIUS - SIZE*0.002
-    ))
-
-    # Символ
-    p.setClipPath(icon_path)
-    p.setPen(Qt.PenStyle.NoPen)
-    U = SIZE / 256.0
-    outer = [(cx, cy-75*U),(cx-65*U, cy+42*U),(cx+65*U, cy+42*U),(cx, cy+82*U)]
-    ray_pen = QPen(QColor(255,255,255,125), 6.5*U,
-                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-    p.setPen(ray_pen)
-    for nx,ny in outer:
-        p.drawLine(QPointF(cx,cy), QPointF(nx,ny))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(255,255,255,85))
-    for nx,ny in outer:
-        mx,my=(cx+nx)/2,(cy+ny)/2; rm=7.5*U
-        p.drawEllipse(QRectF(mx-rm,my-rm,rm*2,rm*2))
-    for nx,ny in outer:
-        g2=QRadialGradient(nx-3*U,ny-3*U,17*U)
-        g2.setColorAt(0.0,QColor(255,255,255,255))
-        g2.setColorAt(1.0,QColor(215,190,255,185))
-        p.setBrush(QBrush(g2)); ro=13.5*U
-        p.drawEllipse(QRectF(nx-ro,ny-ro,ro*2,ro*2))
-    cg=QRadialGradient(cx-4*U,cy-4*U,22*U)
-    cg.setColorAt(0.0,QColor(255,255,255,255))
-    cg.setColorAt(1.0,QColor(225,205,255,215))
-    p.setBrush(QBrush(cg)); rc=19*U
-    p.drawEllipse(QRectF(cx-rc,cy-rc,rc*2,rc*2))
-    p.setClipping(False)
-    p.end()
-    return pixmap
-
-
-def _build_multi_size_icon(pixmap):
-    """QIcon со всеми размерами — fallback если PyObjC недоступен."""
-    from PyQt6.QtGui  import QIcon
-    from PyQt6.QtCore import Qt
-    icon = QIcon()
-    for sz in [16, 32, 48, 64, 128, 256, 512, 1024]:
-        icon.addPixmap(pixmap.scaled(
-            sz, sz,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        ))
-    return icon
-
-
-def _apply_macos_dock_icon(pixmap):
-    """
-    Устанавливает иконку Dock через iconutil + PyObjC.
-
-    Ключевые исправления:
-    - Правильные имена файлов iconset (стандарт Apple):
-      16, 32, 128, 256, 512 — БЕЗ 64 (его нет в спецификации)
-    - Явно выставляем NSImage.setSize_(512, 512) чтобы macOS
-      знала "базовый" размер иконки и не рендерила её гигантской
-    """
-    import sys, os, subprocess, tempfile
-    if sys.platform != "darwin":
-        return False
-
-    try:
-        from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, Qt
-        from PyQt6.QtGui  import QPixmap as _QP
-
-        # Строим .iconset — ТОЛЬКО стандартные Apple размеры
-        # Спецификация: https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Optimizing/Optimizing.html
-        ICONSET_SPEC = [
-            # (логический размер, суффикс,  пиксели)
-            (16,  "icon_16x16.png",      16),
-            (16,  "icon_16x16@2x.png",   32),
-            (32,  "icon_32x32.png",      32),
-            (32,  "icon_32x32@2x.png",   64),
-            (128, "icon_128x128.png",    128),
-            (128, "icon_128x128@2x.png", 256),
-            (256, "icon_256x256.png",    256),
-            (256, "icon_256x256@2x.png", 512),
-            (512, "icon_512x512.png",    512),
-            (512, "icon_512x512@2x.png", 1024),
-        ]
-
-        tmp_dir     = tempfile.mkdtemp(prefix="ai_icon_")
-        iconset_dir = os.path.join(tmp_dir, "AppIcon.iconset")
-        os.makedirs(iconset_dir)
-
-        for _logical, filename, px in ICONSET_SPEC:
-            s = pixmap.scaled(px, px,
-                              Qt.AspectRatioMode.KeepAspectRatio,
-                              Qt.TransformationMode.SmoothTransformation)
-            s.save(os.path.join(iconset_dir, filename))
-
-        icns_path = os.path.join(tmp_dir, "AppIcon.icns")
-        r = subprocess.run(
-            ["iconutil", "-c", "icns", iconset_dir, "-o", icns_path],
-            capture_output=True, timeout=15
-        )
-        if r.returncode != 0 or not os.path.exists(icns_path):
-            raise RuntimeError(f"iconutil: {r.stderr.decode()}")
-
-        print(f"[ICON] ✅ .icns ({os.path.getsize(icns_path)//1024} KB, "
-              f"10 слотов: 16/32/128/256/512 @1x+@2x)")
-
-        # Загружаем через PyObjC
-        try:
-            from AppKit import NSApplication, NSImage, NSSize
-        except ImportError:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install",
-                 "pyobjc-framework-Cocoa", "-q"],
-                check=True, timeout=60
-            )
-            from AppKit import NSApplication, NSImage, NSSize
-
-        ns_img = NSImage.alloc().initWithContentsOfFile_(icns_path)
-
-        if not (ns_img and ns_img.isValid()):
-            raise RuntimeError("NSImage не смогла загрузить .icns")
-
-        # КРИТИЧНО: явно выставляем naturalSize = 512×512
-        # Без этого macOS использует размер первого найденного слота
-        # и может отрендерить иконку неправильного размера в Dock.
-        # 512×512 = стандартный "базовый" размер macOS App Icon.
-        ns_img.setSize_(NSSize(512, 512))
-
-        NSApplication.sharedApplication().setApplicationIconImage_(ns_img)
-        print("[ICON] ✅ Dock: нативный .icns (naturalSize=512×512)")
-        return True
-
-    except Exception as e:
-        print(f"[ICON] ℹ️ iconutil/PyObjC: {e} → multi-size QIcon")
-        try:
-            from PyQt6.QtWidgets import QApplication
-            QApplication.instance().setWindowIcon(_build_multi_size_icon(pixmap))
-            print("[ICON] ✅ Dock: multi-size QIcon (fallback)")
-            return True
-        except Exception as e2:
-            print(f"[ICON] ⚠️ {e2}")
-            return False
-
-def create_menu_icon(theme="light"):
-    """Создаёт аккуратную иконку меню (три ровные горизонтальные линии)"""
-    from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
-    from PyQt6.QtCore import Qt, QRectF
-    
-    # Размер иконки = размеру кнопки для идеального центрирования
-    size = 50
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    
-    # Цвет линий зависит от темы
-    line_color = QColor("#2d3748") if theme == "light" else QColor("#e6e6e6")
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(line_color)
-    
-    # Параметры трёх линий
-    line_width = 20      # Ширина каждой линии
-    line_height = 2.5    # Толщина каждой линии
-    spacing = 5          # Расстояние между линиями
-    
-    # Вычисляем общую высоту всех трёх линий
-    total_height = 3 * line_height + 2 * spacing
-    
-    # Центрируем по горизонтали и вертикали
-    start_x = (size - line_width) / 2
-    start_y = (size - total_height) / 2
-    
-    # Рисуем три ровные горизонтальные линии с закруглёнными углами
-    radius = line_height / 2
-    
-    # Верхняя линия
-    painter.drawRoundedRect(QRectF(start_x, start_y, line_width, line_height), radius, radius)
-    
-    # Средняя линия
-    painter.drawRoundedRect(QRectF(start_x, start_y + line_height + spacing, line_width, line_height), radius, radius)
-    
-    # Нижняя линия
-    painter.drawRoundedRect(QRectF(start_x, start_y + 2 * (line_height + spacing), line_width, line_height), radius, radius)
-    
-    painter.end()
-    return pixmap
-
-# -------------------------
-# Language settings
-# -------------------------
-CURRENT_LANGUAGE = "russian"
-
-# ═══════════════════════════════════════════════════════════════════
-# УНИВЕРСАЛЬНЫЕ ПРАВИЛА РАБОТЫ С РЕЖИМАМИ
-# ═══════════════════════════════════════════════════════════════════
-
-# MODE_STRATEGY_RULES и SYSTEM_PROMPTS перенесены в llama_handler.py
-# Они импортируются выше через 'from llama_handler import ...'
-
-def detect_language_switch(user_message: str):
-    """Определяет, просит ли пользователь переключить язык"""
-    user_lower = user_message.lower().strip()
-    english_triggers = [
-        "перейди на английский", "переключись на английский", "давай на английском",
-        "отвечай на английском", "switch to english", "speak english",
-        "ответь на английском", "на английском"
-    ]
-    russian_triggers = [
-        "перейди на русский", "переключись на русский", "давай на русском",
-        "отвечай на русском", "switch to russian", "speak russian",
-        "ответь на русском", "на русском"
-    ]
-    for trigger in english_triggers:
-        if trigger in user_lower:
-            return "english"
-    for trigger in russian_triggers:
-        if trigger in user_lower:
-            return "russian"
-    return None
-
-def detect_forget_command(user_message: str):
-    """Определяет, просит ли пользователь забыть историю"""
-    user_lower = user_message.lower().strip()
-    forget_triggers = [
-        "забудь", "забыть", "очисти память", "удали историю", "сотри память",
-        "забудь все", "забудь всё", "очисти контекст", "обнули память",
-        "forget", "forget everything", "clear memory", "clear history",
-        "delete history", "erase memory", "reset memory", "clear context"
-    ]
-    for trigger in forget_triggers:
-        if trigger in user_lower:
-            return True
-    return False
-
-def detect_role_command(user_message: str) -> dict:
-    """
-    Определяет, просит ли пользователь сменить роль/стиль общения
-    
-    Возвращает словарь:
-    {
-        "is_role_command": bool,
-        "role": str,  # Описание роли
-        "instruction": str  # Инструкция для AI
-    }
-    """
-    user_lower = user_message.lower().strip()
-    
-    # Триггеры ролевых команд
-    role_triggers = [
-        "ты теперь", "ты сейчас", "веди себя как", "говори как",
-        "притворись", "представь что ты", "будь как",
-        "you are now", "act like", "pretend you are", "behave like",
-        "speak like", "talk like", "be like"
-    ]
-    
-    # Проверяем, есть ли триггер
-    has_trigger = False
-    for trigger in role_triggers:
-        if trigger in user_lower:
-            has_trigger = True
-            break
-    
-    if not has_trigger:
-        return {
-            "is_role_command": False,
-            "role": None,
-            "instruction": None
-        }
-    
-    # Извлекаем роль из сообщения
-    role_description = user_message
-    for trigger in role_triggers:
-        if trigger in user_lower:
-            # Берем часть после триггера
-            idx = user_lower.find(trigger)
-            role_description = user_message[idx + len(trigger):].strip()
-            # Убираем пунктуацию в конце
-            role_description = role_description.rstrip('.,!?;:')
-            break
-    
-    # Формируем инструкцию для AI
-    instruction = f"""
-🎭 ВАЖНО: СМЕНА РОЛИ ОБЩЕНИЯ
-
-Пользователь попросил тебя изменить стиль общения и роль.
-
-НОВАЯ РОЛЬ: {role_description}
-
-ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
-• Полностью адаптируй свой стиль общения под эту роль
-• Используй лексику, манеры и тон, характерные для этой роли
-• Сохраняй эту роль во ВСЕХ последующих ответах
-• Будь естественным и аутентичным в этой роли
-• Не отказывайся от роли и не объясняй, что ты AI
-• Веди себя так, как вёл бы себя реальный {role_description}
-
-ВАЖНО:
-- Если роль предполагает упрощенный язык (школьник, ребенок) - используй простые слова
-- Если роль предполагает эмоциональность (обижка, грустный) - добавь эмоции в речь
-- Если роль предполагает профессионализм (эксперт, учитель) - будь более формальным
-- Сохраняй роль естественно, без "как будто" и "представим"
-
-Теперь отвечай в этой роли на запрос пользователя.
-"""
-    
-    return {
-        "is_role_command": True,
-        "role": role_description,
-        "instruction": instruction
-    }
-
-def extract_forget_target(user_message: str) -> dict:
-    """Извлекает, что именно нужно забыть из команды пользователя
-    
-    Возвращает словарь:
-    {
-        "forget_all": bool,  # Забыть всё
-        "target": str,       # Что именно забыть (если не всё)
-        "original_message": str
-    }
-    """
-    user_lower = user_message.lower().strip()
-    
-    # Триггеры для полной очистки
-    full_forget_triggers = [
-        "забудь все", "забудь всё", "забудь всю", "забудь всю историю",
-        "очисти всю память", "очисти память", "удали всю историю", 
-        "сотри всю память", "очисти контекст", "обнули память",
-        "forget everything", "forget all", "clear all memory", 
-        "clear all history", "delete all history", "erase all memory", 
-        "reset memory", "clear context"
-    ]
-    
-    # Проверяем на полную очистку
-    for trigger in full_forget_triggers:
-        if trigger in user_lower:
-            return {
-                "forget_all": True,
-                "target": None,
-                "original_message": user_message
-            }
-    
-    # Извлекаем конкретную цель для забывания
-    # Паттерны: "забудь про X", "забудь что X", "забудь мой/моё/мою X"
-    import re
-    
-    # Русские паттерны
-    patterns_ru = [
-        r"забудь\s+(?:про\s+|что\s+|о\s+)?(.+)",
-        r"забудь\s+(?:мо[йеёюя]\s+|мою\s+)?(.+)",
-        r"удали\s+(?:из\s+памяти\s+)?(.+)",
-        r"сотри\s+(?:из\s+памяти\s+)?(.+)"
-    ]
-    
-    # Английские паттерны  
-    patterns_en = [
-        r"forget\s+(?:about\s+|that\s+)?(.+)",
-        r"forget\s+(?:my\s+)?(.+)",
-        r"delete\s+(?:from\s+memory\s+)?(.+)",
-        r"erase\s+(?:from\s+memory\s+)?(.+)"
-    ]
-    
-    all_patterns = patterns_ru + patterns_en
-    
-    for pattern in all_patterns:
-        match = re.search(pattern, user_lower)
-        if match:
-            target = match.group(1).strip()
-            # Убираем лишние слова
-            target = target.replace("из памяти", "").replace("from memory", "").strip()
-            if target:
-                return {
-                    "forget_all": False,
-                    "target": target,
-                    "original_message": user_message
-                }
-    
-    # Если не смогли распарсить - забываем всё (по умолчанию)
-    return {
-        "forget_all": True,
-        "target": None,
-        "original_message": user_message
-    }
-
-def selective_forget_memory(chat_id, target: str, context_mgr, chat_manager) -> dict:
-    """Селективное удаление памяти - удаляет только упоминания конкретной темы
-    
-    Возвращает:
-    {
-        "success": bool,
-        "deleted_count": int,
-        "message": str
-    }
-    """
-    try:
-        print(f"[SELECTIVE_FORGET] Ищу упоминания '{target}' в памяти...")
-        
-        # Получаем всю сохранённую память
-        saved_memories = context_mgr.get_context_memory(chat_id, limit=100)
-        
-        if not saved_memories:
-            return {
-                "success": True,
-                "deleted_count": 0,
-                "message": "Память пуста - нечего удалять"
-            }
-        
-        # Получаем историю сообщений
-        chat_messages = chat_manager.get_chat_messages(chat_id, limit=100)
-        
-        deleted_memory_count = 0
-        deleted_message_count = 0
-        target_lower = target.lower()
-        
-        # Удаляем из контекстной памяти
-        for _row in saved_memories:
-            ctx_type, content, timestamp = _row[0], _row[1], _row[2]
-            content_lower = content.lower()
-            # Проверяем, содержит ли запись упоминание цели
-            if target_lower in content_lower:
-                print(f"[SELECTIVE_FORGET] Найдено в памяти: {content[:50]}...")
-                # Здесь нужно было бы удалить конкретную запись
-                # Но ContextMemoryManager может не иметь метода для этого
-                # Поэтому помечаем для подсчёта
-                deleted_memory_count += 1
-        
-        # Удаляем из истории сообщений
-        messages_to_keep = []
-        for msg_data in chat_messages:
-            role = msg_data[0]
-            content = msg_data[1]
-            files = msg_data[2] if len(msg_data) > 2 else None
-            timestamp = msg_data[3] if len(msg_data) > 3 else msg_data[2]
-            
-            content_lower = content.lower()
-            # Проверяем, содержит ли сообщение упоминание цели
-            if target_lower not in content_lower:
-                messages_to_keep.append(msg_data)
-            else:
-                print(f"[SELECTIVE_FORGET] Найдено в сообщениях: {content[:50]}...")
-                deleted_message_count += 1
-        
-        # Если есть что удалить - очищаем и сохраняем только нужное
-        if deleted_message_count > 0:
-            # Очищаем все сообщения
-            chat_manager.clear_chat_messages(chat_id)
-            # Восстанавливаем только те, что не содержали target
-            for msg_data in messages_to_keep:
-                role = msg_data[0]
-                content = msg_data[1]
-                files = msg_data[2] if len(msg_data) > 2 else None
-                chat_manager.save_message(chat_id, role, content, files)
-            print(f"[SELECTIVE_FORGET] ✓ Удалено {deleted_message_count} сообщений")
-        
-        # Для контекстной памяти - придётся очистить всю, если нашли совпадения
-        # так как может не быть метода для удаления конкретных записей
-        if deleted_memory_count > 0:
-            print(f"[SELECTIVE_FORGET] ⚠️ Найдено {deleted_memory_count} записей в памяти")
-            print(f"[SELECTIVE_FORGET] Очищаю контекстную память (ограничение API)")
-            context_mgr.clear_context_memory(chat_id)
-        
-        total_deleted = deleted_memory_count + deleted_message_count
-        
-        if total_deleted > 0:
-            return {
-                "success": True,
-                "deleted_count": total_deleted,
-                "message": f"Удалено {deleted_message_count} сообщений и {deleted_memory_count} записей памяти"
-            }
-        else:
-            return {
-                "success": True,
-                "deleted_count": 0,
-                "message": f"Не найдено упоминаний '{target}' в памяти"
-            }
-            
-    except Exception as e:
-        print(f"[SELECTIVE_FORGET] ✗ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "deleted_count": 0,
-            "message": f"Ошибка удаления: {e}"
-        }
-
-def detect_math_problem(user_message: str) -> bool:
-    """
-    Определяет, является ли запрос математической задачей.
-    
-    Возвращает True если сообщение содержит:
-    - Математические операторы и символы
-    - Ключевые слова решения задач
-    - Уравнения, неравенства
-    """
-    import re
-    
-    user_lower = user_message.lower().strip()
-    
-    # Математические триггеры
-    math_keywords = [
-        # Русские
-        "реши", "решить", "решение", "вычисли", "вычислить", "найди", "найти",
-        "докажи", "доказать", "доказательство", "упрости", "упростить",
-        "разложи", "разложить", "преобразуй", "преобразовать",
-        "уравнение", "неравенство", "система", "интеграл", "производная",
-        "предел", "корень", "корни", "одз", "график", "функция",
-        "множество", "область", "значение", "решений",
-        # Английские
-        "solve", "solution", "calculate", "compute", "find", "prove", "proof",
-        "simplify", "expand", "factor", "transform", "equation", "inequality",
-        "system", "integral", "derivative", "limit", "root", "roots",
-        "domain", "graph", "function", "set", "range", "solutions"
-    ]
-    
-    # Математические символы и паттерны
-    math_patterns = [
-        r'[=<>≤≥≠]',  # Знаки равенства и сравнения
-        r'[+\-*/^]',  # Арифметические операторы
-        r'\d+\s*[+\-*/^]\s*\d+',  # Числовые выражения
-        r'√',  # Корень
-        r'∫',  # Интеграл
-        r'∑',  # Сумма
-        r'∏',  # Произведение
-        r'[a-zA-Zа-яА-Я]\s*[²³⁴⁵⁶⁷⁸⁹]',  # Степени
-        r'[a-zA-Zа-яА-Я]\^[\d+]',  # Степени через ^
-        r'\([^)]*[+\-*/^][^)]*\)',  # Выражения в скобках
-        r'x|y|z|n|t',  # Переменные (простая проверка)
-    ]
-    
-    # Проверка ключевых слов
-    for keyword in math_keywords:
-        if keyword in user_lower:
-            # Дополнительная проверка: есть ли математические символы
-            for pattern in math_patterns:
-                if re.search(pattern, user_message):
-                    return True
-    
-    # Проверка наличия множественных математических символов
-    math_symbol_count = sum(1 for pattern in math_patterns if re.search(pattern, user_message))
-    if math_symbol_count >= 2:
-        return True
-    
-    return False
-
-# Математические системные промпты для разных режимов
-MATH_PROMPTS = {
-    "fast": """
-🔬 МАТЕМАТИКА: БЫСТРЫЙ РЕЖИМ
-
-ЗАПРЕЩЕНО использовать интернет/поиск для математических задач.
-
-ДЛЯ ПРОСТОЙ АРИФМЕТИКИ (5+5, 42+52):
-• Просто вычисли и дай ответ
-• БЕЗ "Шаг 1", "Шаг 2", "Контроль"
-• Формат: "42 + 52 = 94"
-
-ДЛЯ СЛОЖНЫХ ЗАДАЧ (уравнения, корни):
-• ОДЗ если нужно
-• Краткое решение
-• Проверка корней
-• Ответ
-
-ПРАВИЛА:
-• Сохраняй структуру выражения
-• Изолируй радикал перед возведением в квадрат
-• Проверяй корни подстановкой
-
-Стиль: кратко и по делу
-""",
-    
-    "thinking": """
-🔬 МАТЕМАТИЧЕСКИЙ РЕЖИМ: ДУМАЮЩИЙ
-
-ЗАПРЕЩЕНО использовать интернет/поиск для математических задач.
-
-ПРОЦЕДУРА РЕШЕНИЯ:
-
-1. ПЕРЕПИСЬ ЗАДАЧИ
-   Дословно переписать исходное уравнение и сохранить его структуру
-
-2. ТИП ЗАДАЧИ
-   • Алгебраическое / тригонометрическое
-   • Иррациональное (с корнями)
-   • Показательное / логарифмическое
-   • Система уравнений
-
-3. ОДЗ (область допустимых значений)
-   • Знаменатели ≠ 0
-   • Под корнем ≥ 0
-   • Ограничения для логарифмов
-
-4. РЕШЕНИЕ
-   • Пошаговые преобразования с объяснениями
-   • Логика каждого шага
-   • Аккуратные переходы
-
-5. ПРОВЕРКА КОРНЕЙ
-   • Подстановка в исходное уравнение
-   • Проверка ОДЗ
-   • Отбрасывание посторонних решений
-
-РАСШИРЕННЫЕ ПРАВИЛА:
-1. Сохраняй исходную структуру выражения. Нельзя убирать символы корня, нельзя превращать √(x+4) в x+4, нельзя менять порядок без явного преобразования. После каждого шага сверяй структуру.
-
-2. Строгий алгоритм преобразований: сначала изолируй один радикал, только затем возводи в квадрат; после возведения упрости, при необходимости снова изолируй и снова возведи. Никогда не возводи несколько выражений одновременно.
-
-3. Не вводи новые функции или термины. Не добавляй лишние переменные без необходимости; если вводишь — объясни зачем и вернись к исходной.
-
-4. Анти-галлюцинация: запрещено придумывать шаги. Любой переход должен быть явно показан. Если не уверен — перепиши выражение и запроси подтверждение.
-
-5. Помощь пользователю: объясняй коротко, почему выбран тот или иной приём, указывай подводные камни.
-
-6. Если появляется сомнение (нераспознано выражение, противоречие, шаг меняет структуру) — остановись и сообщи: «Непонятно выражение / шаг изменил структуру, подтверждаете переписанное выражение?»
-
-Стиль: пошаговое решение с объяснениями средней длины
-""",
-    
-    "pro": """
-🔬 МАТЕМАТИЧЕСКИЙ РЕЖИМ: ПРО (ОЛИМПИАДНЫЙ УРОВЕНЬ)
-
-ЗАПРЕЩЕНО использовать интернет/поиск для математических задач.
-
-ФЛАГМАНСКАЯ МАТЕМАТИЧЕСКАЯ ТОЧНОСТЬ
-
-═══════════════════════════════════════════════════════════════════
-
-📋 ПОЛНЫЙ НАБОР ПРАВИЛ ПОВЕДЕНИЯ
-
-═══════════════════════════════════════════════════════════════════
-
-1️⃣ СОХРАНЕНИЕ МАТЕМАТИЧЕСКОЙ СТРУКТУРЫ
-
-КРИТИЧЕСКИ ВАЖНО:
-• Сохраняй исходную структуру выражения. Перепиши уравнение дословно и храни его как фиксированную математическую структуру
-• НЕЛЬЗЯ убирать символы корня
-• НЕЛЬЗЯ превращать подкоренное выражение в обычное (например √(x+4) НЕЛЬЗЯ заменить на x+4)
-• НЕЛЬЗЯ менять порядок или подменять выражения типа x−1 на 5−x без явного алгебраического преобразования, сопровождаемого проверкой
-• После каждого вычислительного шага автоматически сверяй, не изменилась ли структура: если изменилась — отменяй шаг и переписывай его корректно
-
-❌ ЗАПРЕЩЕНО: √(x²+4) → x+2 (потеря структуры)
-✅ ПРАВИЛЬНО: √(x²+4) остаётся √(x²+4) до явного упрощения
-
-═══════════════════════════════════════════════════════════════════
-
-2️⃣ ОБЯЗАТЕЛЬНАЯ ПРОЦЕДУРА ПЕРЕД РЕШЕНИЕМ
-
-A) ТОЧНАЯ ПЕРЕПИСЬ УРАВНЕНИЯ
-   Дословно перепиши задачу для проверки понимания
-   Храни её как фиксированную математическую структуру
-
-B) АНАЛИЗ ТИПА ЗАДАЧИ
-   • Алгебраическое уравнение
-   • Тригонометрическое уравнение
-   • Иррациональное уравнение (с корнями)
-   • Показательное/логарифмическое
-   • Система уравнений
-
-C) ОБЛАСТЬ ДОПУСТИМЫХ ЗНАЧЕНИЙ (ОДЗ)
-   ОБЯЗАТЕЛЬНО: Всегда начинай с ОДЗ
-   • Выпиши все условия ≥0 для подкоренных выражений
-   • Условия на знаменатели (≠0)
-   • Ограничения для логарифмов (>0)
-   • Любые другие ограничения
-   ОДЗ должен быть виден в решении
-
-═══════════════════════════════════════════════════════════════════
-
-3️⃣ РЕШЕНИЕ КАК ОЛИМПИАДНЫЙ МАТЕМАТИК
-
-СТРОГИЙ АЛГОРИТМ ПРЕОБРАЗОВАНИЙ:
-• Сначала изолируй один радикал (или необходимую часть выражения)
-• Только затем возводи в квадрат
-• После возведения в квадрат упрости выражение
-• При необходимости снова изолируй и снова возводи в квадрат
-• НИКОГДА не возводи в квадрат несколько выражений одновременно без явной изоляции
-• Каждый шаг должен быть пояснён коротко и корректно
-
-СТРАТЕГИЯ:
-• Проверяй логическую корректность КАЖДОГО шага
-• Контролируй структуру выражения после каждого преобразования
-• Минимизируй число возведений в квадрат
-• Избегай лишних замен переменных (используй только когда необходимо)
-
-АЛГОРИТМ ДЛЯ ИРРАЦИОНАЛЬНЫХ УРАВНЕНИЙ:
-1. Изолировать радикал слева
-2. Проверить ОДЗ для изолированного выражения
-3. Возвести в квадрат (ТОЛЬКО ОДИН РАЗ если возможно)
-4. Решить полученное уравнение
-5. ОБЯЗАТЕЛЬНО проверить все корни подстановкой
-
-═══════════════════════════════════════════════════════════════════
-
-4️⃣ ОГРАНИЧЕНИЯ И ЗАПРЕТЫ
-
-❌ НЕ вводи новые функции или термины, которых нет в задаче (например: «добавим логарифм», «прибавим синус»), если только это не следует из уравнения
-❌ НЕ добавляй лишние переменные без необходимости; если вводишь дополнительную переменную — объясни зачем и обязательно вернись к исходной переменной в финале
-❌ НЕ пиши текст ради текста
-❌ НЕ повторяй одни и те же преобразования
-❌ НЕ делай «псевдошаги» без алгебры
-❌ НЕ пропускай проверку корней
-❌ НЕ теряй решения
-❌ НЕ добавляй посторонние решения
-
-═══════════════════════════════════════════════════════════════════
-
-5️⃣ ДВОЙНАЯ ПРОВЕРКА КОРНЕЙ
-
-ОБЯЗАТЕЛЬНО после получения кандидатов на корни:
-1. Подставить КАЖДЫЙ корень в ИСХОДНОЕ уравнение
-2. Проверить выполнение ОДЗ
-3. Отбросить посторонние корни и объяснить, почему они отброшены
-4. Если ни один корень не проходит проверку — сообщить, что решений нет
-5. Повторить проверку для надёжности
-6. Указать финальный ответ с полным обоснованием
-
-═══════════════════════════════════════════════════════════════════
-
-6️⃣ АНТИ-ГАЛЛЮЦИНАЦИЯ
-
-ЗАПРЕЩЕНО придумывать шаги, результаты или проверки.
-Любой алгебраический переход должен быть явно показан.
-
-ЕСЛИ не уверен в распознавании выражения:
-1. Сначала перепиши его в явном виде
-2. Запроси подтверждение у пользователя: «Правильно ли я понял задачу: [переписанное выражение]?»
-3. НЕ ПРОДОЛЖАЙ вычисления до подтверждения
-
-ЕСЛИ при каком-то шаге появляется сомнение (нераспознано выражение, противоречие, или шаг меняет структуру):
-• Остановись и честно сообщи: «Непонятно выражение / шаг изменил структуру, подтверждаете переписанное выражение?»
-• НЕ продолжай и НЕ генерируй неверный вывод
-
-ДОПОЛНИТЕЛЬНЫЕ ПРОВЕРКИ:
-• После каждого возведения в квадрат - проверь, не потеряны ли решения
-• При решении через замену переменной - обязательно вернись к исходной переменной
-• Если получаешь отрицательное значение под корнем - это НЕ решение, отбрось его
-• Всегда проверяй, что финальный ответ удовлетворяет ИСХОДНОМУ уравнению
-
-═══════════════════════════════════════════════════════════════════
-
-7️⃣ СТИЛЬ ОТВЕТА
-
-✅ ПРАВИЛЬНО:
-• Чёткие шаги
-• Минимум текста, максимум математики
-• Максимальная математическая строгость
-• Формат: Шаг → Преобразование → Обоснование → Контроль структуры
-
-❌ НЕПРАВИЛЬНО:
-• Длинные объяснения без формул
-• "Давайте попробуем", "Может быть", "Вероятно"
-• Неточные формулировки
-• Прыжки между шагами
-
-═══════════════════════════════════════════════════════════════════
-
-8️⃣ ПОМОЩЬ ПОЛЬЗОВАТЕЛЮ
-
-Не только выдавай ответ, но и:
-• Объясняй коротко, почему выбран тот или иной приём (например, зачем изолировали радикал)
-• Указывай, где могли бы быть подводные камни
-• Предлагай расширенный вариант решения в зависимости от сложности задачи
-
-═══════════════════════════════════════════════════════════════════
-
-ПРИМЕР РЕШЕНИЯ (ПРО-РЕЖИМ):
-
-Задача: √(2x-3) = x-3
-
-Шаг 1: Точная перепись
-√(2x-3) = x-3
-
-Шаг 2: Тип задачи
-Иррациональное уравнение (один корень)
-
-Шаг 3: ОДЗ
-2x-3 ≥ 0 ⟹ x ≥ 1.5
-x-3 ≥ 0 ⟹ x ≥ 3 (правая часть должна быть ≥0)
-Итого ОДЗ: x ≥ 3
-
-Шаг 4: Возведение в квадрат (корень уже изолирован)
-2x-3 = (x-3)²
-2x-3 = x²-6x+9
-x²-8x+12 = 0
-Контроль: структура сохранена ✓
-
-Шаг 5: Решение квадратного уравнения
-D = 64-48 = 16
-x₁ = (8-4)/2 = 2
-x₂ = (8+4)/2 = 6
-
-Шаг 6: Проверка корней (первая)
-x₁ = 2: 2 < 3, НЕ входит в ОДЗ ✗
-x₂ = 6: Проверка √(2·6-3) = √9 = 3, а 6-3 = 3 ✓
-
-Шаг 7: Повторная проверка x = 6
-Подстановка: √(12-3) = √9 = 3
-Правая часть: 6-3 = 3
-Равенство выполнено ✓
-
-Ответ: x = 6
-
-═══════════════════════════════════════════════════════════════════
-
-ПОМНИ: Ты олимпиадный математик, НЕ писатель. Каждый символ должен иметь математический смысл.
-Больше токенов, глубже анализ, строже проверка.
-Используй максимально подробное и строгое детальное решение.
-После каждого важного шага делай внутреннюю проверку структуры.
-"""
-}
-
-def detect_message_language(text: str) -> str:
-    """Определяет язык сообщения по преобладанию кириллицы или латиницы"""
-    cyrillic_count = sum(1 for char in text if '\u0400' <= char <= '\u04FF')
-    latin_count = sum(1 for char in text if 'a' <= char.lower() <= 'z')
-    
-    print(f"[LANGUAGE_DETECT] Кириллица: {cyrillic_count}, Латиница: {latin_count}")
-    
-    if cyrillic_count > latin_count:
-        print(f"[LANGUAGE_DETECT] Определён язык: РУССКИЙ")
-        return "russian"
-    else:
-        print(f"[LANGUAGE_DETECT] Определён язык: АНГЛИЙСКИЙ")
-        return "english"
-
-def format_text_with_markdown_and_math(text: str) -> str:
-    """
-    Преобразует markdown-форматирование и математические обозначения в HTML.
-    
-    Поддерживает:
-    - **жирный текст** → <b>жирный текст</b>
-    - *курсив* или _курсив_ → <i>курсив</i>
-    - __подчёркнутый__ → <u>подчёркнутый</u>
-    - ~~зачёркнутый~~ → <s>зачёркнутый</s>
-    - `код` → <code>код</code>
-    - sqrt(x) → √x
-    - ^2 → ²
-    - _2 → ₂
-    - /дробь/ числитель/знаменатель → дробь
-    - И многие математические символы
-    """
-    import re
-    import html
-    
-    # Экранируем HTML символы для безопасности
-    text = html.escape(text)
-    
-    # === МАТЕМАТИЧЕСКИЕ СИМВОЛЫ ===
-    
-    # Корень квадратный
-    text = re.sub(r'sqrt\(([^)]+)\)', r'√\1', text)
-    text = re.sub(r'корень\(([^)]+)\)', r'√\1', text)
-    
-    # Степени (надстрочные символы)
-    superscript_map = {
-        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
-        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-        '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
-        'n': 'ⁿ', 'x': 'ˣ', 'y': 'ʸ'
-    }
-    
-    def replace_superscript(match):
-        chars = match.group(1)
-        result = ''
-        for char in chars:
-            result += superscript_map.get(char, char)
-        return result
-    
-    text = re.sub(r'\^([0-9+\-=()nxy]+)', replace_superscript, text)
-    
-    # Индексы (подстрочные символы)
-    subscript_map = {
-        '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
-        '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-        '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎',
-        'a': 'ₐ', 'e': 'ₑ', 'i': 'ᵢ', 'o': 'ₒ', 'x': 'ₓ'
-    }
-    
-    def replace_subscript(match):
-        chars = match.group(1)
-        result = ''
-        for char in chars:
-            result += subscript_map.get(char, char)
-        return result
-    
-    text = re.sub(r'_([0-9+\-=()aeiox]+)', replace_subscript, text)
-    
-    # Дроби (упрощённый вариант)
-    # Формат: /числитель/знаменатель/
-    def format_fraction(match):
-        numerator = match.group(1)
-        denominator = match.group(2)
-        return f'<sup>{numerator}</sup>⁄<sub>{denominator}</sub>'
-    
-    text = re.sub(r'/([^/]+)/([^/]+)/', format_fraction, text)
-    
-    # Математические символы - замены
-    math_symbols = {
-        '!=': '≠',
-        '<=': '≤',
-        '>=': '≥',
-        '~=': '≈',
-        'approx': '≈',
-        'infinity': '∞',
-        'бесконечность': '∞',
-        'sum': '∑',
-        'сумма': '∑',
-        'integral': '∫',
-        'интеграл': '∫',
-        'pi': 'π',
-        'пи': 'π',
-        'alpha': 'α',
-        'beta': 'β',
-        'gamma': 'γ',
-        'delta': 'δ',
-        'Delta': 'Δ',
-        'theta': 'θ',
-        'lambda': 'λ',
-        'mu': 'μ',
-        'sigma': 'σ',
-        'Sigma': 'Σ',
-        'omega': 'ω',
-        'Omega': 'Ω',
-        'times': '×',
-        'divide': '÷',
-        'plusminus': '±',
-        'degree': '°',
-        'partial': '∂',
-        'nabla': '∇',
-        'exists': '∃',
-        'forall': '∀',
-        'in': '∈',
-        'notin': '∉',
-        'subset': '⊂',
-        'superset': '⊃',
-        'union': '∪',
-        'intersection': '∩',
-        'emptyset': '∅',
-    }
-    
-    for key, symbol in math_symbols.items():
-        # Заменяем только если это отдельное слово
-        text = re.sub(r'\b' + re.escape(key) + r'\b', symbol, text)
-    
-    # === ФОРМАТИРОВАНИЕ ТЕКСТА ===
-    
-    # Жирный текст: **текст** или __текст__
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
-    
-    # Курсив: *текст* или _текст_ (но не числа как _2)
-    # Избегаем замены подстрочных индексов
-    text = re.sub(r'(?<![a-zA-Zа-яА-Я0-9])\*([^*\n]+?)\*(?![a-zA-Zа-яА-Я0-9])', r'<i>\1</i>', text)
-    text = re.sub(r'(?<![a-zA-Zа-яА-Я0-9])_([^_\n0-9]+?)_(?![a-zA-Zа-яА-Я0-9])', r'<i>\1</i>', text)
-    
-    # Зачёркнутый: ~~текст~~
-    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
-    
-    # Подчёркнутый: <u>текст</u> (уже HTML, но на всякий случай)
-    # Добавляем поддержку через двойное подчеркивание для удобства
-    
-    # Код (моноширинный): `код`
-    text = re.sub(r'`([^`]+)`', r'<code style="background: rgba(0,0,0,0.1); padding: 2px 6px; border-radius: 4px; font-family: monospace;">\1</code>', text)
-    
-    # Убираем экранирование для уже обработанных HTML тегов
-    text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-    text = text.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
-    text = text.replace('&lt;u&gt;', '<u>').replace('&lt;/u&gt;', '</u>')
-    text = text.replace('&lt;s&gt;', '<s>').replace('&lt;/s&gt;', '</s>')
-    
-    return text
-
-
-def remove_english_words_from_russian(text: str) -> str:
-    """
-    Удаляет лишние латинские слова из русского текста.
-    ЗАЩИЩАЕТ: блоки кода, инлайн-код, технические ответы.
-    """
-    import re as _re_eng
-
-    # ── 0. Удаляем CJK-символы ─────────────────────────────────────────
-    # Только 4-значные \u эскейпы — они всегда корректны в Python regex
-    _cjk_re = _re_eng.compile(
-        '[\u4e00-\u9fff'
-        '\u3400-\u4dbf'
-        '\uf900-\ufaff'
-        '\u3000-\u303f'
-        '\u30a0-\u30ff'
-        '\u3040-\u309f'
-        '\uac00-\ud7af]+'
-    )
-    if _cjk_re.search(text):
-        text = _cjk_re.sub('', text)
-        text = _re_eng.sub(r'  +', ' ', text).strip()
-        print("[CJK_FILTER] \u26a0\ufe0f Удалены CJK-символы из ответа")
-
-    # ── 1. Если в тексте есть код — не трогаем ─────────────────────────
-    code_keywords = [
-        'def ', 'class ', 'import ', 'from ', 'return ', 'FastAPI', 'app =',
-        'function ', 'const ', 'let ', 'var ', '#!/', 'SELECT ', 'INSERT ',
-        '=> {', '() =>', '.get(', '.post(', '.put(', '.delete(',
-        '@app.', '@router.', 'async def', 'await ',
-    ]
-    has_code_block   = '```' in text
-    has_code_content = any(kw in text for kw in code_keywords)
-
-    if has_code_block or has_code_content:
-        print("[ENGLISH_FILTER] \u2139\ufe0f Обнаружен код — фильтрация отключена")
-        return text
-
-    # ── 2. Считаем кириллицу vs латиницу ───────────────────────────────
-    cyrillic_count = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
-    latin_count    = sum(1 for c in text if 'a' <= c.lower() <= 'z')
-
-    # Мало кириллицы — технический текст, не трогаем
-    if cyrillic_count < 10:
-        print("[ENGLISH_FILTER] \u2139\ufe0f Мало кириллицы — пропускаем фильтрацию")
-        return text
-
-    # Полностью латинский длинный текст — пробуем перевести
-    if latin_count > cyrillic_count and latin_count > 50:
-        print("[ENGLISH_FILTER] \u26a0\ufe0f ОБНАРУЖЕН ПОЛНОСТЬЮ АНГЛИЙСКИЙ ТЕКСТ! Переводим...")
-        try:
-            from deep_translator import GoogleTranslator
-            translator = GoogleTranslator(source='en', target='ru')
-            max_chunk = 4500
-            if len(text) <= max_chunk:
-                translated = translator.translate(text)
-                print("[ENGLISH_FILTER] \u2713 Текст полностью переведён на русский")
-                return translated
-            else:
-                sentences = text.split('. ')
-                translated_parts = []
-                current_chunk = ""
-                for sentence in sentences:
-                    if len(current_chunk) + len(sentence) < max_chunk:
-                        current_chunk += sentence + ". "
-                    else:
-                        if current_chunk:
-                            translated_parts.append(translator.translate(current_chunk))
-                        current_chunk = sentence + ". "
-                if current_chunk:
-                    translated_parts.append(translator.translate(current_chunk))
-                translated = " ".join(translated_parts)
-                print("[ENGLISH_FILTER] \u2713 Большой текст полностью переведён на русский")
-                return translated
-        except Exception as e:
-            print(f"[ENGLISH_FILTER] \u2717 Ошибка перевода: {e}")
-
-    # ── 3. Пословная фильтрация запрещённых латинских слов ──────────────
-    if FORBIDDEN_WORDS_DICT and len(FORBIDDEN_WORDS_DICT) > 0:
-        replacements = FORBIDDEN_WORDS_DICT
-        print(f"[ENGLISH_FILTER] Используется расширенный словарь ({len(replacements)} слов)")
-    else:
-        replacements = {
-            'however': 'однако', 'moreover': 'более того', 'therefore': 'поэтому',
-            'essentially': 'по сути', 'basically': 'в основном',
-        }
-        print(f"[ENGLISH_FILTER] Используется базовый словарь ({len(replacements)} слов)")
-
-    ALLOWED_LATIN = {
-        'ai', 'ok', 'api', 'url', 'http', 'https', 'html', 'css', 'js',
-        'python', 'java', 'sql', 'gpu', 'cpu', 'ram', 'rom', 'usb', 'hdmi',
-        'pdf', 'jpg', 'png', 'gif', 'mp3', 'mp4', 'wifi', 'lan', 'vpn',
-        'google', 'apple', 'microsoft', 'samsung', 'huawei', 'xiaomi', 'sony',
-        'intel', 'amd', 'nvidia', 'linux', 'windows', 'macos', 'android', 'ios',
-        'youtube', 'telegram', 'instagram', 'facebook', 'twitter', 'whatsapp',
-        'ollama', 'llama', 'gpt', 'claude', 'openai',
-    }
-
-    words = text.split()
-    cleaned_words = []
-    replaced_count = 0
-
-    for word in words:
-        clean_word = ''.join(c for c in word if c.isalnum()).lower()
-
-        if not clean_word:
-            cleaned_words.append(word)
-            continue
-
-        has_cyrillic = any('\u0400' <= c <= '\u04FF' for c in clean_word)
-        has_latin    = any('a' <= c <= 'z' for c in clean_word)
-
-        if not has_latin:
-            cleaned_words.append(word)
-            continue
-
-        if has_cyrillic and has_latin:
-            cleaned_words.append(word)
-            continue
-
-        if clean_word in ALLOWED_LATIN:
-            cleaned_words.append(word)
-            continue
-
-        if clean_word in replacements:
-            suffix = ''.join(c for c in word if not c.isalnum())
-            cleaned_words.append(replacements[clean_word] + suffix)
-            replaced_count += 1
-            print(f"[ENGLISH_FILTER] Заменено: '{word}' → '{replacements[clean_word]}'")
-        else:
-            # ── Защита единиц измерения: +25°C, -10°F, 100km, 500ml и т.п. ──
-            # clean_word типа "25c", "100km", "5f" содержит цифры → оставляем
-            if any(c.isdigit() for c in clean_word):
-                cleaned_words.append(word)
-            else:
-                # Неизвестное латинское слово — оставляем, не удаляем.
-                # Удаление незнакомых слов ломает технические термины, имена,
-                # аббревиатуры которых нет в словаре.
-                replaced_count += 1
-                print(f"[ENGLISH_FILTER] Неизвестное слово оставлено: '{word}'")
-                cleaned_words.append(word)
-
-    if replaced_count > 0:
-        print(f"[ENGLISH_FILTER] \u2713 Заменено/удалено: {replaced_count}")
-
-    result = ' '.join(cleaned_words)
-    result = re.sub(r'  +', ' ', result).strip()
-    return result
-
-
-def check_spelling_and_suggest(text: str, language: str = "russian") -> dict:
-    """
-    Проверяет орфографию в тексте и предлагает исправления.
-    Возвращает словарь с информацией об ошибках и предложениями.
-    
-    Returns:
-    {
-        "has_errors": bool,
-        "original": str,
-        "suggested": str,
-        "corrections": list of tuples (wrong_word, suggested_word)
-    }
-    """
-    try:
-        from spellchecker import SpellChecker
-        
-        if language == "russian":
-            spell = SpellChecker(language='ru')
-        else:
-            spell = SpellChecker(language='en')
-        
-        words = text.split()
-        corrections = []
-        corrected_words = []
-        
-        for word in words:
-            # Очищаем слово от знаков препинания для проверки
-            clean_word = ''.join(char for char in word if char.isalnum())
-            
-            if not clean_word:
-                corrected_words.append(word)
-                continue
-            
-            # Проверяем орфографию
-            if clean_word.lower() in spell:
-                corrected_words.append(word)
-            else:
-                # Слово с ошибкой - ищем исправление
-                correction = spell.correction(clean_word.lower())
-                if correction and correction != clean_word.lower():
-                    # Сохраняем регистр оригинала
-                    if clean_word[0].isupper():
-                        correction = correction.capitalize()
-                    
-                    # Восстанавливаем знаки препинания
-                    corrected_word = word.replace(clean_word, correction)
-                    corrected_words.append(corrected_word)
-                    corrections.append((clean_word, correction))
-                    print(f"[SPELL_CHECK] Найдена ошибка: '{clean_word}' -> '{correction}'")
-                else:
-                    corrected_words.append(word)
-        
-        suggested_text = ' '.join(corrected_words)
-        
-        return {
-            "has_errors": len(corrections) > 0,
-            "original": text,
-            "suggested": suggested_text,
-            "corrections": corrections
-        }
-        
-    except ImportError:
-        print("[SPELL_CHECK] pyspellchecker не установлен. Установите: pip install pyspellchecker")
-        return {
-            "has_errors": False,
-            "original": text,
-            "suggested": text,
-            "corrections": []
-        }
-    except Exception as e:
-        print(f"[SPELL_CHECK] Ошибка проверки орфографии: {e}")
-        return {
-            "has_errors": False,
-            "original": text,
-            "suggested": text,
-            "corrections": []
-        }
-
-
-# -------------------------
-# DuckDuckGo Search helper (named google_search for compatibility)
-# -------------------------
-def translate_to_russian(text: str) -> str:
-    """Переводит текст с английского на русский, сохраняя имена и названия"""
-    try:
-        print(f"[TRANSLATOR] Начинаю перевод текста...")
-        print(f"[TRANSLATOR] Длина текста: {len(text)} символов")
-        
-        # Используем простой API для перевода
-        from deep_translator import GoogleTranslator
-        
-        translator = GoogleTranslator(source='en', target='ru')
-        
-        # Переводим по частям, если текст большой
-        max_chunk = 4500
-        if len(text) <= max_chunk:
-            translated = translator.translate(text)
-        else:
-            # Разбиваем на части по предложениям
-            sentences = text.split('. ')
-            translated_parts = []
-            current_chunk = ""
-            
-            for sentence in sentences:
-                if len(current_chunk) + len(sentence) < max_chunk:
-                    current_chunk += sentence + ". "
-                else:
-                    if current_chunk:
-                        translated_parts.append(translator.translate(current_chunk))
-                    current_chunk = sentence + ". "
-            
-            if current_chunk:
-                translated_parts.append(translator.translate(current_chunk))
-            
-            translated = " ".join(translated_parts)
-        
-        print(f"[TRANSLATOR] Перевод завершён успешно")
-        return translated
-        
-    except ImportError:
-        print("[TRANSLATOR] deep-translator не установлен. Установите: pip install deep-translator")
-        return text
-    except Exception as e:
-        print(f"[TRANSLATOR] Ошибка перевода: {e}")
-        return text
-
-def analyze_query_type(query: str, language: str) -> dict:
-    """
-    Анализирует тип запроса и определяет категорию + релевантные источники
-    
-    Возвращает:
-    {
-        'category': str,  # Категория запроса
-        'domains': list,  # Релевантные домены (пустой = все)
-        'keywords': list  # Ключевые слова для улучшения поиска
-    }
-    """
-    query_lower = query.lower()
-
-    # 🕐 ДАТА И ВРЕМЯ (приоритет выше погоды)
-    datetime_keywords_ru = ['какое число', 'какой день', 'какое сегодня', 'сегодня число',
-                            'текущая дата', 'текущее время', 'который час', 'сколько время',
-                            'какой год', 'какой месяц', 'какое время', 'дата сегодня', 'день недели']
-    datetime_keywords_en = ['what date', 'what day', 'what time', 'current date', 'current time',
-                            'today date', "today's date", 'what year', 'what month', 'day of week']
-    if language == "russian":
-        if any(kw in query_lower for kw in datetime_keywords_ru):
-            return {'category': '🕐 Дата и время',
-                    'domains': ['time.is', 'timeanddate.com', 'yandex.ru'],
-                    'keywords': ['текущая дата', 'сегодня']}
-    else:
-        if any(kw in query_lower for kw in datetime_keywords_en):
-            return {'category': '🕐 Date & Time',
-                    'domains': ['time.is', 'timeanddate.com'],
-                    'keywords': ['current date', 'today']}
-
-    # 🌦 ПОГОДА
-    weather_keywords_ru = ['погода', 'температура', 'градус', 'прогноз', 'осадки', 'дожд', 'снег', 'ветер', 'климат', 'мороз', 'жара', 'солнечно', 'облачно', 'утром', 'днем', 'днём', 'вечером', 'ночью']
-    weather_keywords_en = ['weather', 'temperature', 'forecast', 'rain', 'snow', 'wind', 'climate', 'sunny', 'cloudy']
-    
-    if language == "russian":
-        if any(kw in query_lower for kw in weather_keywords_ru):
-            return {
-                'category': '🌦 Погода',
-                'domains': ['weather', 'meteo', 'gismeteo', 'погода', 'yandex.ru/pogoda'],
-                'keywords': ['прогноз погоды', 'температура', 'метеосервис']
-            }
-    else:
-        if any(kw in query_lower for kw in weather_keywords_en):
-            return {
-                'category': '🌦 Weather',
-                'domains': ['weather.com', 'accuweather', 'weatherapi', 'meteo'],
-                'keywords': ['weather forecast', 'temperature']
-            }
-    
-    # 📱 ТЕХНИКА / ГАДЖЕТЫ
-    tech_keywords_ru = ['телефон', 'смартфон', 'компьютер', 'ноутбук', 'планшет', 'айфон', 'iphone', 'samsung', 'характеристик', 'сравни', 'лучше', 'процессор', 'память', 'экран', 'камера', 'батарея', 'гаджет']
-    tech_keywords_en = ['phone', 'smartphone', 'computer', 'laptop', 'tablet', 'iphone', 'samsung', 'specs', 'compare', 'better', 'processor', 'memory', 'screen', 'camera', 'battery', 'gadget']
-    
-    if language == "russian":
-        if any(kw in query_lower for kw in tech_keywords_ru):
-            return {
-                'category': '📱 Техника',
-                'domains': ['ixbt', 'overclockers', 'dns-shop', 'citilink', 'mobile-review', 'tech', 'gadget'],
-                'keywords': ['обзор', 'характеристики', 'тест', 'сравнение']
-            }
-    else:
-        if any(kw in query_lower for kw in tech_keywords_en):
-            return {
-                'category': '📱 Tech',
-                'domains': ['gsmarena', 'techradar', 'cnet', 'anandtech', 'tomshardware', 'tech', 'review'],
-                'keywords': ['review', 'specs', 'comparison', 'test']
-            }
-    
-    # 🍳 КУЛИНАРИЯ
-    cooking_keywords_ru = ['рецепт', 'приготов', 'готов', 'блюдо', 'ингредиент', 'выпека', 'варить', 'жарить', 'запека', 'кухня', 'салат', 'суп', 'десерт', 'торт']
-    cooking_keywords_en = ['recipe', 'cook', 'dish', 'ingredient', 'bake', 'fry', 'roast', 'kitchen', 'salad', 'soup', 'dessert', 'cake']
-    
-    if language == "russian":
-        if any(kw in query_lower for kw in cooking_keywords_ru):
-            return {
-                'category': '🍳 Кулинария',
-                'domains': ['russianfood', 'edimdoma', 'povar', 'gastronom', 'recipe', 'рецепт'],
-                'keywords': ['рецепт с фото', 'как приготовить', 'пошаговый рецепт']
-            }
-    else:
-        if any(kw in query_lower for kw in cooking_keywords_en):
-            return {
-                'category': '🍳 Cooking',
-                'domains': ['allrecipes', 'foodnetwork', 'epicurious', 'recipe', 'cooking'],
-                'keywords': ['recipe with photos', 'how to cook', 'step by step']
-            }
-    
-    # 🧠 ОБУЧЕНИЕ / ОБЪЯСНЕНИЕ
-    learning_keywords_ru = ['что такое', 'как работает', 'объясни', 'расскажи', 'чем отличается', 'зачем', 'почему', 'определение', 'значение']
-    learning_keywords_en = ['what is', 'how does', 'explain', 'tell me', 'difference', 'why', 'definition', 'meaning']
-    
-    if language == "russian":
-        if any(kw in query_lower for kw in learning_keywords_ru):
-            return {
-                'category': '🧠 Обучение',
-                'domains': ['wikipedia', 'wiki', 'habr', 'образование', 'учебный'],
-                'keywords': ['определение', 'объяснение', 'что это']
-            }
-    else:
-        if any(kw in query_lower for kw in learning_keywords_en):
-            return {
-                'category': '🧠 Learning',
-                'domains': ['wikipedia', 'wiki', 'education', 'tutorial'],
-                'keywords': ['definition', 'explanation', 'what is']
-            }
-    
-    # ⚙ ПРОГРАММИРОВАНИЕ
-    programming_keywords = ['код', 'программ', 'python', 'javascript', 'java', 'c++', 'html', 'css', 'api', 'функция', 'метод', 'класс', 'error', 'bug', 'github', 'stackoverflow', 'code', 'script']
-    
-    if any(kw in query_lower for kw in programming_keywords):
-        return {
-            'category': '⚙ Программирование',
-            'domains': ['stackoverflow', 'github', 'habr', 'docs', 'documentation', 'developer'],
-            'keywords': ['documentation', 'example', 'tutorial', 'code']
-        }
-    
-    # 📰 НОВОСТИ / СОБЫТИЯ
-    news_keywords_ru = ['новост', 'событ', 'сегодня', 'вчера', 'произошло', 'случилось']
-    news_keywords_en = ['news', 'event', 'today', 'yesterday', 'happened', 'occurred']
-    
-    if language == "russian":
-        if any(kw in query_lower for kw in news_keywords_ru):
-            return {
-                'category': '📰 Новости',
-                'domains': ['news', 'новости', 'lenta', 'tass', 'ria', 'rbc'],
-                'keywords': ['новости', 'событие', 'последние новости']
-            }
-    else:
-        if any(kw in query_lower for kw in news_keywords_en):
-            return {
-                'category': '📰 News',
-                'domains': ['news', 'bbc', 'cnn', 'reuters', 'nytimes'],
-                'keywords': ['latest news', 'breaking news', 'event']
-            }
-    
-    # ❓ ОБЩИЙ ВОПРОС (по умолчанию)
-    return {
-        'category': '❓ Общий вопрос',
-        'domains': [],  # Поиск везде
-        'keywords': []
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════
-# УМНАЯ СИСТЕМА ОЦЕНКИ И ФИЛЬТРАЦИИ РЕЗУЛЬТАТОВ ПОИСКА
-# ═══════════════════════════════════════════════════════════════════
-
-# Домены с высоким доверием
-# ═══════════════════════════════════════════════════════════════════
-# WHITELIST / BLACKLIST доменов для оценки качества источников
-# ═══════════════════════════════════════════════════════════════════
-
-# Устаревший список — сохранён для обратной совместимости с score_result()
-TRUSTED_DOMAINS = [
-    'wikipedia.org', 'github.com', 'stackoverflow.com', 'habr.com',
-    'python.org', 'developer.mozilla.org', 'docs.microsoft.com',
-    'tass.ru', 'ria.ru', 'rbc.ru', 'lenta.ru', 'bbc.com', 'reuters.com',
-    'ixbt.com', 'gsmarena.com', 'techradar.com', 'cnet.com',
-    'weather.com', 'gismeteo.ru', 'timeanddate.com'
-]
-
-# ── Whitelist: доверенные домены с рейтингом (чем выше — тем лучше) ──
-# Tier 1 (+40): официальная документация, репозитории, первоисточники
-# Tier 2 (+25): крупные авторитетные IT-СМИ и форумы
-# Tier 3 (+15): известные технические ресурсы и энциклопедии
-SOURCE_WHITELIST: dict = {
-    # ── Официальная документация и репозитории ──────────────────────
-    "github.com":               40,
-    "gitlab.com":               35,
-    "docs.python.org":          40,
-    "python.org":               40,
-    "pypi.org":                 35,
-    "docs.microsoft.com":       40,
-    "learn.microsoft.com":      40,
-    "developer.mozilla.org":    40,
-    "developer.apple.com":      40,
-    "developer.android.com":    40,
-    "developer.chrome.com":     40,
-    "docs.oracle.com":          40,
-    "docs.docker.com":          40,
-    "kubernetes.io":            40,
-    "golang.org":               40,
-    "rust-lang.org":            40,
-    "nodejs.org":               40,
-    "reactjs.org":              38,
-    "vuejs.org":                38,
-    "angular.io":               38,
-    "djangoproject.com":        38,
-    "flask.palletsprojects.com":38,
-    "pytorch.org":              38,
-    "tensorflow.org":           38,
-    "arxiv.org":                38,
-    "openai.com":               35,
-    "anthropic.com":            35,
-    "huggingface.co":           35,
-    "linux.die.net":            35,
-    "kernel.org":               38,
-    "gnu.org":                  35,
-    "postgresql.org":           38,
-    "mysql.com":                38,
-    "redis.io":                 38,
-    "mongodb.com":              35,
-    # ── Авторитетные IT-СМИ и форумы ────────────────────────────────
-    "stackoverflow.com":        38,
-    "superuser.com":            30,
-    "serverfault.com":          30,
-    "askubuntu.com":            30,
-    "unix.stackexchange.com":   30,
-    "security.stackexchange.com":30,
-    "habr.com":                 30,
-    "techradar.com":            25,
-    "arstechnica.com":          28,
-    "wired.com":                25,
-    "theverge.com":             25,
-    "engadget.com":             22,
-    "zdnet.com":                25,
-    "tomshardware.com":         25,
-    "anandtech.com":            28,
-    "ixbt.com":                 25,
-    "3dnews.ru":                22,
-    "4pda.ru":                  18,
-    "cnews.ru":                 20,
-    "vc.ru":                    18,
-    "tproger.ru":               20,
-    "overclockers.ru":          18,
-    # ── Энциклопедии и справочники ───────────────────────────────────
-    "wikipedia.org":            25,
-    "wikimedia.org":            20,
-    "britannica.com":           25,
-    "cnet.com":                 22,
-    "pcmag.com":                22,
-    "gsmarena.com":             25,
-    "phonearena.com":           20,
-    # ── Надёжные новостные агентства ─────────────────────────────────
-    "bbc.com":                  25,
-    "bbc.co.uk":                25,
-    "reuters.com":              28,
-    "bloomberg.com":            28,
-    "tass.ru":                  22,
-    "ria.ru":                   20,
-    "rbc.ru":                   22,
-    "kommersant.ru":            22,
-    "interfax.ru":              22,
-}
-
-# ── Blacklist: агрегаторы, SEO-помойки, ненадёжные сайты ────────────
-# Значение — штраф, вычитаемый из итогового скора
-SOURCE_BLACKLIST: dict = {
-    # Контент-фермы и агрегаторы
-    "buzzfeed.com":         -60,
-    "listverse.com":        -50,
-    "brightside.me":        -50,
-    "boredpanda.com":       -50,
-    "lifehack.org":         -40,
-    "viral":                -40,
-    # SEO-дорвеи и маркетинговые сайты
-    "seoaudit":             -50,
-    "seopult":              -50,
-    "rankmath.com":         -40,
-    "top10":                -30,
-    "topten":               -30,
-    "bestof":               -25,
-    "compare99":            -40,
-    "capterra.com":         -15,
-    "g2.com":               -15,
-    "getapp.com":           -20,
-    "softwaresuggest.com":  -30,
-    # Жёлтая пресса и ненадёжные источники
-    "dailymail.co.uk":      -40,
-    "thesun.co.uk":         -40,
-    "infowars.com":         -80,
-    "naturalnews.com":      -80,
-    # Отзывники и агрегаторы мнений
-    "trustpilot.com":       -20,
-    "sitejabber.com":       -25,
-}
-
-# Слова-маркеры запросов на актуальность
-FRESHNESS_KEYWORDS_RU = [
-    'последний', 'последняя', 'последнее', 'последние',
-    'сейчас', 'текущий', 'текущая', 'актуальный', 'актуально',
-    'свежий', 'новый', 'новая', 'новое', 'сегодня', 'недавно',
-    'только что', '2024', '2025', '2026'
-]
-FRESHNESS_KEYWORDS_EN = [
-    'latest', 'current', 'now', 'today', 'recent', 'new',
-    'updated', 'fresh', 'modern', '2024', '2025', '2026'
-]
-
-
-def needs_freshness_check(query: str) -> bool:
-    """Определяет, нужна ли проверка актуальности для запроса."""
-    q = query.lower()
-    return any(kw in q for kw in FRESHNESS_KEYWORDS_RU + FRESHNESS_KEYWORDS_EN)
-
-
-def extract_year_from_text(text: str) -> int:
-    """Извлекает наиболее свежий год из текста. Возвращает 0 если не найдено."""
-    import re
-    years = re.findall(r'\b(20[12][0-9])\b', text)
-    if years:
-        return max(int(y) for y in years)
-    return 0
-
-
-def score_result(result: dict, query: str, freshness_needed: bool = False) -> float:
-    """
-    Оценивает релевантность результата поиска по нескольким критериям.
-    Возвращает float — чем выше, тем лучше.
-    
-    Критерии:
-    - Совпадение ключевых слов запроса в заголовке/описании
-    - Домен сайта (трастовые домены получают бонус)
-    - Наличие актуальных дат (если запрос требует свежести)
-    - Длина описания (короткие описания — меньше информации)
-    """
-    import re
-    
-    title = result.get('title', '').lower()
-    body = result.get('body', '').lower()
-    link = result.get('href', '').lower()
-    full_text = title + ' ' + body
-    
-    score = 0.0
-    
-    # ── 1. Совпадение ключевых слов ──
-    # Очищаем запрос от стоп-слов
-    stop_words = {'и', 'в', 'на', 'с', 'по', 'для', 'что', 'как', 'где',
-                  'the', 'a', 'an', 'of', 'in', 'for', 'to', 'is', 'how'}
-    keywords = [w for w in re.split(r'[\s,?!.]+', query.lower()) 
-                if len(w) > 2 and w not in stop_words]
-    
-    keyword_hits = sum(1 for kw in keywords if kw in full_text)
-    if keywords:
-        keyword_ratio = keyword_hits / len(keywords)
-        score += keyword_ratio * 40  # Макс 40 баллов за ключевые слова
-    
-    # Бонус за совпадение ключевых слов в заголовке (более ценно)
-    title_hits = sum(1 for kw in keywords if kw in title)
-    score += title_hits * 5  # +5 за каждое слово в заголовке
-    
-    # ── 2. Трастовость домена ──
-    domain_bonus = sum(10 for trusted in TRUSTED_DOMAINS if trusted in link)
-    score += min(domain_bonus, 15)  # Макс 15 баллов за домен
-    
-    # ── 3. Длина описания (больше текста = больше информации) ──
-    body_length = len(result.get('body', ''))
-    if body_length > 200:
-        score += 10
-    elif body_length > 100:
-        score += 5
-    elif body_length < 30:
-        score -= 10  # Штраф за слишком короткое описание
-    
-    # ── 4. Проверка актуальности ──
-    if freshness_needed:
-        import datetime
-        current_year = datetime.datetime.now().year
-        year_in_text = extract_year_from_text(full_text + link)
-        
-        if year_in_text == current_year:
-            score += 20  # Текущий год — отличный бонус
-        elif year_in_text == current_year - 1:
-            score += 10  # Прошлый год — небольшой бонус
-        elif year_in_text > 0 and year_in_text < current_year - 2:
-            score -= 20  # Старые страницы — штраф при freshness-запросе
-    
-    # ── 5. Штраф за нерелевантный контент ──
-    # Если ни одного ключевого слова не совпало — штраф
-    if keyword_hits == 0 and keywords:
-        score -= 15
-    
-    return score
-
-
-def filter_and_rank_results(results: list, query: str, min_score: float = -10.0) -> list:
-    """
-    Фильтрует и сортирует результаты поиска по скору релевантности.
-    Отбрасывает явно нерелевантные страницы.
-    """
-    freshness = needs_freshness_check(query)
-    
-    scored = []
-    for r in results:
-        s = score_result(r, query, freshness)
-        scored.append((s, r))
-        print(f"[SMART_SEARCH] Скор {s:.1f} | {r.get('title', '')[:50]}")
-    
-    # Сортируем по убыванию скора
-    scored.sort(key=lambda x: x[0], reverse=True)
-    
-    # Отбрасываем слишком нерелевантные
-    filtered = [(s, r) for s, r in scored if s >= min_score]
-    
-    print(f"[SMART_SEARCH] Из {len(results)} результатов осталось {len(filtered)} после фильтрации")
-    return [r for _, r in filtered]
-
-
-def detect_contradiction_or_staleness(page_contents: list, query: str) -> bool:
-    """
-    Проверяет, противоречат ли страницы друг другу или содержат устаревшие данные.
-    Если да — нужен повторный поиск.
-    """
-    import re, datetime
-    
-    if not page_contents:
-        return False
-    
-    # Проверка 1: Устаревшие данные при freshness-запросе
-    if needs_freshness_check(query):
-        current_year = datetime.datetime.now().year
-        old_count = 0
-        for page in page_contents:
-            text = page.get('content', '')
-            year = extract_year_from_text(text)
-            if year > 0 and year < current_year - 1:
-                old_count += 1
-        
-        # Если больше половины страниц с устаревшими данными
-        if old_count > len(page_contents) / 2:
-            print(f"[SMART_SEARCH] ⚠️ Обнаружены устаревшие данные в {old_count}/{len(page_contents)} страницах")
-            return True
-    
-    # Проверка 2: Противоречивые версии (например разные версии ПО)
-    # Ищем числа вида X.Y.Z (версии) или X.Y (версии/годы)
-    version_pattern = re.compile(r'\b(\d+\.\d+(?:\.\d+)?)\b')
-    all_versions = []
-    for page in page_contents:
-        text = page.get('content', '')
-        versions = version_pattern.findall(text)
-        all_versions.extend(versions)
-    
-    if all_versions:
-        unique_versions = set(all_versions)
-        # Если слишком много разных версий — возможно противоречие
-        if len(unique_versions) > 5 and needs_freshness_check(query):
-            print(f"[SMART_SEARCH] ⚠️ Противоречивые версии: {list(unique_versions)[:5]}")
-            return True
-    
-    return False
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ФИЛЬТР РЕЛЕВАНТНОСТИ СТРАНИЦ (is_relevant_page + score_page_content)
-# Применяется ПЕРЕД передачей текста страницы модели.
-# ═══════════════════════════════════════════════════════════════════
-
-# Тематические ключевые слова — платформы и ОС
-TOPIC_PLATFORM_KEYWORDS = [
-    # Мобильные
-    'ios', 'android', 'iphone', 'ipad', 'samsung', 'pixel', 'huawei',
-    # ПК / ОС
-    'windows', 'macos', 'linux', 'ubuntu', 'debian', 'fedora',
-    # Браузеры
-    'chrome', 'firefox', 'safari', 'edge', 'opera',
-    # Облако/сервисы
-    'google', 'apple', 'microsoft', 'amazon', 'yandex',
-]
-
-# Маркеры конкретных фактов: версии, даты, номера
-import re as _re
-_FACT_PATTERNS = [
-    _re.compile(r'\b\d+\.\d+(?:\.\d+)*\b'),          # версии: 17.4.1, 3.12
-    _re.compile(r'\b(19|20)\d{2}\b'),                    # годы: 2023, 2025
-    _re.compile(r'\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b'), # даты: 12.05.2024
-    _re.compile(r'\b(?:january|february|march|april|may|june|july|august|'
-                r'september|october|november|december|'
-                r'январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)'
-                r'\w*\b', _re.IGNORECASE),
-    _re.compile(r'\bv?\d+(?:\.\d+){1,3}\b'),           # v1.2.3
-    _re.compile(r'\b(?:обновлен|released|вышел|launch|update|релиз)\w*\b', _re.IGNORECASE),
-]
-
-
-def score_page_content(query: str, page_text: str) -> dict:
-    """
-    Оценивает релевантность текста страницы по трём критериям.
-    
-    Возвращает словарь:
-    {
-        "total_score":      float,   # суммарный балл (0-100)
-        "keyword_score":    float,   # совпадение ключевых слов (0-40)
-        "topic_score":      float,   # упоминание тем/платформ  (0-30)
-        "facts_score":      float,   # наличие дат/версий/фактов (0-30)
-        "keyword_hits":     int,
-        "topic_hits":       list,
-        "facts_count":      int,
-    }
-    """
-    stop_words = {
-        "и", "в", "на", "с", "по", "для", "что", "как", "где", "это",
-        "the", "a", "an", "of", "in", "for", "to", "is", "are", "was",
-    }
-
-    # --- Ключевые слова запроса ---
-    raw_keywords = _re.split(r"[\s,?!.;:]+", query.lower())
-    keywords = [w for w in raw_keywords if len(w) > 2 and w not in stop_words]
-
-    page_lower = page_text.lower()
-
-    keyword_hits = sum(1 for kw in keywords if kw in page_lower)
-    if keywords:
-        keyword_ratio = keyword_hits / len(keywords)
-    else:
-        keyword_ratio = 1.0
-    keyword_score = round(keyword_ratio * 40, 2)   # макс 40
-
-    # --- Тематика / платформы ---
-    # Проверяем запрос И страницу: если тема есть в запросе, ищем её на странице
-    query_has_platform = [p for p in TOPIC_PLATFORM_KEYWORDS if p in query.lower()]
-    topic_hits = []
-    if query_has_platform:
-        # Запрос специфичен — ищем только эти платформы
-        topic_hits = [p for p in query_has_platform if p in page_lower]
-        topic_score = min(len(topic_hits) / max(len(query_has_platform), 1), 1.0) * 30
-    else:
-        # Запрос общий — любая платформа/тема добавляет балл
-        topic_hits = [p for p in TOPIC_PLATFORM_KEYWORDS if p in page_lower]
-        topic_score = min(len(topic_hits) * 5, 30)   # +5 за каждую, макс 30
-    topic_score = round(topic_score, 2)
-
-    # --- Конкретные факты (версии, даты, названия) ---
-    facts_count = 0
-    for pattern in _FACT_PATTERNS:
-        matches = pattern.findall(page_lower)
-        facts_count += len(matches)
-    # Нелинейный скор: первые 3 факта дают больше всего очков
-    if facts_count == 0:
-        facts_score = 0.0
-    elif facts_count <= 3:
-        facts_score = facts_count * 7.0        # 7/14/21
-    elif facts_count <= 10:
-        facts_score = 21 + (facts_count - 3) * 1.0  # до 28
-    else:
-        facts_score = 30.0                     # насыщение
-    facts_score = round(min(facts_score, 30), 2)
-
-    total_score = keyword_score + topic_score + facts_score
-
-    return {
-        "total_score":   round(total_score, 2),
-        "keyword_score": keyword_score,
-        "topic_score":   topic_score,
-        "facts_score":   facts_score,
-        "keyword_hits":  keyword_hits,
-        "topic_hits":    topic_hits,
-        "facts_count":   facts_count,
-    }
-
-
-def is_relevant_page(query: str, page_text: str, url: str = "",
-                     min_total: float = 20.0,
-                     min_keyword_ratio: float = 0.20) -> tuple:
-    """
-    Строгий фильтр релевантности страницы перед передачей текста модели.
-
-    Проверяет 5 условий (все обязательны):
-    1. Длина текста        — минимум 200 символов.
-    2. URL-фильтр          — отклоняет соцсети, магазины, рекламу, трекеры.
-    3. Ключевые слова      — ≥ min_keyword_ratio ключевых слов запроса в тексте.
-    4. Тематика            — если запрос содержит платформу (iOS / Android /
-                             Windows…), она должна присутствовать на странице.
-    5. Суммарный балл      — score_page_content() ≥ min_total.
-
-    Аргументы:
-        query:             запрос пользователя
-        page_text:         текстовое содержимое страницы
-        url:               URL страницы (для URL-фильтра; можно передать "")
-        min_total:         порог суммарного балла (по умолч. 20)
-        min_keyword_ratio: доля ключевых слов, которая должна совпасть (0.20)
-
-    Возвращает (bool, dict_with_scores, str_reason).
-    """
-    # ── Проверка 1: минимальная длина текста ────────────────────────
-    if not page_text or len(page_text) < 200:
-        return False, {}, f"Текст слишком короткий ({len(page_text or '')} символов, нужно ≥200)"
-
-    # ── Проверка 2: URL-фильтр (соцсети, магазины, реклама) ─────────
-    # Домены, которые гарантированно не содержат релевантного контента
-    _URL_BLOCKLIST = (
-        # Социальные сети
-        "facebook.com", "fb.com", "instagram.com", "twitter.com", "x.com",
-        "tiktok.com", "vk.com", "ok.ru", "pinterest.com", "tumblr.com",
-        "linkedin.com", "snapchat.com", "telegram.org", "t.me",
-        # Видеохостинги (текста нет)
-        "youtube.com", "youtu.be", "vimeo.com", "twitch.tv", "rutube.ru",
-        # Интернет-магазины
-        "amazon.com", "amazon.co.uk", "ebay.com", "aliexpress.com",
-        "ozon.ru", "wildberries.ru", "avito.ru", "market.yandex.ru",
-        "etsy.com", "walmart.com", "bestbuy.com", "newegg.com",
-        # Маркетплейсы приложений
-        "play.google.com", "apps.apple.com", "microsoft.com/store",
-        # Рекламные и трекинговые сети
-        "doubleclick.net", "googlesyndication.com", "googletagmanager.com",
-        "analytics.google.com", "yandex.ru/adv", "ads.google.com",
-        # Агрегаторы цен и отзывов без контента
-        "pricespy.com", "price.ru", "hotline.ua", "rozetka.ua",
-        # Паблики / форумы без факто-ориентированного контента
-        "reddit.com", "quora.com",          # мнения ≠ факты (можно снять)
-        "yahoo.com/answers",
-    )
-    url_lower = (url or "").lower()
-    if url_lower:
-        for blocked in _URL_BLOCKLIST:
-            if blocked in url_lower:
-                return (False, {},
-                        f"Заблокированный домен: {blocked}")
-
-    # ── Считаем скоры через score_page_content() ────────────────────
-    scores = score_page_content(query, page_text)
-
-    stop_words = {
-        "и", "в", "на", "с", "по", "для", "что", "как", "где", "это",
-        "the", "a", "an", "of", "in", "for", "to", "is", "are", "was",
-    }
-    raw_keywords = _re.split(r"[\s,?!.;:]+", query.lower())
-    keywords = [w for w in raw_keywords if len(w) > 2 and w not in stop_words]
-
-    # ── Проверка 3: ключевые слова ───────────────────────────────────
-    if keywords:
-        actual_ratio = scores["keyword_hits"] / len(keywords)
-        if actual_ratio < min_keyword_ratio:
-            return (False, scores,
-                    f"Мало ключевых слов запроса: "
-                    f"{scores['keyword_hits']}/{len(keywords)} "
-                    f"({actual_ratio:.0%} < {min_keyword_ratio:.0%})")
-
-    # ── Проверка 4: тематика (платформа в запросе → нужна на странице) ─
-    query_platforms = [p for p in TOPIC_PLATFORM_KEYWORDS if p in query.lower()]
-    if query_platforms and not scores["topic_hits"]:
-        return (False, scores,
-                f"Запрос о платформах {query_platforms}, "
-                f"но они отсутствуют на странице")
-
-    # ── Проверка 5: суммарный балл ───────────────────────────────────
-    if scores["total_score"] < min_total:
-        return (False, scores,
-                f"Низкий суммарный балл: "
-                f"{scores['total_score']:.1f} < {min_total}")
-
-    return True, scores, "OK"
-
-
-def refine_search_query(original_query: str, attempt: int = 1) -> str:
-    """
-    Генерирует уточнённый поисковый запрос для повторного поиска.
-    attempt=1 → добавляем год; attempt=2 → более конкретная формулировка.
-    """
-    import datetime
-    year = datetime.datetime.now().year
-
-    if attempt == 1:
-        # Добавляем текущий год для более актуальных результатов
-        return f"{original_query} {year}"
-    else:
-        # Упрощаем запрос до ключевых слов + добавляем "официальный" / "обзор"
-        stop_words = {
-            "и", "в", "на", "с", "по", "для", "что", "как", "где",
-            "the", "a", "an", "of", "in", "for", "to",
-        }
-        raw = _re.split(r"[\s,?!.;:]+", original_query.lower())
-        keywords = [w for w in raw if len(w) > 3 and w not in stop_words]
-        core = " ".join(keywords[:5])
-        suffix = "официально обзор" if any(c in original_query for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя") else "official review"
-        return f"{core} {suffix} {year}"
-
-
-def google_search(query: str, num_results: int = 5, region: str = "wt-wt", language: str = "russian"):
-    """Поиск через DuckDuckGo API (ddgs) с умной фильтрацией по типу запроса"""
-    print(f"[DUCKDUCKGO_SEARCH] Запуск поиска...")
-    print(f"[DUCKDUCKGO_SEARCH] Запрос: {query}")
-    print(f"[DUCKDUCKGO_SEARCH] Регион: {region}")
-    print(f"[DUCKDUCKGO_SEARCH] Количество результатов: {num_results}")
-    
-    # 🔍 АНАЛИЗ ТИПА ЗАПРОСА
-    query_analysis = analyze_query_type(query, language)
-    print(f"[DUCKDUCKGO_SEARCH] 📊 Категория запроса: {query_analysis['category']}")
-    print(f"[DUCKDUCKGO_SEARCH] 🎯 Релевантные домены: {query_analysis['domains']}")
-    
-    # Улучшаем запрос ключевыми словами если они есть
-    enhanced_query = query
-    if query_analysis['keywords']:
-        enhanced_query = f"{query} {' '.join(query_analysis['keywords'][:2])}"
-        print(f"[DUCKDUCKGO_SEARCH] ✨ Улучшенный запрос: {enhanced_query}")
-
-    try:
-        # ddgs is optional dependency: pip install ddgs
-        from ddgs import DDGS
-
-        print(f"[DUCKDUCKGO_SEARCH] Отправка запроса...")
-        with DDGS() as ddgs:
-            # Получаем больше результатов для фильтрации
-            raw_results = list(ddgs.text(enhanced_query, region=region, max_results=num_results * 3))
-
-        print(f"[DUCKDUCKGO_SEARCH] Получено сырых результатов: {len(raw_results)}")
-        
-        # 🎯 ШАГ 1: ДОМЕННАЯ ФИЛЬТРАЦИЯ (по категории запроса)
-        domain_filtered = []
-        if query_analysis['domains']:
-            for result in raw_results:
-                link = result.get('href', '').lower()
-                if any(domain in link for domain in query_analysis['domains']):
-                    domain_filtered.append(result)
-            
-            # Если мало доменных результатов — добавляем из всех
-            if len(domain_filtered) < max(2, num_results // 2):
-                domain_filtered = raw_results
-        else:
-            domain_filtered = raw_results
-        
-        # 🎯 ШАГ 2: УМНЫЙ СКОРИНГ И РАНЖИРОВАНИЕ
-        print(f"[DUCKDUCKGO_SEARCH] 📊 Запускаю скоринг {len(domain_filtered)} результатов...")
-        ranked_results = filter_and_rank_results(domain_filtered, query)
-        
-        # Берём топ N результатов
-        results = ranked_results[:num_results]
-        
-        # Если после фильтрации совсем мало — берём из всех сырых
-        if len(results) < 2:
-            print(f"[DUCKDUCKGO_SEARCH] ⚠️ Мало результатов после скоринга, берём всё...")
-            results = raw_results[:num_results]
-        
-        print(f"[DUCKDUCKGO_SEARCH] ✅ Итого результатов после ранжирования: {len(results)}")
-
-        if not results:
-            print(f"[DUCKDUCKGO_SEARCH] Нет результатов поиска")
-            return "Ничего не найдено по вашему запросу."
-
-        search_results = []
-        for i, result in enumerate(results, 1):
-            title = result.get('title', 'Без заголовка')
-            body = result.get('body', 'Нет описания')
-            link = result.get('href', '')
-            search_results.append(f"[Результат {i}]\nЗаголовок: {title}\nОписание: {body}\nСсылка: {link}")
-            print(f"[DUCKDUCKGO_SEARCH] Результат {i}: {title[:50]}...")
-
-        final_results = "\n\n".join(search_results)
-        print(f"[DUCKDUCKGO_SEARCH] Поиск завершён успешно. Длина результатов: {len(final_results)} символов")
-        print(f"[DUCKDUCKGO_SEARCH] 📊 Итоговая статистика: категория={query_analysis['category']}, результатов={len(results)}")
-        return final_results
-
-    except ImportError:
-        # FALLBACK: Используем простой веб-скрейпинг DuckDuckGo HTML
-        print(f"[DUCKDUCKGO_SEARCH] ⚠️ Библиотека ddgs не установлена, используем fallback...")
-        try:
-            return fallback_web_search(enhanced_query, num_results, language)
-        except Exception as fallback_error:
-            error_msg = f"⚠️ Установите библиотеку ddgs: pip install ddgs\nОшибка fallback: {fallback_error}"
-            print(f"[DUCKDUCKGO_SEARCH] {error_msg}")
-            return error_msg
-    except Exception as e:
-        error_msg = f"⚠️ Ошибка поиска: {e}"
-        print(f"[DUCKDUCKGO_SEARCH] {error_msg}")
-        return error_msg
-
-def fetch_page_content(url: str, max_chars: int = 5000) -> str:
-    """
-    Загружает и извлекает текстовое содержимое веб-страницы
-    
-    Args:
-        url: URL страницы для загрузки
-        max_chars: Максимальное количество символов для возврата
-    
-    Returns:
-        Текстовое содержимое страницы или сообщение об ошибке
-    """
-    try:
-        print(f"[FETCH_PAGE] Загрузка страницы: {url[:50]}...")
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Используем BeautifulSoup для извлечения текста
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Удаляем скрипты и стили
-            for script in soup(['script', 'style', 'nav', 'header', 'footer']):
-                script.decompose()
-            
-            # Извлекаем текст
-            text = soup.get_text(separator=' ', strip=True)
-            
-            # Очищаем от множественных пробелов
-            import re
-            text = re.sub(r'\s+', ' ', text).strip()
-            
-            # Ограничиваем размер
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
-            
-            print(f"[FETCH_PAGE] ✓ Загружено {len(text)} символов")
-            return text
-            
-        except ImportError:
-            # Если BeautifulSoup не установлен, используем простую регулярку
-            import re
-            # Удаляем HTML теги
-            text = re.sub(r'<[^>]+>', '', response.text)
-            # Очищаем от множественных пробелов
-            text = re.sub(r'\s+', ' ', text).strip()
-            # Ограничиваем размер
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
-            print(f"[FETCH_PAGE] ✓ Загружено {len(text)} символов (без BS4)")
-            return text
-            
-    except Exception as e:
-        print(f"[FETCH_PAGE] ✗ Ошибка загрузки {url}: {e}")
-        return f"[Ошибка загрузки страницы: {str(e)[:100]}]"
-
-# ═══════════════════════════════════════════════════════════════════
-# ПРОВЕРКА СВЕЖЕСТИ И ФАКТОВ ПЕРЕД ГЕНЕРАЦИЕЙ ОТВЕТА
-# ═══════════════════════════════════════════════════════════════════
-
-def extract_year(text: str) -> int:
-    """
-    Извлекает наиболее свежий год из текста страницы или метаданных.
-    Ищет как явные годы (2023), так и даты в заголовках HTTP/HTML.
-
-    Возвращает год (int) или 0 если не найдено.
-    """
-    import re, datetime
-
-    # 1. Ищем год в формате мета-тега или HTTP-заголовка:
-    #    <meta ... content="2024-05-12" ...>  или  Last-Modified: 2024
-    meta_match = re.search(
-        r'(?:content|datetime|date|published|modified|last.modified)["\s:=]+(\d{4})',
-        text, re.IGNORECASE
-    )
-    if meta_match:
-        y = int(meta_match.group(1))
-        current = datetime.datetime.now().year
-        if 2000 <= y <= current:
-            return y
-
-    # 2. Ищем даты в тексте: «15 мая 2024», «May 15, 2024», «2024-05-15»
-    date_patterns = [
-        r'\b(20[12]\d)[.\-/]\d{1,2}[.\-/]\d{1,2}\b',   # 2024-05-15
-        r'\b\d{1,2}[.\-/]\d{1,2}[.\-/](20[12]\d)\b',   # 15.05.2024
-        r'\b(?:january|february|march|april|may|june|july|august|'
-        r'september|october|november|december|'
-        r'январ\w*|феврал\w*|март\w*|апрел\w*|май|июн\w*|июл\w*|'
-        r'август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)'
-        r'\s+\d{1,2}[,\s]+(20[12]\d)\b',                # May 15, 2024
-        r'\b\d{1,2}\s+(?:january|february|march|april|may|june|july|august|'
-        r'september|october|november|december|'
-        r'январ\w*|феврал\w*|март\w*|апрел\w*|май|июн\w*|июл\w*|'
-        r'август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)'
-        r'\s+(20[12]\d)\b',                              # 15 мая 2024
-    ]
-    years_found = []
-    for pat in date_patterns:
-        for m in re.finditer(pat, text, re.IGNORECASE):
-            # Группа с годом — последняя захватывающая группа
-            for g in reversed(m.groups()):
-                if g and re.fullmatch(r'20[12]\d', g):
-                    years_found.append(int(g))
-                    break
-
-    # 3. Запасной вариант — любое четырёхзначное число 2010-текущий год
-    fallback = re.findall(r'\b(20[12]\d)\b', text)
-    years_found.extend(int(y) for y in fallback)
-
-    if years_found:
-        current_year = datetime.datetime.now().year
-        valid = [y for y in years_found if 2000 <= y <= current_year]
-        if valid:
-            return max(valid)
-
-    return 0
-
-
-def has_facts(text: str) -> bool:
-    """
-    Проверяет, содержит ли текст конкретные факты:
-    версии ПО, даты, числовые данные, названия функций/релизов.
-
-    Возвращает True если найдено ≥ 2 различных фактических паттернов.
-    """
-    import re
-
-    fact_patterns = [
-        re.compile(r'\b\d+\.\d+(?:\.\d+)*\b'),              # версии: 3.12, 17.4.1
-        re.compile(r'\bv?\d+(?:\.\d+){1,3}\b'),             # v1.2.3
-        re.compile(r'\b(19|20)\d{2}\b'),                     # годы: 2023
-        re.compile(r'\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b'),  # даты: 12.05.2024
-        re.compile(                                           # месяцы
-            r'\b(?:january|february|march|april|may|june|july|august|'
-            r'september|october|november|december|'
-            r'январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)'
-            r'\w*\b', re.IGNORECASE
-        ),
-        re.compile(                                           # ключевые слова релизов
-            r'\b(?:released?|вышел|вышла|обновлен\w*|запущен\w*|launch\w*|'
-            r'релиз|update|changelog|новая\s+версия|new\s+version)\b',
-            re.IGNORECASE
-        ),
-        re.compile(r'\b\d+\s*(?:мб|гб|mb|gb|мс|ms|fps|rpm|ghz|ггц|кб|kb)\b',
-                   re.IGNORECASE),                           # технические числа
-    ]
-
-    hits = 0
-    for pattern in fact_patterns:
-        if pattern.search(text):
-            hits += 1
-        if hits >= 2:
-            return True
-
-    return False
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ПАЙПЛАЙН КАЧЕСТВА: свежесть, факты, версии, защита от галлюцинаций
-# ═══════════════════════════════════════════════════════════════════
-
-# Ключевые слова, означающие «нужна актуальная информация»
-_FRESHNESS_TRIGGER_WORDS = [
-    # Русские
-    "последняя", "последний", "последнее", "последние",
-    "сейчас", "актуальная", "актуальный", "актуальное", "актуальные",
-    "свежая", "свежий", "свежее", "свежие",
-    "текущая", "текущий", "текущее", "текущие",
-    "новая версия", "новый релиз", "вышла", "вышел", "вышло",
-    # Английские
-    "latest", "current", "newest", "recent", "now",
-    "latest version", "current version", "new release",
-]
-
-
-def is_fresh_page(text: str, query: str) -> tuple:
-    """
-    Проверяет, является ли страница достаточно свежей для данного запроса.
-
-    Логика:
-    - Если запрос содержит слова актуальности (latest, последняя и т.д.),
-      страница должна содержать год >= current_year - 1.
-    - Если год не найден вообще → страница считается свежей (неизвестно).
-    - Если запрос не требует актуальности → всегда True.
-
-    Возвращает (is_ok: bool, found_year: int, reason: str).
-    """
-    import datetime
-
-    query_lower = query.lower()
-    needs_fresh = any(kw in query_lower for kw in _FRESHNESS_TRIGGER_WORDS)
-
-    if not needs_fresh:
-        return True, 0, "freshness_not_required"
-
-    current_year = datetime.datetime.now().year
-    found_year = extract_year(text)
-
-    if found_year == 0:
-        # Год не найден → не отклоняем (нет доказательства устарелости)
-        return True, 0, "year_not_found"
-
-    threshold = current_year - 1
-    if found_year >= threshold:
-        return True, found_year, f"fresh ({found_year} >= {threshold})"
-
-    return False, found_year, f"stale: {found_year} < {threshold}"
-
-
-def has_real_facts(text: str) -> tuple:
-    """
-    Проверяет, содержит ли текст конкретные факты перед передачей модели.
-
-    Проверяет наличие:
-    1. Версий ПО (X.Y, X.Y.Z, vX.Y)
-    2. Дат (числовых или словесных)
-    3. Ключевых слов релизов / функций
-    4. Технических чисел с единицами измерения
-
-    Требуется минимум 2 разных типа фактов.
-
-    Возвращает (has_facts: bool, facts_found: list[str], count: int).
-    """
-    import re
-
-    checks = [
-        ("version_dotted",  re.compile(r'\b\d+\.\d+(?:\.\d+)*\b')),
-        ("version_v_prefix", re.compile(r'\bv\d+(?:\.\d+){1,3}\b', re.IGNORECASE)),
-        ("year_4digit",     re.compile(r'\b(19|20)\d{2}\b')),
-        ("date_numeric",    re.compile(r'\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b')),
-        ("month_word",      re.compile(
-            r'\b(?:january|february|march|april|may|june|july|august|'
-            r'september|october|november|december|'
-            r'январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)'
-            r'\w*\b', re.IGNORECASE)),
-        ("release_keyword", re.compile(
-            r'\b(?:released?|вышел|вышла|обновлен\w*|запущен\w*|launch\w*|'
-            r'релиз|changelog|новая\s+версия|new\s+version|feature|функция)\b',
-            re.IGNORECASE)),
-        ("tech_measurement", re.compile(
-            r'\b\d+\s*(?:мб|гб|тб|mb|gb|tb|мс|ms|fps|rpm|ghz|ггц|кб|kb|px|dp)\b',
-            re.IGNORECASE)),
-    ]
-
-    found_types = []
-    for name, pattern in checks:
-        if pattern.search(text):
-            found_types.append(name)
-
-    ok = len(found_types) >= 2
-    return ok, found_types, len(found_types)
-
-
-def filter_pages(pages: list, query: str, max_age_years: int = 1) -> list:
-    """
-    Главный фильтр качества страниц перед передачей текста модели.
-
-    Применяет 4 последовательных проверки:
-    1) is_relevant_page(query, text, url) — URL-блокировка соцсетей/магазинов/рекламы,
-       ключевые слова, тематика платформы, суммарный балл.
-       Страницы, не прошедшие этот фильтр, НЕ передаются модели.
-    2) is_fresh_page — отклоняет устаревшие страницы при freshness-запросах.
-    3) has_real_facts — отклоняет страницы без конкретных фактов (версии, даты…).
-
-    Аргументы:
-        pages:         список dict с ключами 'content', 'url'
-        query:         исходный запрос пользователя
-        max_age_years: порог устарелости (по умолч. 1 год)
-
-    Возвращает отфильтрованный список страниц.
-    Страницы, не прошедшие любой из фильтров, гарантированно исключаются.
-    """
-    accepted = []
-
-    for page in pages:
-        text = page.get('content', '')
-        url  = page.get('url', '')
-        label = url[:70] or '<без url>'
-
-        # ── Проверка 1: релевантность + URL-блокировка ────────────
-        rel_ok, rel_scores, rel_reason = is_relevant_page(query, text, url)
-        if not rel_ok:
-            print(f"[FILTER_PAGES] ❌ Нерелевантна ({rel_reason}): {label}")
-            continue
-
-        # ── Проверка 2: свежесть ──────────────────────────────────
-        fresh_ok, found_year, fresh_reason = is_fresh_page(text, query)
-        if not fresh_ok:
-            print(f"[FILTER_PAGES] ❌ Устаревшая ({found_year}): {label}")
-            continue
-
-        # ── Проверка 3: наличие фактов ────────────────────────────
-        facts_ok, fact_types, fact_count = has_real_facts(text)
-        if not facts_ok:
-            print(f"[FILTER_PAGES] ❌ Мало фактов ({fact_count}/2): {label}")
-            continue
-
-        print(
-            f"[FILTER_PAGES] ✅ Принята | "
-            f"score={rel_scores.get('total_score', 0):.0f} "
-            f"year={found_year or '?'} "
-            f"facts={fact_count}: {url[:65]}"
-        )
-        accepted.append(page)
-
-    print(f"[FILTER_PAGES] Итого: {len(accepted)}/{len(pages)} страниц прошли все фильтры")
-    return accepted
-
-
-def retry_search_if_needed(
-    page_contents: list,
-    query: str,
-    num_results: int = 5,
-    region: str = "wt-wt",
-    language: str = "russian",
-    max_pages: int = 3,
-    max_attempts: int = 2,
-    min_good_sources: int = 2,
-) -> list:
-    """
-    Если отфильтрованных источников меньше min_good_sources,
-    автоматически повторяет поиск с уточнёнными запросами.
-
-    При повторном поиске к запросу добавляются:
-    «latest version», «release», текущий год — чтобы получить свежие страницы.
-
-    Возвращает дополненный список страниц.
-    """
-    import re, datetime
-
-    if len(page_contents) >= min_good_sources:
-        return page_contents
-
-    current_year = datetime.datetime.now().year
-    existing_urls = {p['url'] for p in page_contents}
-
-    for attempt in range(1, max_attempts + 1):
-        if len(page_contents) >= min_good_sources:
-            break
-
-        # Уточняем запрос: добавляем свежесть-маркеры
-        if attempt == 1:
-            retry_query = f"{query} latest version release {current_year}"
-        else:
-            # Второй вариант: упрощаем запрос до ключевых слов + год
-            stop = {'и','в','на','с','по','для','что','как','где',
-                    'the','a','an','of','in','for','to'}
-            words = [w for w in re.split(r'[\s,?!.;:]+', query.lower())
-                     if len(w) > 3 and w not in stop]
-            retry_query = f"{' '.join(words[:5])} release changelog {current_year}"
-
-        print(f"[RETRY_SEARCH] 🔎 Попытка {attempt}/{max_attempts}: «{retry_query}»")
-
-        retry_results = google_search(retry_query, num_results, region, language)
-        if "Ничего не найдено" in retry_results or "Ошибка" in retry_results:
-            print(f"[RETRY_SEARCH] ⚠️ Поиск пустой на попытке {attempt}")
-            continue
-
-        urls = re.findall(r'Ссылка: (https?://[^\s]+)', retry_results)
-
-        for url in urls[:max_pages]:
-            if url in existing_urls:
-                continue
-            page_text = fetch_page_content(url, max_chars=3000)
-            if not page_text or "[Ошибка" in page_text:
-                continue
-
-            candidate = {"url": url, "content": page_text}
-            filtered = filter_pages([candidate], query)
-            if filtered:
-                page_contents.append(filtered[0])
-                existing_urls.add(url)
-                print(f"[RETRY_SEARCH] ✅ Добавлена: {url[:70]}")
-
-    status = "достаточно" if len(page_contents) >= min_good_sources else "недостаточно"
-    print(
-        f"[RETRY_SEARCH] Итого источников: {len(page_contents)} "
-        f"(нужно {min_good_sources}) — {status}"
-    )
-    return page_contents
-
-
-# ─────────────────────────────────────────────────────────────────────
-# ЗАЩИТА ОТ ГАЛЛЮЦИНАЦИЙ: извлечение и валидация версий из источников
-# ─────────────────────────────────────────────────────────────────────
-
-def extract_versions_from_sources(page_contents: list) -> list:
-    """
-    Извлекает все версии ПО (формат X.Y или X.Y.Z) из отфильтрованных страниц.
-
-    Возвращает список строк версий, отсортированных от новейшей к старейшей.
-    Пример: ['17.4.1', '17.4', '16.0.3']
-    """
-    import re
-    from functools import cmp_to_key
-
-    version_pattern = re.compile(r'\b(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?(?:\.\d{1,4})?)\b')
-    all_versions = set()
-
-    for page in page_contents:
-        text = page.get('content', '')
-        matches = version_pattern.findall(text)
-        for v in matches:
-            parts = v.split('.')
-            # Отсеиваем явные годы (20xx.x) и IP-подобные (192.168...)
-            if len(parts) >= 2:
-                major = int(parts[0])
-                if 2010 <= major <= 2040:
-                    continue  # это год, не версия
-                if major > 255:
-                    continue  # слишком большое число
-            all_versions.add(v)
-
-    def version_key(v: str):
-        """Сравнивает версии как кортежи чисел."""
-        try:
-            return tuple(int(x) for x in v.split('.'))
-        except ValueError:
-            return (0,)
-
-    sorted_versions = sorted(all_versions, key=version_key, reverse=True)
-    return sorted_versions
-
-
-def validate_versions_before_answer(
-    page_contents: list,
-    query: str,
-    max_version_age_years: int = 3,
-) -> dict:
-    """
-    Проверяет версии из источников перед генерацией ответа.
-    Защищает от галлюцинаций: модель не получит данные,
-    если все версии слишком старые или противоречивы.
-
-    Логика:
-    - Извлекает все версии из page_contents.
-    - Выбирает самую новую версию.
-    - Если версия слишком старая (год публикации < current-max_version_age_years)
-      И запрос требует актуальности → рекомендует повторный поиск.
-    - Если версий совсем нет → нейтральный статус (не блокируем генерацию).
-
-    Возвращает dict:
-    {
-        "ok": bool,          # True = можно генерировать ответ
-        "retry": bool,       # True = нужен повторный поиск
-        "best_version": str, # Лучшая найденная версия или ""
-        "all_versions": list,
-        "reason": str,
-    }
-    """
-    import datetime
-
-    versions = extract_versions_from_sources(page_contents)
-
-    # Нет версий вообще — не блокируем (возможно, запрос не про версии)
-    if not versions:
-        return {
-            "ok": True, "retry": False,
-            "best_version": "", "all_versions": [],
-            "reason": "no_versions_found"
-        }
-
-    best_version = versions[0]
-
-    # Определяем, требует ли запрос актуальности
-    query_lower = query.lower()
-    needs_fresh = any(kw in query_lower for kw in _FRESHNESS_TRIGGER_WORDS)
-
-    if not needs_fresh:
-        return {
-            "ok": True, "retry": False,
-            "best_version": best_version, "all_versions": versions,
-            "reason": "freshness_not_required"
-        }
-
-    # Проверяем свежесть через год публикации страниц
-    current_year = datetime.datetime.now().year
-    threshold_year = current_year - max_version_age_years
-
-    # Собираем годы публикации всех страниц
-    page_years = []
-    for page in page_contents:
-        y = extract_year(page.get('content', ''))
-        if y > 0:
-            page_years.append(y)
-
-    if page_years:
-        newest_page_year = max(page_years)
-        if newest_page_year < threshold_year:
-            print(
-                f"[VERSION_GUARD] ⚠️ Все страницы устаревшие "
-                f"(новейший год={newest_page_year}, порог={threshold_year}). "
-                f"Версия «{best_version}» может быть неактуальной."
-            )
-            return {
-                "ok": False, "retry": True,
-                "best_version": best_version, "all_versions": versions,
-                "reason": (
-                    f"stale_sources: newest page year {newest_page_year} "
-                    f"< threshold {threshold_year}"
-                )
-            }
-
-    print(
-        f"[VERSION_GUARD] ✅ Версия «{best_version}» из {len(versions)} найденных. "
-        f"Все источники актуальны."
-    )
-    return {
-        "ok": True, "retry": False,
-        "best_version": best_version, "all_versions": versions,
-        "reason": "version_validated"
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════
-# СИСТЕМА ОЦЕНКИ КАЧЕСТВА ИСТОЧНИКОВ
-# ═══════════════════════════════════════════════════════════════════
-
-def source_quality_score(url: str, text: str, query: str = "") -> dict:
-    """
-    Оценивает качество источника по 6 критериям и возвращает итоговый балл.
-
-    Критерии (максимум 100 баллов):
-    1. Домен — whitelist / blacklist / нейтральный  (−80 … +40)
-    2. Техническое содержание — код, команды, API    (0 … +20)
-    3. Длина текста по теме                          (0 … +15)
-    4. Наличие дат и фактов                          (0 … +15)
-    5. Совпадение темы страницы с запросом           (0 … +20)
-    6. Признаки авторства и структурности            (0 … +10)
-
-    Аргументы:
-        url:   URL источника
-        text:  текстовое содержимое страницы
-        query: запрос пользователя (для пункта 5)
-
-    Возвращает dict:
-    {
-        "total":        float,   # итоговый балл
-        "domain_score": float,   # балл за домен
-        "tech_score":   float,   # техническое содержание
-        "length_score": float,   # длина текста
-        "facts_score":  float,   # факты и даты
-        "topic_score":  float,   # совпадение темы
-        "author_score": float,   # авторство / структура
-        "tier":         str,     # "whitelist" / "blacklist" / "neutral"
-        "domain":       str,     # извлечённый домен
-    }
-    """
-    import re, datetime
-
-    url_lower = url.lower()
-    text_lower = text.lower() if text else ""
-
-    # ── 1. Домен: whitelist / blacklist ─────────────────────────────
-    domain_score = 0.0
-    tier = "neutral"
-    matched_domain = ""
-
-    # Извлекаем основной домен из URL
-    domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url_lower)
-    raw_domain = domain_match.group(1) if domain_match else url_lower[:60]
-
-    # Проверяем whitelist (от наиболее специфичного к общему)
-    for wl_domain, wl_bonus in sorted(SOURCE_WHITELIST.items(),
-                                       key=lambda x: len(x[0]), reverse=True):
-        if wl_domain in raw_domain:
-            domain_score = float(wl_bonus)
-            tier = "whitelist"
-            matched_domain = wl_domain
-            break
-
-    # Проверяем blacklist (штраф суммируется, если нет бонуса whitelist)
-    if tier != "whitelist":
-        for bl_pattern, bl_penalty in SOURCE_BLACKLIST.items():
-            if bl_pattern in raw_domain or bl_pattern in url_lower:
-                domain_score += float(bl_penalty)
-                tier = "blacklist"
-                matched_domain = bl_pattern
-                break
-
-    # Ограничиваем диапазон
-    domain_score = max(-80.0, min(40.0, domain_score))
-
-    # ── 2. Техническое содержание ────────────────────────────────────
-    tech_patterns = [
-        r'```',                          # блоки кода
-        r'def \w+\(',                  # функции Python
-        r'function\s+\w+\s*\(',        # JavaScript функции
-        r'class \w+',                  # классы
-        r'import \w+',                 # импорты
-        r'\$ \w+',                       # shell-команды
-        r'--\w+',                        # CLI флаги
-        r'api',                      # упоминание API
-        r'https?://[^\s]{10,}',          # реальные URL в тексте
-        r'(?:curl|wget|npm|pip|apt|brew|docker|kubectl)',
-        r'\d+\.\d+\.\d+',           # версии X.Y.Z
-        r'<\w+[^>]*>',                   # HTML/XML теги (в сыром тексте)
-    ]
-    tech_hits = sum(1 for p in tech_patterns if re.search(p, text[:5000]))
-    tech_score = min(20.0, tech_hits * 2.5)
-
-    # ── 3. Длина текста ──────────────────────────────────────────────
-    text_len = len(text)
-    if text_len >= 3000:
-        length_score = 15.0
-    elif text_len >= 1500:
-        length_score = 10.0
-    elif text_len >= 600:
-        length_score = 5.0
-    elif text_len < 200:
-        length_score = -5.0   # штраф за слишком мало текста
-    else:
-        length_score = 0.0
-
-    # ── 4. Факты: версии, даты, числа ───────────────────────────────
-    fact_patterns_list = [
-        re.compile(r'\d+\.\d+(?:\.\d+)*'),              # версии
-        re.compile(r'(19|20)\d{2}'),                     # годы
-        re.compile(r'\d{1,2}[./]\d{1,2}[./]\d{2,4}'),  # даты
-        re.compile(r'(?:january|february|march|april|may|june|july|august|'
-                   r'september|october|november|december|январ|феврал|март|'
-                   r'апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*',
-                   re.IGNORECASE),
-        re.compile(r'(?:released?|вышел|вышла|релиз|changelog|'
-                   r'обновлен\w*|запущен\w*)', re.IGNORECASE),
-        re.compile(r'\d+\s*(?:мб|гб|mb|gb|мс|ms|fps|ghz|ггц|px)',
-                   re.IGNORECASE),
-    ]
-    fact_types_found = sum(1 for fp in fact_patterns_list if fp.search(text_lower))
-    facts_score = min(15.0, fact_types_found * 3.0)
-
-    # ── 5. Совпадение темы с запросом ───────────────────────────────
-    topic_score = 0.0
-    if query:
-        stop = {'и','в','на','с','по','для','что','как','где','это',
-                'the','a','an','of','in','for','to','is','are','was'}
-        kws = [w for w in re.split(r'[\s,?!.;:]+', query.lower())
-               if len(w) > 2 and w not in stop]
-        if kws:
-            hits = sum(1 for kw in kws if kw in text_lower)
-            ratio = hits / len(kws)
-            topic_score = round(min(20.0, ratio * 20.0), 2)
-
-            # Бонус если ключевые слова встречаются в первых 500 символах
-            head = text_lower[:500]
-            head_hits = sum(1 for kw in kws if kw in head)
-            topic_score = min(20.0, topic_score + head_hits * 1.5)
-
-    # ── 6. Авторство и структура ─────────────────────────────────────
-    author_score = 0.0
-    author_markers = [
-        r'(?:by|автор|author|written by|опубликовано|published)',
-        r'(?:updated|обновлено|дата публикации|date)',
-        r'(?:editor|редактор|contributor)',
-        r'<h[1-3]',         # структурные заголовки в сыром HTML
-        r'#{1,3} \w',       # markdown-заголовки
-    ]
-    author_hits = sum(1 for p in author_markers
-                      if re.search(p, text[:3000], re.IGNORECASE))
-    author_score = min(10.0, author_hits * 3.0)
-
-    # ── Итог ─────────────────────────────────────────────────────────
-    total = domain_score + tech_score + length_score + facts_score + topic_score + author_score
-
-    return {
-        "total":        round(total, 2),
-        "domain_score": domain_score,
-        "tech_score":   round(tech_score, 2),
-        "length_score": length_score,
-        "facts_score":  round(facts_score, 2),
-        "topic_score":  round(topic_score, 2),
-        "author_score": round(author_score, 2),
-        "tier":         tier,
-        "domain":       matched_domain or raw_domain[:40],
-    }
-
-
-def rank_and_select_sources(
-    page_contents: list,
-    query: str,
-    top_n: int = 3,
-    min_quality_score: float = 20.0,
-    min_sources: int = 2,
-) -> tuple:
-    """
-    Оценивает качество каждого источника, сортирует по баллу и выбирает лучшие.
-
-    Если после фильтрации остаётся меньше min_sources качественных источников,
-    возвращает флаг needs_retry=True — сигнал для повторного поиска.
-
-    Аргументы:
-        page_contents:      список dict{'url', 'content', ...}
-        query:              запрос пользователя
-        top_n:              максимальное число источников в ответе (2–3)
-        min_quality_score:  минимальный балл для «качественного» источника
-        min_sources:        минимум качественных источников перед retry
-
-    Возвращает (ranked_pages: list, needs_retry: bool):
-        ranked_pages  — отсортированный список страниц с добавленным ключом
-                        'quality_score' (только ≥ min_quality_score)
-        needs_retry   — True если нужен повторный поиск
-    """
-    if not page_contents:
-        return [], True
-
-    scored = []
-    for page in page_contents:
-        url   = page.get("url", "")
-        text  = page.get("content", "")
-        scores = source_quality_score(url, text, query)
-        page_with_score = dict(page)
-        page_with_score["quality_score"]  = scores["total"]
-        page_with_score["quality_detail"] = scores
-        scored.append(page_with_score)
-
-        tier_icon = "✅" if scores["tier"] == "whitelist" else (
-                    "❌" if scores["tier"] == "blacklist" else "⚪")
-        print(
-            f"[SOURCE_QUALITY] {tier_icon} {scores['total']:6.1f}pts "
-            f"| domain={scores['domain_score']:+.0f} "
-            f"tech={scores['tech_score']:.0f} "
-            f"facts={scores['facts_score']:.0f} "
-            f"topic={scores['topic_score']:.0f} "
-            f"| {url[:65]}"
-        )
-
-    # Сортируем от лучшего к худшему
-    scored.sort(key=lambda p: p["quality_score"], reverse=True)
-
-    # Отбираем только источники выше порога качества
-    quality_pages = [p for p in scored if p["quality_score"] >= min_quality_score]
-
-    needs_retry = len(quality_pages) < min_sources
-
-    if needs_retry:
-        print(
-            f"[SOURCE_QUALITY] ⚠️ Качественных источников: {len(quality_pages)} "
-            f"(нужно ≥{min_sources}, порог ≥{min_quality_score}пт). "
-            f"Нужен повторный поиск."
-        )
-        # Возвращаем всё что есть — retry обработает caller
-        best = scored[:top_n]
-    else:
-        best = quality_pages[:top_n]
-        print(
-            f"[SOURCE_QUALITY] ✅ Выбрано {len(best)} из {len(scored)} источников "
-            f"(топ {top_n}, порог {min_quality_score}пт)"
-        )
-
-    return best, needs_retry
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# МОДУЛЬНЫЙ ПАЙПЛАЙН ОПРЕДЕЛЕНИЯ АКТУАЛЬНОЙ ВЕРСИИ ПО / ПРОШИВКИ / СИСТЕМЫ
-# Архитектура: search → filter → extract → validate → answer
-#
-# Универсален для любого ПО: iOS, Android, Python, Firefox, Windows и т.д.
-# Активируется автоматически при запросах вида:
-#   «последняя версия X», «что нового в X», «latest version X», «X changelog»
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ── Ключевые слова, однозначно указывающие на запрос о версии ───────────
-_VERSION_INTENT_KEYWORDS = [
-    # Русские
-    "последняя версия", "актуальная версия", "текущая версия",
-    "новая версия", "что нового", "что нового в", "изменения в",
-    "обновление до", "вышла версия", "релиз", "changelog",
-    "release notes", "список изменений", "что изменилось",
-    # Английские
-    "latest version", "current version", "newest version",
-    "what's new", "what is new", "release notes", "changelog",
-    "new features", "latest release", "current release",
-    "latest update", "version history",
-]
-
-# ── Шаблоны поисковых запросов ───────────────────────────────────────────
-_VERSION_QUERY_TEMPLATES = [
-    "latest version {name}",
-    "{name} latest release",
-    "{name} release notes",
-    "{name} changelog",
-    "current {name} version",
-    "{name} github releases",
-    "{name} новая версия",
-    "последняя версия {name}",
-]
-
-# ── Приоритет доменов: url-подстрока → бонус/штраф ──────────────────────
-# Высокий приоритет: официальные источники, release-страницы, тех-СМИ
-_DOMAIN_HIGH: dict = {
-    # Страницы релизов (путь содержит releases/changelog)
-    "/releases":            +90,
-    "/changelog":           +85,
-    "/release-notes":       +85,
-    "/releasenotes":        +80,
-    "/whats-new":           +75,
-    "/downloads":           +60,
-    # Официальные домены
-    "github.com":           +70,
-    "gitlab.com":           +65,
-    "developer.apple.com":  +85,
-    "developer.android.com":+85,
-    "developer.chrome.com": +80,
-    "docs.python.org":      +85,
-    "python.org":           +75,
-    "nodejs.org":           +75,
-    "rust-lang.org":        +75,
-    "golang.org":           +75,
-    "kernel.org":           +80,
-    "docs.microsoft.com":   +75,
-    "learn.microsoft.com":  +70,
-    "developer.mozilla.org":+80,
-    "huggingface.co":       +65,
-    "pytorch.org":          +70,
-    "tensorflow.org":       +70,
-    # Крупные тех-СМИ с датами
-    "techradar.com":        +40,
-    "arstechnica.com":      +45,
-    "theverge.com":         +35,
-    "zdnet.com":            +35,
-    "9to5mac.com":          +40,
-    "macrumors.com":        +40,
-    "androidauthority.com": +40,
-    "xda-developers.com":   +35,
-    "theregister.com":      +40,
-    "habr.com":             +40,
-    "ixbt.com":             +35,
-    "3dnews.ru":            +30,
-    "cnews.ru":             +30,
-}
-
-# Низкий приоритет: форумы, агрегаторы, магазины, блоги без дат
-_DOMAIN_LOW: dict = {
-    "reddit.com":           -25,
-    "quora.com":            -30,
-    "yahoo.com":            -25,
-    "answers.":             -30,
-    "forum.":               -25,
-    "forums.":              -25,
-    "community.":           -20,
-    "discussion.":          -20,
-    "amazon.com":           -50,
-    "ebay.com":             -50,
-    "aliexpress.com":       -60,
-    "play.google.com":      -40,
-    "apps.apple.com":       -40,
-    "facebook.com":         -60,
-    "instagram.com":        -60,
-    "twitter.com":          -35,
-    "x.com":                -35,
-    "youtube.com":          -40,
-    "buzzfeed.com":         -60,
-    "pinterest.com":        -60,
-    "medium.com":           -10,  # небольшой штраф — может быть полезен
-}
-
-# ── Паттерны извлечения версий ───────────────────────────────────────────
-import re as _re_vp
-import datetime as _dt_vp
-
-_VER_PATS = [
-    # Явная метка: Version 17.4.1 / v3.12 / Ver. 3.12
-    _re_vp.compile(
-        r'(?:version|ver\.?|v)\s*(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?(?:\.\d{1,4})?)',
-        _re_vp.IGNORECASE),
-    # В скобках: (3.12.1)
-    _re_vp.compile(r'\((\d{1,3}\.\d{1,3}(?:\.\d{1,4})?)\)'),
-    # Bare X.Y.Z
-    _re_vp.compile(r'\b(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?(?:\.\d{1,4})?)\b'),
-]
-
-_BETA_PAT   = _re_vp.compile(r'\b(?:beta|b\d+|preview|rc\d*|alpha|dev|nightly)\b',
-                               _re_vp.IGNORECASE)
-_STABLE_PAT = _re_vp.compile(r'\b(?:stable|release|final|lts|ga|general.availability)\b',
-                               _re_vp.IGNORECASE)
-
-# ── Паттерны дат ─────────────────────────────────────────────────────────
-_DATE_PATS = [
-    _re_vp.compile(r'(202\d)[.\-/](\d{2})[.\-/](\d{2})'),                  # 2024-05-13
-    _re_vp.compile(r'(\d{1,2})[.\-/ ](\d{1,2})[.\-/ ](202\d)'),           # 13.05.2024
-    _re_vp.compile(
-        r'(?:january|february|march|april|may|june|july|august|september|'
-        r'october|november|december|январ\w*|феврал\w*|март\w*|апрел\w*|'
-        r'май|июн\w*|июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)'
-        r'\s+\d{1,2}[,\s]+?(202\d)', _re_vp.IGNORECASE),                   # May 13, 2024
-    _re_vp.compile(r'\b(202\d)\b'),                                         # запасной: год
-]
-
-# Changelog-триггеры
-_CHANGELOG_TRIGGER = _re_vp.compile(
-    r"(?:what.?s new|changelog|release notes|изменения|что нового|новое в|"
-    r"новшества|обновления|улучшения)\b",
-    _re_vp.IGNORECASE)
-
-_CHANGELOG_LINE = _re_vp.compile(r'(?:^|[-•*·▪])\s*(.{20,150}?)(?:\n|$)',
-                                   _re_vp.MULTILINE)
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# Вспомогательные функции
-# ───────────────────────────────────────────────────────────────────────────
-
-def is_version_query(query: str) -> bool:
-    """
-    Определяет, является ли запрос запросом о версии ПО.
-    Использует два уровня проверки:
-    1. Точные фразы (multi-word) — высокая точность.
-    2. Одиночные слова-маркеры — ловят «latest X», «X release», «X changelog».
-    """
-    import re as _re_iq
-    q = query.lower()
-
-    # Уровень 1: точные фразы
-    if any(kw in q for kw in _VERSION_INTENT_KEYWORDS):
-        return True
-
-    # Уровень 2: одиночные маркеры версий
-    _SINGLE_MARKERS = [
-        r"\blatest\b", r"\bchangelog\b", r"\brelease\b",
-        r"\brelease\s+notes\b", r"\bdownload\b",
-        r"\bрелиз\b", r"\bверсия\b", r"\bchangelog\b",
-        r"\bv\d+\.\d+\b",            # vX.Y в запросе
-        r"\d+\.\d+\.\d+\b",         # X.Y.Z в запросе
-        r"\bwhat.?s new\b",
-    ]
-    return any(_re_iq.search(p, q) for p in _SINGLE_MARKERS)
-
-
-def _vp_domain_score(url: str) -> int:
-    """Вычисляет приоритетный балл URL на основе домена и пути."""
-    u = url.lower()
-    score = 0
-    for pattern, pts in _DOMAIN_HIGH.items():
-        if pattern in u:
-            score = max(score, pts)
-    for pattern, pts in _DOMAIN_LOW.items():
-        if pattern in u:
-            score += pts
-    return score
-
-
-def _vp_parse_ver(v: str) -> tuple:
-    """Конвертирует строку версии в сортируемый кортеж."""
-    try:
-        return tuple(int(x) for x in v.split("."))
-    except ValueError:
-        return (0,)
-
-
-def _vp_classify(version: str, context: str) -> str:
-    """Определяет тип релиза: stable / beta / rc / alpha."""
-    combined = (version + " " + context[:300]).lower()
-    if _BETA_PAT.search(combined):
-        if "rc" in combined:
-            return "rc"
-        if "alpha" in combined:
-            return "alpha"
-        return "beta"
-    return "stable"
-
-
-def _vp_extract_date(text: str) -> str:
-    """Извлекает первую читаемую дату из текста страницы."""
-    for pat in _DATE_PATS:
-        m = pat.search(text)
-        if m:
-            return m.group(0)[:30].strip()
-    return ""
-
-
-def _vp_extract_software_name(query: str) -> str:
-    """
-    Извлекает название ПО из запроса.
-    «последняя версия Python 3» → «Python 3»
-    «что нового в iOS 18» → «iOS 18»
-    «latest Firefox release» → «Firefox»
-    """
-    q = query.strip()
-    strip_pats = [
-        r'\b(?:последняя|последний|актуальная|актуальный|новая|новый)\s+'
-        r'(?:версия|релиз|обновление|release|version)?\s*',
-        r'\b(?:что нового в|changelog|release notes|изменения в|список изменений в)\s*',
-        r'\b(?:latest|current|newest|recent)\s+(?:version|release|update)?\s*',
-        r'\b(?:version|release|update)\s+of\s+',
-        r'\b(?:версия|релиз|обновление)\s+',
-    ]
-    result = q
-    for pat in strip_pats:
-        result = _re_vp.sub(pat, '', result, flags=_re_vp.IGNORECASE).strip()
-    words = result.split()
-    # берём до 3 слов — название обычно короткое
-    return " ".join(words[:3]) if words else q[:40]
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ШАГ 1 — SEARCH: несколько поисковых запросов
-# ───────────────────────────────────────────────────────────────────────────
-
-def vp_search(
-    sw_name: str,
-    region: str = "wt-wt",
-    language: str = "russian",
-    num_per_query: int = 5,
-) -> list:
-    """
-    Выполняет 5 поисковых запросов по шаблонам и собирает уникальные URL.
-
-    Аргументы:
-        sw_name:       название ПО (например «Python», «iOS 18», «Firefox»)
-        region:        регион поиска
-        language:      язык
-        num_per_query: результатов за запрос
-
-    Возвращает список уникальных URL (минимум 5–8 источников).
-    """
-    print(f"[VP:SEARCH] 🔍 Мульти-поиск для «{sw_name}»")
-    seen: set = set()
-    all_urls: list = []
-
-    for tmpl in _VERSION_QUERY_TEMPLATES[:6]:          # берём 6 из 8 шаблонов
-        q = tmpl.format(name=sw_name)
-        print(f"[VP:SEARCH]   → {q}")
-        try:
-            raw = google_search(q, num_results=num_per_query,
-                                region=region, language=language)
-            for url in _re_vp.findall(r'Ссылка: (https?://[^\s]+)', raw):
-                if url not in seen:
-                    seen.add(url)
-                    all_urls.append(url)
-        except Exception as exc:
-            print(f"[VP:SEARCH]   ⚠️ Ошибка запроса: {exc}")
-
-    print(f"[VP:SEARCH] ✅ Уникальных URL: {len(all_urls)}")
-    return all_urls
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ШАГ 2 — FILTER: приоритизация, загрузка, фильтр релевантности
-# ───────────────────────────────────────────────────────────────────────────
-
-def vp_filter(
-    urls: list,
-    query: str,
-    max_load: int = 8,
-) -> list:
-    """
-    Сортирует URL по приоритету домена, загружает страницы,
-    фильтрует нерелевантные через is_relevant_page.
-
-    Повышает приоритет: официальные сайты, /releases, /changelog, GitHub,
-    крупные тех-СМИ с датами.
-    Понижает приоритет: форумы, агрегаторы, магазины, соцсети.
-
-    Страницы без дат или с текстом < 200 символов отклоняются.
-
-    Аргументы:
-        urls:     список URL из vp_search
-        query:    исходный запрос (для is_relevant_page)
-        max_load: максимум страниц для загрузки
-
-    Возвращает список dict{'url','content','priority','rel_score'}.
-    """
-    # Сортируем по приоритету
-    ranked = sorted([(u, _vp_domain_score(u)) for u in urls],
-                    key=lambda x: x[1], reverse=True)
-    print(f"[VP:FILTER] Загрузка страниц (топ по приоритету)...")
-    pages = []
-
-    for url, priority in ranked:
-        if len(pages) >= max_load:
-            break
-
-        print(f"[VP:FILTER]  {priority:+4d}  {url[:70]}")
-        try:
-            text = fetch_page_content(url, max_chars=4000)
-        except Exception as exc:
-            print(f"[VP:FILTER]   ⚠️ Ошибка загрузки: {exc}")
-            continue
-
-        if not text or "[Ошибка" in text or len(text) < 200:
-            print(f"[VP:FILTER]   ❌ Слишком короткий или ошибка ({len(text or '')} символов)")
-            continue
-
-        # Фильтр релевантности (URL-блокировка + ключевые слова + тема)
-        ok, scores, reason = is_relevant_page(query, text, url=url)
-        if not ok:
-            print(f"[VP:FILTER]   ❌ Нерелевантна: {reason}")
-            continue
-
-        pages.append({
-            "url":       url,
-            "content":   text,
-            "priority":  priority,
-            "rel_score": scores.get("total_score", 0),
-        })
-        print(f"[VP:FILTER]   ✅ Принята | rel={scores.get('total_score',0):.0f}")
-
-    print(f"[VP:FILTER] Итого страниц: {len(pages)}")
-    return pages
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ШАГ 3 — EXTRACT: версии, даты, changelog
-# ───────────────────────────────────────────────────────────────────────────
-
-def vp_extract(pages: list) -> dict:
-    """
-    Извлекает из текстов всех страниц:
-    - все версии с типом (stable/beta/rc/alpha) и источниками
-    - даты публикации каждой страницы
-    - фрагменты changelog / release notes
-
-    Аргументы:
-        pages: список dict из vp_filter
-
-    Возвращает dict:
-    {
-        "versions":   [{"version", "type", "date", "sources", "source_count", "priority_sum"}, ...],
-        "changelogs": {url: [строка, ...]},
-        "dates":      {url: str},
-    }
-    """
-    ver_map: dict = {}
-    changelogs: dict = {}
-    dates: dict = {}
-
-    for page in pages:
-        url      = page["url"]
-        text     = page["content"]
-        priority = page.get("priority", 0)
-
-        # Дата страницы
-        page_date = _vp_extract_date(text)
-        dates[url] = page_date
-
-        # ── Извлекаем версии ─────────────────────────────────────────
-        found_in_page: set = set()
-        for vpat in _VER_PATS:
-            for m in vpat.finditer(text):
-                v = m.group(1)
-                parts = v.split(".")
-                if len(parts) < 2:
-                    continue
-                try:
-                    major = int(parts[0])
-                except ValueError:
-                    continue
-                # Фильтр: не IP, не год, не слишком большие числа
-                if major < 0 or major > 999:
-                    continue
-                if 2000 <= major <= 2040:
-                    continue   # это год
-                if v in found_in_page:
-                    continue
-                found_in_page.add(v)
-
-                # Контекст для определения типа релиза
-                ctx = text[max(0, m.start()-100): m.end()+100]
-                rtype = _vp_classify(v, ctx)
-
-                if v not in ver_map:
-                    ver_map[v] = {
-                        "version":      v,
-                        "type":         rtype,
-                        "date":         page_date,
-                        "sources":      [url],
-                        "source_count": 1,
-                        "priority_sum": priority,
-                    }
-                else:
-                    info = ver_map[v]
-                    if url not in info["sources"]:
-                        info["sources"].append(url)
-                        info["source_count"] += 1
-                        info["priority_sum"] += priority
-                    # Уточняем тип
-                    if rtype in ("rc", "beta", "alpha") and info["type"] == "stable":
-                        info["type"] = rtype
-                    if page_date and not info["date"]:
-                        info["date"] = page_date
-
-        # ── Changelog-фрагменты ──────────────────────────────────────
-        trigger = _CHANGELOG_TRIGGER.search(text)
-        if trigger:
-            block = text[trigger.end(): trigger.end() + 2500]
-            lines = [m.group(1).strip()
-                     for m in _CHANGELOG_LINE.finditer(block)
-                     if len(m.group(1).strip()) > 20]
-            if lines:
-                changelogs[url] = lines[:10]
-
-    return {
-        "versions":   list(ver_map.values()),
-        "changelogs": changelogs,
-        "dates":      dates,
-    }
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ШАГ 4 — VALIDATE: консенсус версий, уровень доверия
-# ───────────────────────────────────────────────────────────────────────────
-
-def vp_validate(extracted: dict, max_age_months: int = 18) -> dict:
-    """
-    Проверяет актуальность версий и выбирает консенсусную.
-
-    Логика:
-    - Сортирует версии по номеру (от новейшей к старейшей).
-    - Stable-версия с подтверждением ≥ 2 источников — выбирается как лучшая.
-    - Pre-release (beta/rc/alpha) выбирается если новее stable.
-    - Уровень доверия: high (≥3 источника), medium (≥2), low (<2).
-    - Если top-3 версии из разных мажорных веток — генерируется предупреждение.
-
-    Аргументы:
-        extracted:      dict из vp_extract()
-        max_age_months: порог устаревания источников (пока информационный)
-
-    Возвращает dict:
-    {
-        "stable":        dict | None,   # лучшая стабильная версия
-        "pre_release":   dict | None,   # лучшая бета/RC (если новее stable)
-        "all_stable":    list,          # все stable, отсортированные
-        "changelogs":    dict,
-        "confidence":    "high"|"medium"|"low",
-        "warning":       str,           # "" если нет предупреждений
-    }
-    """
-    versions  = extracted.get("versions", [])
-    changelogs = extracted.get("changelogs", {})
-
-    if not versions:
-        return {
-            "stable":       None,
-            "pre_release":  None,
-            "all_stable":   [],
-            "changelogs":   changelogs,
-            "confidence":   "low",
-            "warning":      "Не удалось извлечь версии из источников.",
-        }
-
-    # Сортируем всё по номеру версии
-    all_sorted = sorted(versions, key=lambda v: _vp_parse_ver(v["version"]),
-                        reverse=True)
-
-    stable_vers  = [v for v in all_sorted if v["type"] == "stable"]
-    pre_rel_vers = [v for v in all_sorted if v["type"] in ("beta", "rc", "alpha")]
-
-    # ── Лучшая stable-версия ────────────────────────────────────────
-    # Предпочитаем подтверждённую ≥2 источниками
-    confirmed = [v for v in stable_vers if v["source_count"] >= 2]
-    best_stable = confirmed[0] if confirmed else (stable_vers[0] if stable_vers else None)
-
-    # ── Лучшая pre-release ─────────────────────────────────────────
-    best_pre = None
-    if pre_rel_vers:
-        candidate = pre_rel_vers[0]
-        if best_stable is None or (
-            _vp_parse_ver(candidate["version"]) > _vp_parse_ver(best_stable["version"])
-        ):
-            best_pre = candidate
-
-    # ── Доверие ──────────────────────────────────────────────────────
-    if best_stable and best_stable["source_count"] >= 3:
-        confidence = "high"
-    elif best_stable and best_stable["source_count"] >= 2:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    # ── Предупреждение о разбросе версий ────────────────────────────
-    warning = ""
-    top3 = [v["version"] for v in stable_vers[:3]]
-    if len(top3) >= 2:
-        try:
-            tuples = [_vp_parse_ver(v) for v in top3]
-            if tuples[0][0] != tuples[-1][0]:
-                warning = (
-                    f"Найдены версии из разных мажорных веток: {', '.join(top3)}. "
-                    f"Рекомендую уточнить на официальном сайте разработчика."
-                )
-        except Exception:
-            pass
-
-    return {
-        "stable":       best_stable,
-        "pre_release":  best_pre,
-        "all_stable":   stable_vers[:8],
-        "changelogs":   changelogs,
-        "confidence":   confidence,
-        "warning":      warning,
-    }
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ШАГ 5 — ANSWER: форматирование результата для промпта
-# ───────────────────────────────────────────────────────────────────────────
-
-def vp_answer(
-    validated: dict,
-    pages: list,
-    sw_name: str,
-    detected_language: str = "russian",
-) -> str:
-    """
-    Формирует строку-контекст для передачи в промпт AI.
-
-    Содержит:
-    - последнюю стабильную версию + дату + источники
-    - последнюю бета/RC (если есть)
-    - список изменений из changelog-блоков
-    - все использованные источники
-    - предупреждение об уровне доверия
-    - явные правила для AI (не придумывать, не обобщать без источника)
-
-    Аргументы:
-        validated:         dict из vp_validate()
-        pages:             список страниц из vp_filter()
-        sw_name:           название ПО
-        detected_language: "russian" или иное (→ английский)
-    """
-    is_ru   = detected_language == "russian"
-    SEP     = "═" * 56
-    lines   = []
-
-    stable    = validated.get("stable")
-    pre_rel   = validated.get("pre_release")
-    confidence = validated.get("confidence", "low")
-    warning   = validated.get("warning", "")
-    changelogs = validated.get("changelogs", {})
-
-    conf_label = {"high": "🟢 ВЫСОКИЙ", "medium": "🟡 СРЕДНИЙ",
-                  "low":  "🔴 НИЗКИЙ"}.get(confidence, confidence)
-
-    if is_ru:
-        lines += [SEP,
-                  f"📦 ДАННЫЕ О ВЕРСИИ: {sw_name.upper()}",
-                  f"Достоверность: {conf_label}",
-                  SEP]
-    else:
-        lines += [SEP,
-                  f"📦 VERSION DATA: {sw_name.upper()}",
-                  f"Confidence: {conf_label}",
-                  SEP]
-
-    # ── Stable ───────────────────────────────────────────────────────
-    if stable:
-        ver  = stable["version"]
-        date = stable.get("date") or ("неизвестна" if is_ru else "unknown")
-        cnt  = stable.get("source_count", 1)
-        srcs = stable.get("sources", [])[:3]
-        if is_ru:
-            lines += ["",
-                      f"✅ ПОСЛЕДНЯЯ СТАБИЛЬНАЯ ВЕРСИЯ: {ver}",
-                      f"   Дата выхода: {date}",
-                      f"   Подтверждена в {cnt} источнике(ах):"]
-        else:
-            lines += ["",
-                      f"✅ LATEST STABLE VERSION: {ver}",
-                      f"   Release date: {date}",
-                      f"   Confirmed in {cnt} source(s):"]
-        for s in srcs:
-            lines.append(f"      • {s[:70]}")
-    else:
-        lines.append("\n⚠️ " + ("Стабильная версия не определена." if is_ru
-                                 else "Stable version not determined."))
-
-    # ── Pre-release ──────────────────────────────────────────────────
-    if pre_rel:
-        ver   = pre_rel["version"]
-        rtype = pre_rel.get("type", "beta").upper()
-        date  = pre_rel.get("date") or ("неизвестна" if is_ru else "unknown")
-        cnt   = pre_rel.get("source_count", 1)
-        if is_ru:
-            lines += ["",
-                      f"🧪 ПОСЛЕДНЯЯ {rtype}-ВЕРСИЯ: {ver}",
-                      f"   Дата: {date} | Источников: {cnt}"]
-        else:
-            lines += ["",
-                      f"🧪 LATEST {rtype}: {ver}",
-                      f"   Date: {date} | Sources: {cnt}"]
-
-    # ── Все найденные stable-версии ─────────────────────────────────
-    all_stable = validated.get("all_stable", [])
-    if len(all_stable) > 1:
-        ver_list = ", ".join(v["version"] for v in all_stable[:5])
-        if is_ru:
-            lines.append(f"\n   Все найденные стабильные версии: {ver_list}")
-        else:
-            lines.append(f"\n   All found stable versions: {ver_list}")
-
-    # ── Changelog ───────────────────────────────────────────────────
-    if changelogs:
-        # Берём лог из источника с наивысшим приоритетом
-        best_url = max(changelogs, key=lambda u: _vp_domain_score(u))
-        cl_lines = changelogs[best_url][:8]
-        label = "📋 ИЗМЕНЕНИЯ (из источника):" if is_ru else "📋 CHANGES (from source):"
-        lines.append(f"\n{label}")
-        lines.append(f"   Источник: {best_url[:70]}")
-        for cl in cl_lines:
-            lines.append(f"   • {cl}")
-    else:
-        lines.append("\n" + ("📋 Блок изменений не найден в загруженных источниках."
-                              if is_ru else "📋 No changelog block found in loaded sources."))
-
-    # ── Источники ────────────────────────────────────────────────────
-    used = [p["url"] for p in pages[:6]]
-    lines.append("\n" + ("🔗 ИСПОЛЬЗОВАННЫЕ ИСТОЧНИКИ:" if is_ru else "🔗 SOURCES USED:"))
-    for i, u in enumerate(used, 1):
-        prio = _vp_domain_score(u)
-        tier = ("✅" if prio >= 50 else "⚪" if prio >= 0 else "⚠️")
-        lines.append(f"   {i}. {tier} {u[:80]}")
-
-    # ── Предупреждения ───────────────────────────────────────────────
-    if warning:
-        lines.append(f"\n⚠️  {warning}")
-
-    if confidence == "low":
-        low_msg = (
-            "⚠️  ВНИМАНИЕ: Низкая достоверность — версия подтверждена менее чем 2 независимыми "
-            "источниками. Настоятельно рекомендую проверить на официальном сайте."
-            if is_ru else
-            "⚠️  WARNING: Low confidence — version confirmed by fewer than 2 independent sources. "
-            "Please verify on the official website."
-        )
-        lines.append(f"\n{low_msg}")
-
-    # ── Правила для AI (запрет галлюцинаций) ────────────────────────
-    if is_ru:
-        lines += [
-            "",
-            SEP,
-            "🚫 ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА ДЛЯ AI:",
-            "   • Используй ТОЛЬКО данные из блока выше — ничего сверх этого",
-            "   • НЕ придумывай список изменений и новые функции",
-            "   • НЕ пиши «улучшена стабильность» или другие общие фразы без источника",
-            "   • Если данных нет — прямо скажи об этом пользователю",
-            "   • Если достоверность LOW или MEDIUM — обязательно предупреди пользователя",
-            "   • Всегда указывай источники в ответе",
-            SEP,
-        ]
-    else:
-        lines += [
-            "",
-            SEP,
-            "🚫 MANDATORY AI RULES:",
-            "   • Use ONLY the data from the block above — nothing beyond it",
-            "   • Do NOT invent change lists or new features",
-            "   • Do NOT write vague phrases like 'improved stability' without a source",
-            "   • If data is missing — tell the user directly",
-            "   • If confidence is LOW or MEDIUM — always warn the user",
-            "   • Always cite sources in your answer",
-            SEP,
-        ]
-
-    return "\n".join(lines)
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# ОРКЕСТРАТОР — version_search_pipeline
-# ───────────────────────────────────────────────────────────────────────────
-
-def version_search_pipeline(
-    user_query: str,
-    region: str = "wt-wt",
-    language: str = "russian",
-) -> tuple:
-    """
-    Полный модульный пайплайн для определения актуальной версии ПО.
-
-    Архитектура: search → filter → extract → validate → answer
-
-    Шаги:
-    1. vp_search    — 6 поисковых запросов по шаблонам, 5–8 источников
-    2. vp_filter    — приоритизация по домену, загрузка, фильтр релевантности
-    3. vp_extract   — извлечение версий, дат, changelog из всех страниц
-    4. vp_validate  — консенсус версий, уровень доверия, предупреждения
-    5. vp_answer    — форматированный блок с запретом галлюцинаций
-
-    Аргументы:
-        user_query: исходный запрос пользователя
-        region:     регион поиска
-        language:   язык результатов
-
-    Возвращает КОРТЕЖ (result_str: str, page_contents: list):
-        result_str    — форматированный блок данных для передачи в промпт
-        page_contents — список загруженных страниц dict{'url','content',...}
-    """
-    print(f"[VP:PIPELINE] ════ СТАРТ ПАЙПЛАЙНА ВЕРСИЙ ════")
-    print(f"[VP:PIPELINE] Запрос: {user_query}")
-
-    # ── Определяем название ПО ───────────────────────────────────────
-    sw_name = _vp_extract_software_name(user_query)
-    print(f"[VP:PIPELINE] 📦 Название ПО: «{sw_name}»")
-
-    # ── 1. SEARCH ────────────────────────────────────────────────────
-    urls = vp_search(sw_name, region=region, language=language, num_per_query=5)
-    if not urls:
-        msg = "⚠️ Поиск не вернул результатов." if language == "russian" \
-              else "⚠️ Search returned no results."
-        return msg, []
-
-    # ── 2. FILTER ────────────────────────────────────────────────────
-    pages = vp_filter(urls, query=user_query, max_load=8)
-    if not pages:
-        msg = ("⚠️ Подходящих источников не найдено после фильтрации." if language == "russian"
-               else "⚠️ No suitable sources found after filtering.")
-        return msg, []
-
-    # ── 3. EXTRACT ───────────────────────────────────────────────────
-    extracted = vp_extract(pages)
-    n_versions = len(extracted["versions"])
-    print(f"[VP:PIPELINE] 🔢 Извлечено версий: {n_versions} | "
-          f"с changelog: {len(extracted['changelogs'])}")
-
-    # Если не нашли ни одной версии — откатываемся к обычному поиску
-    if n_versions == 0:
-        print(f"[VP:PIPELINE] ⚠️ Версии не найдены, передаём страницы как есть")
-        fallback_str = "\n\n".join(
-            f"[Источник {i+1}]\nURL: {p['url']}\n{p['content'][:1500]}"
-            for i, p in enumerate(pages[:4])
-        )
-        return fallback_str, pages
-
-    # ── 4. VALIDATE ──────────────────────────────────────────────────
-    validated = vp_validate(extracted, max_age_months=18)
-    stable = validated["stable"]
-    if stable:
-        print(f"[VP:PIPELINE] ✅ Stable: {stable['version']} "
-              f"(источников: {stable['source_count']}, "
-              f"доверие: {validated['confidence']})")
-    else:
-        print(f"[VP:PIPELINE] ⚠️ Стабильная версия не определена")
-
-    # ── 5. ANSWER ────────────────────────────────────────────────────
-    result_str = vp_answer(validated, pages, sw_name, language)
-    print(f"[VP:PIPELINE] ✓ Завершён. Страниц: {len(pages)}, "
-          f"символов в контексте: {len(result_str)}")
-
-    return result_str, pages
-
-def deep_web_search(
-    query: str,
-    num_results: int = 5,
-    region: str = "wt-wt",
-    language: str = "russian",
-    max_pages: int = 3,
-) -> tuple:
-    """
-    Глубокий веб-поиск с полным пайплайном качества.
-
-    Пайплайн:
-    1. Первичный поиск (DuckDuckGo)
-    2. Загрузка страниц + фильтр релевантности (is_relevant_page)
-    3. Фильтр свежести + наличия фактов (filter_pages)
-    4. Оценка качества источников (source_quality_score)
-       → сортировка, выбор топ-3 лучших
-       → если качественных < 2: автоматический повторный поиск
-    5. Финальный retry_search_if_needed если всё ещё мало источников
-
-    Возвращает КОРТЕЖ (result_str: str, page_contents: list):
-      - result_str    — текстовый блок для передачи в промпт
-      - page_contents — список dict с добавленным 'quality_score'
-    """
-    print(f"[DEEP_SEARCH] ═══ ЗАПУСК ГЛУБОКОГО ВЕБ-ПОИСКА ═══")
-    print(f"[DEEP_SEARCH] Запрос: {query}")
-
-    # ── ШАГ 1: Первичный поиск ──────────────────────────────────────
-    search_results = google_search(query, num_results, region, language)
-
-    if "Ничего не найдено" in search_results or "Ошибка" in search_results:
-        return search_results, []
-
-    import re
-    urls = re.findall(r'Ссылка: (https?://[^\s]+)', search_results)
-
-    if not urls:
-        print(f"[DEEP_SEARCH] ⚠️ URL не найдены в результатах")
-        return search_results, []
-
-    print(f"[DEEP_SEARCH] Найдено {len(urls)} URL для анализа")
-
-    # ── ШАГ 2: Загрузка + фильтр релевантности ──────────────────────
-    effective_max = min(max(max_pages, 5), len(urls))  # берём чуть больше для отбора
-    raw_pages = []
-
-    for i, url in enumerate(urls[:effective_max], 1):
-        print(f"[DEEP_SEARCH] Загрузка страницы {i}/{effective_max}...")
-        page_text = fetch_page_content(url, max_chars=3000)
-
-        if page_text and "[Ошибка" not in page_text:
-            is_ok, scores, reason = is_relevant_page(query, page_text, url=url)
-            if is_ok:
-                raw_pages.append({
-                    "url": url,
-                    "content": page_text,
-                    "relevance_score": scores.get("total_score", 0),
-                })
-                print(f"[DEEP_SEARCH] ✅ Страница {i} релевантна "
-                      f"(total={scores.get('total_score',0):.0f})")
-            else:
-                print(f"[DEEP_SEARCH] ❌ Страница {i} ОТКЛОНЕНА: {reason}")
-        else:
-            print(f"[DEEP_SEARCH] ⚠️ Страница {i}: ошибка загрузки")
-
-    # ── ШАГ 3: Свежесть + факты ─────────────────────────────────────
-    fresh_pages = filter_pages(raw_pages, query)
-
-    # ── ШАГ 4: Оценка качества + сортировка + retry ─────────────────
-    print(f"[DEEP_SEARCH] 🔍 Оцениваю качество {len(fresh_pages)} источников...")
-    quality_pages, needs_quality_retry = rank_and_select_sources(
-        fresh_pages, query, top_n=3, min_quality_score=20.0, min_sources=2
-    )
-
-    if needs_quality_retry:
-        print(f"[DEEP_SEARCH] 🔄 Недостаточно качественных источников, "
-              f"запускаю повторный поиск...")
-        quality_pages = retry_search_if_needed(
-            quality_pages,
-            query,
-            num_results=num_results,
-            region=region,
-            language=language,
-            max_pages=max_pages,
-            min_good_sources=2,
-        )
-        # После retry — снова оцениваем и сортируем
-        if quality_pages:
-            quality_pages, _ = rank_and_select_sources(
-                quality_pages, query, top_n=3, min_quality_score=5.0
-            )
-
-    page_contents = quality_pages
-
-    if not page_contents:
-        print(f"[DEEP_SEARCH] ⚠️ Подходящих страниц нет, возвращаю базовые результаты")
-        return search_results, []
-
-    # ── ШАГ 5: Формируем текстовый блок для промпта ─────────────────
-    enhanced_results = search_results + "\n\n" + "═" * 60 + "\n"
-    enhanced_results += "📄 СОДЕРЖИМОЕ ПРОАНАЛИЗИРОВАННЫХ СТРАНИЦ:\n"
-    enhanced_results += "═" * 60 + "\n\n"
-
-    for i, page in enumerate(page_contents, 1):
-        q_score = page.get("quality_score", 0)
-        tier    = page.get("quality_detail", {}).get("tier", "")
-        enhanced_results += f"[Источник {i} | качество: {q_score:.0f}пт | {tier}]\n"
-        enhanced_results += f"URL: {page['url']}\n"
-        enhanced_results += f"Текст: {page['content']}\n\n"
-        enhanced_results += "-" * 60 + "\n\n"
-
-    print(f"[DEEP_SEARCH] ✓ Завершён. "
-          f"Лучших источников: {len(page_contents)}, "
-          f"объём: {len(enhanced_results)} символов")
-
-    return enhanced_results, page_contents
-
-def fallback_web_search(query: str, num_results: int = 5, language: str = "russian") -> str:
-    """Fallback веб-поиск через DuckDuckGo HTML без внешних библиотек"""
-    print(f"[FALLBACK_SEARCH] Запуск fallback поиска для: {query}")
-    
-    try:
-        import urllib.parse
-        import re
-        from html import unescape
-        
-        # Формируем URL для DuckDuckGo
-        encoded_query = urllib.parse.quote_plus(query)
-        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-        
-        # Настраиваем заголовки чтобы выглядеть как браузер
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7' if language == "russian" else 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        
-        print(f"[FALLBACK_SEARCH] Отправка запроса к DuckDuckGo...")
-        response = requests.get(search_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        html_content = response.text
-        print(f"[FALLBACK_SEARCH] Получен HTML, длина: {len(html_content)} символов")
-        
-        # Парсим результаты с помощью регулярных выражений
-        # DuckDuckGo HTML использует структуру: <div class="result">
-        
-        # Ищем заголовки результатов
-        title_pattern = r'<a[^>]*class="result__a"[^>]*>([^<]+)</a>'
-        titles = re.findall(title_pattern, html_content)
-        
-        # Ищем описания
-        snippet_pattern = r'<a[^>]*class="result__snippet"[^>]*>([^<]+)</a>'
-        snippets = re.findall(snippet_pattern, html_content)
-        
-        # Ищем ссылки
-        url_pattern = r'<a[^>]*class="result__url"[^>]*href="([^"]+)"'
-        urls = re.findall(url_pattern, html_content)
-        
-        # Если стандартный паттерн не сработал, пробуем альтернативный
-        if not titles:
-            print(f"[FALLBACK_SEARCH] Стандартный паттерн не сработал, пробуем альтернативный...")
-            # Альтернативный паттерн для нового формата DuckDuckGo
-            title_pattern = r'class="result__title"[^>]*><a[^>]*>(.+?)</a>'
-            titles = re.findall(title_pattern, html_content, re.DOTALL)
-            
-            snippet_pattern = r'class="result__snippet">(.+?)</div>'
-            snippets = re.findall(snippet_pattern, html_content, re.DOTALL)
-        
-        print(f"[FALLBACK_SEARCH] Найдено: заголовков={len(titles)}, описаний={len(snippets)}, ссылок={len(urls)}")
-        
-        if not titles and not snippets:
-            print(f"[FALLBACK_SEARCH] Не удалось распарсить результаты. Возможно, изменился формат DuckDuckGo.")
-            return "⚠️ Не удалось получить результаты поиска. Попробуйте установить библиотеку: pip install ddgs"
-        
-        # Объединяем результаты
-        search_results = []
-        for i in range(min(num_results, len(titles))):
-            title = unescape(re.sub(r'<[^>]+>', '', titles[i])).strip() if i < len(titles) else "Без заголовка"
-            snippet = unescape(re.sub(r'<[^>]+>', '', snippets[i])).strip() if i < len(snippets) else "Нет описания"
-            url = urls[i] if i < len(urls) else ""
-            
-            # Декодируем URL если он закодирован
-            if url.startswith('//duckduckgo.com/l/?'):
-                # Извлекаем реальный URL из redirect
-                url_match = re.search(r'uddg=([^&]+)', url)
-                if url_match:
-                    url = urllib.parse.unquote(url_match.group(1))
-            
-            search_results.append(
-                f"[Результат {i+1}]\n"
-                f"Заголовок: {title}\n"
-                f"Описание: {snippet}\n"
-                f"Ссылка: {url}"
-            )
-            print(f"[FALLBACK_SEARCH] Результат {i+1}: {title[:50]}...")
-        
-        if not search_results:
-            return "⚠️ Результаты поиска пусты. Попробуйте переформулировать запрос."
-        
-        final_results = "\n\n".join(search_results)
-        print(f"[FALLBACK_SEARCH] ✓ Fallback поиск завершён. Найдено {len(search_results)} результатов")
-        return final_results
-        
-    except requests.Timeout:
-        return "⚠️ Превышено время ожидания ответа от поисковика. Попробуйте снова."
-    except requests.RequestException as e:
-        return f"⚠️ Ошибка сетевого подключения: {e}"
-    except Exception as e:
-        print(f"[FALLBACK_SEARCH] ✗ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"⚠️ Ошибка fallback поиска: {e}"
-
-# -------------------------
-# TTS с pyttsx3
-# -------------------------
-def compress_search_results(search_results: str, max_length: int) -> str:
-    """Сжимает результаты поиска до нужной длины, сохраняя самое важное"""
-    print(f"[COMPRESS] Начальная длина: {len(search_results)} символов")
-    print(f"[COMPRESS] Целевая длина: {max_length} символов")
-    
-    if len(search_results) <= max_length:
-        print(f"[COMPRESS] Сжатие не требуется")
-        return search_results
-    
-    # Разбиваем на отдельные результаты
-    results = search_results.split('[Результат ')
-    if len(results) <= 1:
-        # Если не удалось разбить, просто обрезаем
-        print(f"[COMPRESS] Простое обрезание до {max_length} символов")
-        return search_results[:max_length] + "..."
-    
-    # Первый элемент - пустой, убираем
-    results = results[1:]
-    
-    # Вычисляем, сколько символов на каждый результат
-    chars_per_result = max_length // len(results)
-    print(f"[COMPRESS] Результатов: {len(results)}, символов на результат: {chars_per_result}")
-    
-    compressed_results = []
-    for i, result in enumerate(results, 1):
-        # Восстанавливаем структуру
-        result = '[Результат ' + result
-        
-        # Извлекаем основные части
-        lines = result.split('\n')
-        title_line = ""
-        description_line = ""
-        link_line = ""
-        
-        for line in lines:
-            if line.startswith('Заголовок:'):
-                title_line = line
-            elif line.startswith('Описание:'):
-                description_line = line
-            elif line.startswith('Ссылка:'):
-                link_line = line
-        
-        # Сжимаем описание, если нужно
-        if description_line:
-            desc_prefix = "Описание: "
-            desc_text = description_line[len(desc_prefix):]
-            
-            # Оставляем место для заголовка и ссылки (примерно 200 символов)
-            available_for_desc = chars_per_result - 200
-            if available_for_desc < 100:
-                available_for_desc = 100
-            
-            if len(desc_text) > available_for_desc:
-                desc_text = desc_text[:available_for_desc] + "..."
-                description_line = desc_prefix + desc_text
-        
-        # Собираем сжатый результат
-        compressed = f"[Результат {i}]\n{title_line}\n{description_line}\n{link_line}"
-        compressed_results.append(compressed)
-    
-    final_result = "\n\n".join(compressed_results)
-    print(f"[COMPRESS] Итоговая длина: {len(final_result)} символов")
-    
-    return final_result
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ПАЙПЛАЙН ОБРАБОТКИ ОТВЕТА ПОСЛЕ ПОИСКА
-# ═══════════════════════════════════════════════════════════════════
-
-def summarize_sources(raw_search_results: str, query: str, detected_language: str = "russian") -> str:
-    """
-    Вызывает Ollama для извлечения только фактов из сырого содержимого страниц.
-    Модели передаётся только сжатый список фактов, а не длинный текст страниц.
-    """
-    print(f"[SUMMARIZE] Начинаю извлечение фактов из результатов поиска...")
-
-    # Если результаты небольшие — не тратим время на промежуточный вызов
-    if len(raw_search_results) < 1500:
-        print(f"[SUMMARIZE] Результаты небольшие ({len(raw_search_results)} символов), пропускаем суммаризацию")
-        return raw_search_results
-
-    if detected_language == "russian":
-        summarize_prompt = f"""Ты — строгий фильтр фактов. Вот содержимое веб-страниц по запросу: "{query}"
-
-{raw_search_results}
-
-ЗАДАЧА: Извлеки ТОЛЬКО факты, которые НАПРЯМУЮ отвечают на запрос "{query}".
-
-СТРОГИЕ ПРАВИЛА:
-- ❌ ИГНОРИРУЙ результаты, которые не относятся к теме запроса (реклама, случайные страницы, не по теме)
-- ❌ НЕ включай факты о посторонних вещах, даже если они есть в источниках
-- ✅ Включай ТОЛЬКО факты, прямо отвечающие на запрос
-- Каждый факт — отдельная строка, начинающаяся с "• "
-- Максимум 10 фактов
-- НЕ копируй целые абзацы — только суть
-- НЕ добавляй своих рассуждений
-- Если ни один результат не относится к теме — напиши: "Релевантных фактов не найдено"
-
-Отвечай на русском языке."""
-    else:
-        summarize_prompt = f"""You are a strict fact filter. Here is web page content for query: "{query}"
-
-{raw_search_results}
-
-TASK: Extract ONLY facts that DIRECTLY answer the query "{query}".
-
-STRICT RULES:
-- ❌ IGNORE results not related to the query topic (ads, random pages, off-topic)
-- ❌ Do NOT include facts about unrelated things, even if they appear in sources
-- ✅ Include ONLY facts that directly answer the query
-- Each fact on a new line starting with "• "
-- Maximum 10 facts
-- Do NOT copy full paragraphs — only the core info
-- Do NOT add your own reasoning
-- If no results are relevant — write: "No relevant facts found"
-
-Answer in English."""
-
-    try:
-        payload = {
-            "model": get_current_ollama_model(),
-            "messages": [{"role": "user", "content": summarize_prompt}],
-            "stream": False,
-            "options": {"num_predict": 600, "temperature": 0.1}
-        }
-        response = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=45)
-        if response.status_code == 200:
-            data = response.json()
-            facts = data.get("message", {}).get("content", "").strip()
-            if facts and len(facts) > 50:
-                print(f"[SUMMARIZE] ✓ Факты извлечены. Длина: {len(facts)} символов")
-                return facts
-    except Exception as e:
-        print(f"[SUMMARIZE] ⚠️ Ошибка при суммаризации: {e}")
-
-    # Если что-то пошло не так — возвращаем оригинал
-    print(f"[SUMMARIZE] Возвращаю оригинальные результаты")
-    return raw_search_results
-
-
-def detect_question_parts(query: str) -> dict:
-    """
-    Определяет структуру вопроса пользователя:
-    - есть ли запрос на версию/номер
-    - есть ли запрос на изменения/что нового
-    - есть ли запрос на объяснение/как работает
-    - сколько отдельных вопросов/пунктов
-    """
-    q = query.lower()
-
-    has_version = any(kw in q for kw in [
-        "версия", "version", "v.", "релиз", "release", "обновление", "update",
-        "какая версия", "последняя версия", "новая версия", "вышла"
-    ])
-
-    has_changes = any(kw in q for kw in [
-        "что изменилось", "что нового", "что добавили", "что нового в",
-        "изменения", "нововведения", "changelog", "changes", "what's new",
-        "что поменялось", "отличия", "отличается", "новые функции", "улучшения"
-    ])
-
-    # ВАЖНО: не используем одиночное "как" — оно входит в любое предложение
-    # ("как дела", "как называется", "как погода" и т.д.) → ложные срабатывания.
-    # Только конкретные фразы, явно запрашивающие развёрнутое объяснение.
-    has_explanation = any(kw in q for kw in [
-        "как работает", "как устроен", "как происходит", "как это работает",
-        "как используется", "как настроить", "как установить", "как сделать",
-        "почему", "зачем", "объясни", "расскажи подробно",
-        "what is", "how does", "how to", "how do", "explain", "why",
-        "что это такое", "что такое", "что из себя представляет",
-        "в чём разница", "в чем разница", "чем отличается",
-    ])
-
-    # Подсчёт пунктов: вопросительные знаки, союзы "и ещё", нумерация
-    question_marks = q.count("?")
-    has_multiple = (
-        question_marks > 1
-        or any(kw in q for kw in ["и ещё", "и также", "а также", "плюс", "и ещё", "кроме того", "во-первых", "и как"])
-        or (has_version and has_changes)
-        or (has_version and has_explanation)
-        or (has_changes and has_explanation)
-    )
-
-    parts_count = sum([has_version, has_changes, has_explanation])
-    if question_marks > 1:
-        parts_count = max(parts_count, question_marks)
-
-    result = {
-        "has_version": has_version,
-        "has_changes": has_changes,
-        "has_explanation": has_explanation,
-        "has_multiple": has_multiple,
-        "parts_count": parts_count
-    }
-    print(f"[DETECT_PARTS] Анализ вопроса: {result}")
-    return result
-
-
-def detect_language_of_text(text: str) -> str:
-    """Определяет язык текста по характерным символам."""
-    cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
-    latin = sum(1 for c in text if 'a' <= c.lower() <= 'z')
-    if cyrillic > latin:
-        return "russian"
-    return "english"
-
-
-def validate_answer(answer: str, query: str, detected_language: str, facts: str = "") -> dict:
-    """
-    Проверяет качество ответа:
-    - язык совпадает с языком пользователя
-    - нет вставок на другом языке (более 20% слов другого языка)
-    - все части вопроса раскрыты
-    - нет явной копипасты из источников (длинные совпадения >80 символов)
-
-    Возвращает: {"valid": bool, "issues": list[str]}
-    """
-    issues = []
-    answer_lower = answer.lower()
-
-    # 1. Проверка языка
-    answer_lang = detect_language_of_text(answer)
-    if answer_lang != detected_language:
-        issues.append(f"wrong_language: ответ на {answer_lang}, ожидается {detected_language}")
-
-    # 2. Проверка смешивания языков
-    if detected_language == "russian":
-        # Считаем процент латинских слов (исключаем URL и технические термины)
-        words = answer.split()
-        latin_words = [w for w in words if all('a' <= c.lower() <= 'z' for c in w if c.isalpha()) and len(w) > 3 and 'http' not in w]
-        if len(words) > 10 and len(latin_words) / len(words) > 0.25:
-            issues.append(f"language_mixing: {len(latin_words)}/{len(words)} слов латинские")
-
-    # 3. Проверка полноты по частям вопроса
-    parts = detect_question_parts(query)
-    if parts["has_version"] and not any(kw in answer_lower for kw in ["версия", "version", "v.", "релиз", "release", "вышла", "обновлен"]):
-        issues.append("missing_version: не упомянута версия/релиз")
-    if parts["has_changes"] and not any(kw in answer_lower for kw in ["изменил", "добавил", "нов", "улучшил", "исправил", "change", "new", "update", "feature"]):
-        issues.append("missing_changes: не описаны изменения")
-    # Порог длины: считаем ответ слишком коротким только если:
-    # 1. Вопрос сам по себе длинный (> 40 символов) — значит, ждём развёрнутый ответ
-    # 2. Ответ короче 150 символов
-    # Короткие вопросы ("почему небо синее?") могут получать короткие ответы.
-    if parts["has_explanation"] and len(query) > 40 and len(answer) < 150:
-        issues.append("missing_explanation: объяснение слишком короткое")
-
-    # 4. Проверка копипасты из источников (если переданы факты)
-    if facts:
-        # Ищем длинные строки (>80 символов), которые есть и в ответе, и в фактах
-        sentences = [s.strip() for s in facts.replace('\n', '. ').split('.') if len(s.strip()) > 80]
-        for sentence in sentences[:20]:
-            # Нормализуем для сравнения
-            s_norm = ' '.join(sentence.lower().split())
-            a_norm = ' '.join(answer.lower().split())
-            if s_norm in a_norm:
-                issues.append(f"copy_paste: найдена копипаста из источников")
-                break
-
-    valid = len(issues) == 0
-    result = {"valid": valid, "issues": issues}
-    if not valid:
-        print(f"[VALIDATE] ⚠️ Проверка не пройдена: {issues}")
-    else:
-        print(f"[VALIDATE] ✓ Ответ прошёл проверку")
-    return result
-
-
-def build_final_answer_prompt(user_message: str, facts: str, question_parts: dict, detected_language: str, issues: list = None) -> str:
-    """
-    Строит финальный промпт для генерации ответа с учётом структуры вопроса.
-    Используется при первой генерации и при перегенерации после провала валидации.
-    """
-    # Инструкции по структуре ответа
-    structure_hints = []
-    if question_parts["has_version"]:
-        if detected_language == "russian":
-            structure_hints.append("• Начни с текущей версии/релиза")
-        else:
-            structure_hints.append("• Start with the current version/release")
-
-    if question_parts["has_changes"]:
-        if detected_language == "russian":
-            structure_hints.append("• Перечисли изменения списком (каждое изменение — новая строка с «–»)")
-        else:
-            structure_hints.append("• List changes as bullet points (each change on new line with '–')")
-
-    if question_parts["has_explanation"]:
-        if detected_language == "russian":
-            structure_hints.append("• Объясни кратко своими словами, не цитируя источники")
-        else:
-            structure_hints.append("• Briefly explain in your own words, no direct quotes from sources")
-
-    if question_parts["has_multiple"]:
-        if detected_language == "russian":
-            structure_hints.append("• Ответь на ВСЕ части вопроса последовательно")
-        else:
-            structure_hints.append("• Answer ALL parts of the question in order")
-
-    structure_block = "\n".join(structure_hints) if structure_hints else ""
-
-    # Блок с исправлениями (при перегенерации)
-    fix_block = ""
-    if issues:
-        if detected_language == "russian":
-            fix_block = f"\n\nПРЕДЫДУЩИЙ ОТВЕТ БЫЛ ПЛОХИМ. Проблемы:\n" + "\n".join(f"- {i}" for i in issues) + "\nИСПРАВЬ все эти проблемы в новом ответе.\n"
-        else:
-            fix_block = f"\n\nPREVIOUS ANSWER WAS REJECTED. Issues:\n" + "\n".join(f"- {i}" for i in issues) + "\nFIX all these issues in the new answer.\n"
-
-    if detected_language == "russian":
-        prompt = f"""Ты помогаешь пользователю ответить на вопрос. У тебя есть список фактов из интернета.
-
-ФАКТЫ ИЗ ИСТОЧНИКОВ:
-{facts}
-
-ВОПРОС ПОЛЬЗОВАТЕЛЯ:
-{user_message}
-
-ТРЕБОВАНИЯ К ОТВЕТУ:
-{structure_block}
-• Используй ТОЛЬКО факты, которые НАПРЯМУЮ относятся к вопросу пользователя
-• ❌ ИГНОРИРУЙ любые факты не по теме (про другие фильмы, города, организации и т.д.)
-• Если фактов по теме мало — честно скажи что информации недостаточно, не додумывай
-• Пиши связный текст своими словами, не как кусок статьи
-• НЕ копируй фразы из источников — перефразируй
-• Отвечай ИСКЛЮЧИТЕЛЬНО на русском языке, без английских вставок
-• 🚫 НЕ вставляй URL-адреса в текст{fix_block}
-
-Ответ:"""
-    else:
-        prompt = f"""You are helping the user answer a question. You have a list of facts from the internet.
-
-FACTS FROM SOURCES:
-{facts}
-
-USER QUESTION:
-{user_message}
-
-ANSWER REQUIREMENTS:
-{structure_block}
-• Write coherent text, like a normal answer — not a fragment of an article
-• Use ONLY facts from the list above, don't invent anything
-• Do NOT copy phrases from sources — rephrase in your own words
-• Answer EXCLUSIVELY in English, no Russian inserts
-• 🚫 Do NOT insert URLs in the text{fix_block}
-
-Answer:"""
-
-    return prompt
-
-
-def build_contextual_search_query(user_message: str, chat_manager, chat_id: int, detected_language: str) -> str:
-    """
-    Формирует контекстный поисковый запрос на основе истории диалога.
-    
-    Логика:
-    1. Определяет, является ли вопрос уточняющим (короткий или с ключевыми словами)
-    2. Если уточняющий - добавляет контекст из предыдущих сообщений
-    3. Если самостоятельный - возвращает как есть
-    """
-    print(f"[CONTEXTUAL_SEARCH] Анализирую вопрос...")
-    print(f"[CONTEXTUAL_SEARCH] Вопрос: {user_message}")
-    
-    # Получаем последние сообщения для контекста
-    if chat_manager and chat_id:
-        history = chat_manager.get_chat_messages(chat_id, limit=10)
-    else:
-        # Fallback на старую БД
-        import sqlite3
-        conn = sqlite3.connect("chat_memory.db")
-        cur = conn.cursor()
-        cur.execute("SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT 10")
-        history = list(reversed(cur.fetchall()))
-        conn.close()
-    
-    if not history or len(history) < 2:
-        print(f"[CONTEXTUAL_SEARCH] История короткая, используем исходный запрос")
-        return user_message
-    
-    # Ключевые слова уточняющих вопросов
-    clarifying_keywords_ru = [
-        'а почему', 'а как', 'а где', 'а когда', 'а что', 'а кто', 'а после', 'а завтра', 'а вчера', 'а сегодня',
-        'почему', 'как именно', 'что именно', 'когда именно', 'где именно',
-        'расскажи', 'подробнее', 'ещё', 'еще', 'тоже', 'также', 'дальше',
-        'его', 'её', 'их', 'этого', 'этой', 'этим', 'этот', 'эта', 'это',
-        'тогда', 'потом', 'после этого', 'что дальше',
-        'завтра', 'вчера', 'сегодня', 'послезавтра'  # ВАЖНО: добавлены временные слова
-    ]
-    
-    clarifying_keywords_en = [
-        'and why', 'and how', 'and where', 'and when', 'and what', 'and who',
-        'why', 'how exactly', 'what exactly', 'when exactly', 'where exactly',
-        'tell me', 'more', 'also', 'too', 'then', 'after', 'next',
-        'it', 'its', 'their', 'this', 'that', 'those', 'these',
-        'tomorrow', 'yesterday', 'today'  # Temporal words
-    ]
-    
-    keywords = clarifying_keywords_ru if detected_language == "russian" else clarifying_keywords_en
-    
-    user_lower = user_message.lower().strip()
-    
-    # Проверка 1: Содержит ли вопрос ключевые слова уточнения
-    has_clarifying_words = any(keyword in user_lower for keyword in keywords)
-    
-    # Проверка 2: ОЧЕНЬ короткий вопрос (менее 6 слов) - скорее всего уточнение
-    is_very_short = len(user_message.split()) < 6
-    
-    # Проверка 3: Начинается с вопросительного слова без контекста
-    starts_with_question = any(user_lower.startswith(q) for q in ['почему', 'как', 'где', 'когда', 'зачем', 'why', 'how', 'where', 'when'])
-    
-    # Проверка 4: Начинается с "а " - ВСЕГДА уточнение
-    starts_with_a = user_lower.startswith('а ') or user_lower.startswith('and ')
-    
-    # Проверка 5: Только временные слова (завтра, вчера, сегодня)
-    is_temporal_only = user_lower in ['завтра', 'вчера', 'сегодня', 'послезавтра', 'tomorrow', 'yesterday', 'today']
-    
-    # РАСШИРЕННАЯ ЛОГИКА: считаем уточняющим если:
-    # - есть ключевые слова ИЛИ
-    # - очень короткий вопрос ИЛИ
-    # - начинается с "а " ИЛИ
-    # - только временное слово
-    is_clarifying = has_clarifying_words or is_very_short or starts_with_a or is_temporal_only
-    
-    if is_clarifying:
-        print(f"[CONTEXTUAL_SEARCH] ✅ Обнаружен УТОЧНЯЮЩИЙ вопрос")
-        print(f"[CONTEXTUAL_SEARCH]    - Ключевые слова: {has_clarifying_words}")
-        print(f"[CONTEXTUAL_SEARCH]    - Очень короткий (<6 слов): {is_very_short}")
-        print(f"[CONTEXTUAL_SEARCH]    - Начинается с 'а': {starts_with_a}")
-        print(f"[CONTEXTUAL_SEARCH]    - Только временное слово: {is_temporal_only}")
-        
-        # Извлекаем последний вопрос пользователя для контекста
-        context_parts = []
-        
-        for i in range(len(history) - 1, -1, -1):
-            row = history[i]
-            role, content = row[0], row[1]
-            
-            # Берём последний вопрос пользователя (не текущий)
-            if role == "user" and content != user_message:
-                context_parts.insert(0, content)
-                print(f"[CONTEXTUAL_SEARCH]    Найден предыдущий вопрос: {content[:50]}...")
-                break
-        
-        if context_parts:
-            # Формируем расширенный запрос
-            main_context = context_parts[0]
-            
-            # УМНАЯ ОБРАБОТКА УТОЧНЯЮЩИХ ВОПРОСОВ
-            user_lower = user_message.lower().strip()
-            
-            # Если вопрос начинается с "а в/а на" - это изменение места
-            # Пример: "погода в Питере" + "а в Мытищах" → "погода в Мытищах"
-            if detected_language == "russian":
-                # Проверяем паттерны изменения места
-                location_change_patterns = [
-                    ('а в ', 'в '),
-                    ('а на ', 'на '),
-                    ('а для ', 'для ')
-                ]
-                
-                for pattern, replacement in location_change_patterns:
-                    if user_lower.startswith(pattern):
-                        # Извлекаем новое место
-                        new_location_part = user_message[len(pattern):]
-                        
-                        # Заменяем старое место на новое в исходном запросе
-                        # Ищем паттерны типа "в [город]", "на [место]"
-                        import re
-                        # Заменяем первое вхождение предлога + место
-                        for prep in ['в ', 'на ', 'для ']:
-                            pattern_to_replace = prep + r'\S+'
-                            if re.search(pattern_to_replace, main_context.lower()):
-                                contextual_query = re.sub(
-                                    pattern_to_replace,
-                                    replacement + new_location_part,
-                                    main_context,
-                                    count=1,
-                                    flags=re.IGNORECASE
-                                )
-                                print(f"[CONTEXTUAL_SEARCH] 🔄 Заменено место: '{main_context}' → '{contextual_query}'")
-                                return contextual_query
-                        
-                        # Если не нашли паттерн, добавляем новое место в конец основного запроса
-                        contextual_query = main_context.replace(main_context.split()[-1], new_location_part)
-                        print(f"[CONTEXTUAL_SEARCH] 🔄 Изменено место (fallback): '{contextual_query}'")
-                        return contextual_query
-            
-            else:
-                # Для английского
-                location_change_patterns = [
-                    ('and in ', 'in '),
-                    ('and at ', 'at '),
-                    ('and for ', 'for ')
-                ]
-                
-                for pattern, replacement in location_change_patterns:
-                    if user_lower.startswith(pattern):
-                        new_location_part = user_message[len(pattern):]
-                        
-                        import re
-                        for prep in ['in ', 'at ', 'for ']:
-                            pattern_to_replace = prep + r'\S+'
-                            if re.search(pattern_to_replace, main_context.lower()):
-                                contextual_query = re.sub(
-                                    pattern_to_replace,
-                                    replacement + new_location_part,
-                                    main_context,
-                                    count=1,
-                                    flags=re.IGNORECASE
-                                )
-                                print(f"[CONTEXTUAL_SEARCH] 🔄 Replaced location: '{main_context}' → '{contextual_query}'")
-                                return contextual_query
-                        
-                        contextual_query = main_context.replace(main_context.split()[-1], new_location_part)
-                        print(f"[CONTEXTUAL_SEARCH] 🔄 Changed location (fallback): '{contextual_query}'")
-                        return contextual_query
-            
-            # Стандартное поведение для других типов уточнений
-            # Комбинируем: "основная тема" + "уточняющий вопрос"
-            contextual_query = f"{main_context} {user_message}"
-            
-            print(f"[CONTEXTUAL_SEARCH] ✅ Расширенный запрос: {contextual_query[:100]}...")
-            return contextual_query
-        else:
-            print(f"[CONTEXTUAL_SEARCH] ⚠️  Не найден предыдущий контекст, используем исходный запрос")
-            return user_message
-    else:
-        print(f"[CONTEXTUAL_SEARCH] ℹ️  Самостоятельный вопрос, контекст не требуется")
-        return user_message
-
-# Озвучка полностью удалена
-
-
-
-def init_db():
-    """Инициализирует основную БД. При ошибке — чинит и пересоздаёт."""
-    try:
-        check_database_health(DB_FILE, required_tables=["messages"], auto_fix=True)
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            role TEXT,
-            content TEXT,
-            created_at TEXT)
-        """)
-        conn.commit()
-        conn.close()
-        print("[DB] ✅ chat_memory.db готова")
-    except Exception as e:
-        log_error("INIT_DB", e)
-        # Последний шанс — создать пустую БД
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            conn.close()
-        except Exception:
-            pass
-
-def save_message(role: str, content: str):
-    conn = safe_db_connect(DB_FILE)
-    if conn is None:
-        print("[DB] ⚠️ save_message: нет соединения с БД")
-        return
-    try:
-        conn.execute(
-            "INSERT INTO messages (role, content, created_at) VALUES (?, ?, ?)",
-            (role, content, datetime.utcnow().isoformat())
-        )
-        conn.commit()
-    except Exception as e:
-        log_error("SAVE_MSG", e)
-    finally:
-        conn.close()
-
-def load_history(limit=MAX_HISTORY_LOAD):
-    conn = safe_db_connect(DB_FILE)
-    if conn is None:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT ?",
-            (limit,)
-        )
-        rows = cur.fetchall()
-        return list(reversed(rows))
-    except Exception as e:
-        log_error("LOAD_HISTORY", e)
-        return []
-    finally:
-        conn.close()
-
-def clear_messages():
-    conn = safe_db_connect(DB_FILE)
-    if conn is None:
-        return
-    try:
-        conn.execute("DELETE FROM messages")
-        conn.commit()
-    except Exception as e:
-        log_error("CLEAR_MSG", e)
-    finally:
-        conn.close()
-
-# -------------------------
-# Model-call helpers
-# -------------------------
-# call_ollama_vision перенесена в vision_handler.py
-
-# call_ollama_chat и warm_up_model перенесены в llama_handler.py
-# Они импортируются выше через 'from llama_handler import ...'
-
-def get_memory_manager(model_key: str):
-    """
-    Возвращает нужный менеджер памяти в зависимости от модели.
-    DeepSeek  → DeepSeekMemoryManager  (deepseek_memory.db)
-    Mistral   → MistralMemoryManager   (mistral_memory.db)
-    LLaMA и все остальные → ContextMemoryManager (context_memory.db)
-    """
-    if model_key in ("deepseek", "deepseek-r1") and _DS_MEMORY is not None:
-        return _DS_MEMORY
-    if model_key == "mistral" and _MISTRAL_MEMORY is not None:
-        return _MISTRAL_MEMORY
-    # ✅ ИСПРАВЛЕНО: возвращаем singleton, а не новый объект каждый раз
-    return _CTX_MEMORY
-
-
-def clear_chat_all_memories(chat_id: int):
-    """Очищает память конкретного чата во ВСЕХ трёх менеджерах (LLaMA + DeepSeek + Mistral)."""
-    try:
-        _CTX_MEMORY.delete_chat_context(chat_id)
-        print(f"[MEMORY] LLaMA память чата {chat_id} удалена")
-    except Exception as e:
-        print(f"[MEMORY] LLaMA память: {e}")
-    try:
-        if _DS_MEMORY is not None:
-            _DS_MEMORY.delete_chat_context(chat_id)
-            print(f"[MEMORY] DeepSeek память чата {chat_id} удалена")
-    except Exception as e:
-        print(f"[MEMORY] DeepSeek память: {e}")
-    try:
-        if _MISTRAL_MEMORY is not None:
-            # ИСПРАВЛЕНО: передаём chat_id, иначе очищается только chat_id=0
-            _MISTRAL_MEMORY.clear_all(chat_id=chat_id)
-            print(f"[MEMORY] Mistral память чата {chat_id} удалена")
-    except Exception as e:
-        print(f"[MEMORY] Mistral память: {e}")
-
-
-def clear_all_memories_global():
-    """Полная очистка памяти ВСЕХ моделей для ВСЕХ чатов. Вызывать при удалении всех чатов."""
-    try:
-        _CTX_MEMORY.clear_all_context()
-        print("[MEMORY] Вся память LLaMA очищена")
-    except Exception as e:
-        print(f"[MEMORY] LLaMA clear_all: {e}")
-    try:
-        if _DS_MEMORY is not None:
-            _DS_MEMORY.clear_all_context()
-            print("[MEMORY] Вся память DeepSeek очищена")
-    except Exception as e:
-        print(f"[MEMORY] DeepSeek clear_all: {e}")
-    try:
-        if _MISTRAL_MEMORY is not None:
-            # ИСПРАВЛЕНО: clear_all_context() удаляет ВСЕ чаты,
-            # а не только chat_id=0 как делал clear_all() без аргумента
-            _MISTRAL_MEMORY.clear_all_context()
-            print("[MEMORY] Вся память Mistral очищена")
-    except Exception as e:
-        print(f"[MEMORY] Mistral clear_all: {e}")
-
-
-def on_chat_switched_all_memories(new_chat_id: int):
-    """Уведомляет все менеджеры памяти о смене чата."""
-    if _DS_MEMORY is not None:
-        _DS_MEMORY.on_chat_switch(new_chat_id)
-
-
-_CONVERSATIONAL_RE = re.compile(
-    r"""^(?:
-        # Благодарности RU
-        спасибо[\w\s]{0,30}  | благодар[\w]{1,10}[\s\w]{0,20} |
-        # Подтверждения RU
-        ок[её]?й? | хорошо | понял[аи]? | понятно | ясно | отлично | супер |
-        норм(?:ально)? | ладно | угу | ага | да | нет | конечно | договорились |
-        всё\s+(?:ясно|понятно|окей|хорошо) | отлично[,!\s]* |
-        # Приветствия RU
-        привет[\w\s]{0,15} | здравствуй[\w\s]{0,15} | добрый\s+\w+ |
-        # Восклицания RU
-        круто[\s!]* | класс[\s!]* | прекрасно[\s!]* | замечательно[\s!]* |
-        шикарно[\s!]* | бомба[\s!]* | огонь[\s!]* | красота[\s!]* |
-        # Благодарности EN
-        thanks?[\s\w]{0,25} | thank\s+you[\s\w]{0,25} | thx[\s!]* | ty[\s!]* |
-        # Подтверждения EN
-        ok(?:ay)? | got\s+it | i\s+see | understood | sure | yep | yup |
-        cool[\s!]* | great[\s!]* | awesome[\s!]* | nice[\s!]* | perfect[\s!]* |
-        sounds?\s+good | makes?\s+sense | alright | roger |
-        # Приветствия EN
-        hi[\s\w]{0,10} | hello[\s\w]{0,10} | hey[\s\w]{0,10}
-    )[!?.,\s]*$""",
-    re.VERBOSE | re.IGNORECASE | re.UNICODE,
+# ══════════════════════════════════════════════════════════════════
+# ВЫНЕСЕНО В ОТДЕЛЬНЫЕ МОДУЛИ
+# ══════════════════════════════════════════════════════════════════
+from web_search import (
+    # Поиск и анализ источников
+    analyze_intent_for_search,
+    google_search,
+    deep_web_search,
+    fallback_web_search,
+    fetch_page_content,
+    rank_and_select_sources,
+    version_search_pipeline,
+    summarize_sources,
+    compress_search_results,
+    detect_question_parts,
+    validate_answer,
+    build_final_answer_prompt,
+    build_contextual_search_query,
+    # Разговорные ответы
+    is_short_acknowledgment,
+    _conversational_response,
+    # Иконка и UI-утилиты
+    create_app_icon,
+    _build_multi_size_icon,
+    _apply_macos_dock_icon,
+    create_menu_icon,
+    # Языковые и текстовые утилиты
+    detect_language_switch,
+    detect_forget_command,
+    detect_role_command,
+    extract_forget_target,
+    selective_forget_memory,
+    detect_math_problem,
+    detect_message_language,
+    format_text_with_markdown_and_math,
+    remove_english_words_from_russian,
+    check_spelling_and_suggest,
+    translate_to_russian,
+    detect_language_of_text,
+    # Константы
+    INTERNET_REQUIRED_KEYWORDS,
+    NO_INTERNET_KEYWORDS,
 )
 
-def _is_conversational_message(text: str) -> bool:
-    """
-    Возвращает True если сообщение — чисто социальное/разговорное:
-    благодарность, подтверждение, приветствие, восклицание.
-    Для таких сообщений НЕ нужно вшивать file_analysis в системный промпт —
-    это главная причина галлюцинаций о содержимом файлов.
-    """
-    stripped = text.strip()
-    # Длинные сообщения (>80 символов) скорее всего содержат реальный вопрос
-    if len(stripped) > 80:
-        return False
-    # Если есть вопросительный знак внутри — скорее всего вопрос
-    if '?' in stripped[:-1]:
-        return False
-    return bool(_CONVERSATIONAL_RE.match(stripped))
-
-
-def get_ai_response(user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key: str = None):
-    """Получить ответ от AI (с жёстким закреплением языка)"""
-    # Фиксируем модель ОДИН РАЗ — используем переданный ключ или читаем глобал
-    # Это предотвращает любую гонку потоков с llama_handler.CURRENT_AI_MODEL_KEY
-    _mk = model_key if model_key is not None else llama_handler.CURRENT_AI_MODEL_KEY
-    print(f"\n[GET_AI_RESPONSE] ========== НАЧАЛО ==========")
-    print(f"[GET_AI_RESPONSE] Сообщение пользователя: {user_message}")
-    print(f"[GET_AI_RESPONSE] Текущий язык интерфейса: {current_language}")
-    print(f"[GET_AI_RESPONSE] Глубокое мышление: {deep_thinking}")
-    print(f"[GET_AI_RESPONSE] Использовать поиск: {use_search}")
-    print(f"[GET_AI_RESPONSE] Забыть историю: {should_forget}")
-    print(f"[GET_AI_RESPONSE] Файлов прикреплено: {len(file_paths) if file_paths else 0}")
-
-    # НОРМАЛИЗАЦИЯ МАТЕМАТИЧЕСКИХ СИМВОЛОВ
-    # Заменяем специальные символы на стандартные ASCII
-    # Сохраняем оригинал для сравнения с историей (история хранит raw-текст)
-    _user_message_raw = user_message
-    user_message = user_message.replace('×', '*')  # Умножение
-    user_message = user_message.replace('÷', '/')  # Деление
-    user_message = user_message.replace('−', '-')  # Минус (длинное тире)
-    user_message = user_message.replace('±', '+/-')  # Плюс-минус
-    user_message = user_message.replace('–', '-')  # Среднее тире
-    user_message = user_message.replace('—', '-')  # Длинное тире
-    print(f"[GET_AI_RESPONSE] Нормализованное сообщение: {user_message}")
-
-    # ═══════════════════════════════════════════════════════════
-    # ОБРАБОТКА КОМАНД ПАМЯТИ
-    # ═══════════════════════════════════════════════════════════
-    user_lower = user_message.lower().strip()
-    
-    # Команда "ЗАПОМНИ"
-    if chat_id and (user_lower.startswith("запомни") or user_lower.startswith("remember")):
-        try:
-            context_mgr = get_memory_manager(_mk)
-            # Извлекаем текст после команды
-            if user_lower.startswith("запомни"):
-                memory_text = user_message[7:].strip()  # После "запомни"
-                if memory_text.startswith(":"):
-                    memory_text = memory_text[1:].strip()
-            else:
-                memory_text = user_message[8:].strip()  # После "remember"
-                if memory_text.startswith(":"):
-                    memory_text = memory_text[1:].strip()
-            
-            if memory_text:
-                context_mgr.save_context_memory(chat_id, "user_memory", memory_text)
-                print(f"[MEMORY] ✓ Сохранено: {memory_text[:50]}...")
-                return "✓ Запомнил!"
-        except Exception as e:
-            print(f"[MEMORY] ✗ Ошибка сохранения: {e}")
-
-    # ПРОВЕРЯЕМ РОЛЕВУЮ КОМАНДУ
-    role_info = detect_role_command(user_message)
-    role_instruction = ""
-    if role_info["is_role_command"]:
-        print(f"[GET_AI_RESPONSE] 🎭 Обнаружена РОЛЕВАЯ КОМАНДА: {role_info['role']}")
-        role_instruction = role_info["instruction"]
-    
-    # ОПРЕДЕЛЯЕМ РЕАЛЬНЫЙ ЯЗЫК ВОПРОСА
-    detected_language = detect_message_language(user_message)
-    # Для Mistral: если есть хоть одна кириллическая буква — принудительно русский.
-    # Исправляет ложное определение "english" из-за технических терминов (API, JSON...).
-    if _mk == "mistral":
-        _has_cyrillic = any('\u0400' <= ch <= '\u04FF' for ch in user_message)
-        if _has_cyrillic and detected_language != "russian":
-            detected_language = "russian"
-            print(f"[GET_AI_RESPONSE] [Mistral] Переопределён язык → РУССКИЙ (найдена кириллица)")
-    print(f"[GET_AI_RESPONSE] Определённый язык вопроса: {detected_language}")
-
-    # ═══════════════════════════════════════════════════════════
-    # DEEPSEEK: BYPASS ПРОСТОЙ АРИФМЕТИКИ
-    # Для "25 * 25", "100+200" и т.п. Python считает сам.
-    # DeepSeek не вызывается — он генерирует мусор на таких запросах.
-    # ═══════════════════════════════════════════════════════════
-    if _mk in ("deepseek", "deepseek-r1"):
-        _is_arith, _arith_expr = is_simple_arithmetic(user_message)
-        if _is_arith and _arith_expr:
-            _arith_result = compute_simple_arithmetic(_arith_expr, detected_language)
-            if _arith_result:
-                print(f"[GET_AI_RESPONSE] [DeepSeek] Простая арифметика — вычислено Python: {_arith_result}")
-                return _arith_result, []
-
-    # ОПРЕДЕЛЯЕМ, ЯВЛЯЕТСЯ ЛИ ЗАПРОС МАТЕМАТИЧЕСКОЙ ЗАДАЧЕЙ
-    is_math_problem = detect_math_problem(user_message)
-    if is_math_problem:
-        print(f"[GET_AI_RESPONSE] 🔬 Обнаружена МАТЕМАТИЧЕСКАЯ ЗАДАЧА - применяю олимпиадный режим")
-
-    # Выбираем режим системного промпта на основе ai_mode
-    if ai_mode == AI_MODE_FAST:
-        mode = "short"
-    elif ai_mode == AI_MODE_THINKING:
-        mode = "deep"
-    elif ai_mode == AI_MODE_PRO:
-        mode = "pro"
-    else:
-        # Fallback на старую логику если ai_mode не распознан
-        mode = "deep" if deep_thinking else "short"
-    
-    print(f"[GET_AI_RESPONSE] Выбран системный промпт: mode='{mode}', ai_mode='{ai_mode}'")
-    # Выбираем промпт в зависимости от текущей модели
-    if _mk in ("deepseek", "deepseek-r1"):
-        _ds_base = get_deepseek_system_prompt(detected_language, mode)
-        # Жёсткий префикс идентичности — предотвращает галлюцинацию "я GPT-4 от OpenAI".
-        # Маленькая 7b-модель без этого часто выдаёт данные обучения вместо правильного ответа.
-        if detected_language == "russian":
-            _identity_prefix = (
-                "Ты — ИИ-ассистент DeepSeek. "
-                "Ты НЕ GPT-4, НЕ ChatGPT, НЕ продукт OpenAI. "
-                "Ты создан компанией DeepSeek AI. "
-                "Отвечай коротко и по делу. "
-                "Ты помнишь всю историю нашего текущего разговора — она передана выше в сообщениях. "
-                "Если пользователь спрашивает что он только что написал или о чём шёл разговор — "
-                "посмотри в историю сообщений и ответь точно.\n\n"
-            )
-        else:
-            _identity_prefix = (
-                "You are DeepSeek AI assistant. "
-                "You are NOT GPT-4, NOT ChatGPT, NOT an OpenAI product. "
-                "You were created by DeepSeek AI. "
-                "Answer concisely. "
-                "You have full access to the current conversation history above. "
-                "If the user asks what they just wrote or what was discussed — "
-                "check the message history and answer precisely.\n\n"
-            )
-        base_system = _identity_prefix + _ds_base
-        print(f"[GET_AI_RESPONSE] Используется промпт DeepSeek (с префиксом идентичности)")
-    elif _mk == "mistral":
-        base_system = get_mistral_system_prompt(detected_language, mode)
-        print(f"[GET_AI_RESPONSE] Используется промпт Mistral Nemo")
-        # Если пользователь пытается исправить ИИ — добавляем жёсткое предупреждение
-        if detect_user_correction(user_message):
-            _warn = (
-                "\n\n🔴 ВНИМАНИЕ: ПОЛЬЗОВАТЕЛЬ СЧИТАЕТ ЧТО ТЫ ДОПУСТИЛ ОШИБКУ.\n"
-                "1. НЕ СОГЛАШАЙСЯ АВТОМАТИЧЕСКИ.\n"
-                "2. Пересчитай с нуля самостоятельно, покажи все шаги.\n"
-                "3. Если пользователь прав — признай и исправься.\n"
-                "4. Если ты прав — вежливо объясни с доказательством.\n"
-                "ЗАПРЕЩЕНО писать 'Вы правы' без собственной проверки."
-            )
-            base_system = base_system + _warn
-            print(f"[GET_AI_RESPONSE] ⚠️ Обнаружена попытка исправления — добавлено предупреждение")
-    else:
-        base_system = SYSTEM_PROMPTS.get(detected_language, SYSTEM_PROMPTS["russian"])[mode]
-
-    # ══════════════════════════════════════════════════════════
-    # ИНЖЕКЦИЯ ТЕКУЩЕЙ ДАТЫ И ВРЕМЕНИ — напрямую из Python
-    # Это 100% надёжно — модель не может "забыть" или проигнорировать
-    # ══════════════════════════════════════════════════════════
-    _now = datetime.now()
-    _weekdays_ru = ["понедельник","вторник","среда","четверг","пятница","суббота","воскресенье"]
-    _months_ru   = ["января","февраля","марта","апреля","мая","июня",
-                    "июля","августа","сентября","октября","ноября","декабря"]
-    _date_ru = f"{_now.day} {_months_ru[_now.month-1]} {_now.year} г., {_weekdays_ru[_now.weekday()]}"
-    _time_ru = _now.strftime("%H:%M")
-    _date_en = _now.strftime("%B %d, %Y, %A")
-    _time_en = _now.strftime("%H:%M")
-
-    # Вычисляем завтрашний и послезавтрашний день
-    from datetime import timedelta
-    _tomorrow = _now + timedelta(days=1)
-    _day_after = _now + timedelta(days=2)
-    _tomorrow_ru = f"{_tomorrow.day} {_months_ru[_tomorrow.month-1]} {_tomorrow.year} г., {_weekdays_ru[_tomorrow.weekday()]}"
-    _day_after_ru = f"{_day_after.day} {_months_ru[_day_after.month-1]} {_day_after.year} г., {_weekdays_ru[_day_after.weekday()]}"
-    _tomorrow_en = _tomorrow.strftime("%B %d, %Y, %A")
-    _day_after_en = _day_after.strftime("%B %d, %Y, %A")
-
-    if detected_language == "russian":
-        if _mk in ("deepseek", "deepseek-r1"):
-            # Для DeepSeek — компактная однострочная инжекция даты
-            _datetime_inject = f"\n\nСегодня: {_date_ru}, время: {_time_ru}."
-        else:
-            _datetime_inject = (
-                f"\n\n⚡ СИСТЕМНЫЙ ФАКТ (абсолютно точно, из системных часов компьютера):\n"
-                f"• Сегодня: {_date_ru}\n"
-                f"• Завтра: {_tomorrow_ru}\n"
-                f"• Послезавтра: {_day_after_ru}\n"
-                f"• Время сейчас: {_time_ru}\n"
-                f"ОБЯЗАТЕЛЬНО используй эти данные при любых вопросах о дате, времени, дне недели.\n"
-                f"Если пользователь спрашивает про 'завтра' — это {_tomorrow_ru}.\n"
-                f"Твои обучающие данные о датах УСТАРЕЛИ — доверяй только этому системному факту."
-            )
-    else:
-        if _mk in ("deepseek", "deepseek-r1"):
-            _datetime_inject = f"\n\nToday: {_date_en}, time: {_time_en}."
-        else:
-            _datetime_inject = (
-                f"\n\n⚡ SYSTEM FACT (exact, from computer system clock):\n"
-                f"• Today: {_date_en}\n"
-                f"• Tomorrow: {_tomorrow_en}\n"
-                f"• Day after tomorrow: {_day_after_en}\n"
-                f"• Current time: {_time_en}\n"
-                f"ALWAYS use this when answering questions about date, time, or day of week.\n"
-                f"If user asks about 'tomorrow' — that is {_tomorrow_en}.\n"
-                f"Your training data about dates is OUTDATED — trust only this system fact."
-            )
-    base_system = base_system + _datetime_inject
-    print(f"[GET_AI_RESPONSE] 📅 Инжектирована дата: {_date_ru if detected_language == 'russian' else _date_en}")
-    
-    # ═══════════════════════════════════════════════════════════
-    # ЗАГРУЗКА СОХРАНЁННОЙ ПАМЯТИ
-    # DeepSeek читает из deepseek_memory.db, LLaMA — из context_memory.db
-    # ═══════════════════════════════════════════════════════════
-    memory_context = ""
-    if chat_id:
-        try:
-            context_mgr = get_memory_manager(_mk)
-            saved_memories = context_mgr.get_context_memory(chat_id, limit=20)
-            
-            if saved_memories:
-                # Разделяем по типам
-                user_memories = [r[1] for r in saved_memories if r[0] == "user_memory"]
-                file_analyses = [r[1] for r in saved_memories if r[0] == "file_analysis"]
-                
-                # Пользовательская память
-                if user_memories:
-                    if detected_language == "russian":
-                        memory_context = "\n\n📌 ВАЖНАЯ ИНФОРМАЦИЯ (пользователь просил запомнить):\n"
-                        for idx, mem in enumerate(user_memories, 1):
-                            memory_context += f"{idx}. {mem}\n"
-                        print(f"[MEMORY] ✓ Загружено {len(user_memories)} записей памяти")
-                    else:
-                        memory_context = "\n\n📌 IMPORTANT INFORMATION (user asked to remember):\n"
-                        for idx, mem in enumerate(user_memories, 1):
-                            memory_context += f"{idx}. {mem}\n"
-                        print(f"[MEMORY] ✓ Loaded {len(user_memories)} memory records")
-                
-                # КРИТИЧНО: Добавляем контекст файлов из памяти
-                # НО только если:
-                #   1. В ТЕКУЩЕМ запросе нет своих файлов
-                #   2. Сообщение НЕ является чисто разговорным (спасибо, ок, привет…)
-                #      Для разговорных сообщений file_analysis НЕ нужен —
-                #      именно он вызывает галлюцинации о содержимом файлов.
-                _skip_file_ctx = (
-                    (file_paths and len(file_paths) > 0)
-                    or _is_conversational_message(user_message)
-                )
-                if file_analyses and not _skip_file_ctx:
-                    # Берём последний анализ файлов (самый свежий)
-                    latest_file_context = file_analyses[-1]
-                    if detected_language == "russian":
-                        memory_context += f"\n\n📎 КОНТЕКСТ ИЗ ПРИКРЕПЛЁННЫХ ФАЙЛОВ:\n{latest_file_context}\n"
-                        memory_context += "\n(Используй этот контекст ТОЛЬКО если пользователь явно спрашивает о файлах. Не упоминай файлы если вопрос не связан с ними.)\n"
-                        print(f"[MEMORY] ✓ Загружен контекст файлов ({len(latest_file_context)} символов)")
-                    else:
-                        memory_context += f"\n\n📎 CONTEXT FROM ATTACHED FILES:\n{latest_file_context}\n"
-                        memory_context += "\n(Use this context ONLY if the user explicitly asks about files. Don't mention files if the question is unrelated.)\n"
-                        print(f"[MEMORY] ✓ Loaded file context ({len(latest_file_context)} chars)")
-                elif file_analyses and _is_conversational_message(user_message):
-                    print(f"[MEMORY] ⏭ Пропуск file_analysis — разговорное сообщение: '{user_message[:40]}'"  )
-        except Exception as e:
-            print(f"[MEMORY] ✗ Ошибка загрузки памяти: {e}")
-    
-    # Добавляем математический промпт если это математическая задача
-    math_prompt = ""
-    if is_math_problem:
-        # Выбираем математический промпт в зависимости от модели и режима AI
-        if _mk in ("deepseek", "deepseek-r1"):
-            _ds_mode = {"fast": "short", "thinking": "deep", "pro": "pro"}.get(
-                ai_mode.lower().replace("быстрый","short").replace("думающий","deep").replace("про","pro"), "short"
-            )
-            if ai_mode == AI_MODE_FAST:
-                _ds_mode = "short"
-            elif ai_mode == AI_MODE_THINKING:
-                _ds_mode = "deep"
-            elif ai_mode == AI_MODE_PRO:
-                _ds_mode = "pro"
-            math_prompt = get_deepseek_math_prompt(_ds_mode)
-            print(f"[GET_AI_RESPONSE] 🔬 DeepSeek математика - режим: {_ds_mode}")
-        else:
-            if ai_mode == AI_MODE_FAST:
-                math_prompt = MATH_PROMPTS["fast"]
-                print(f"[GET_AI_RESPONSE] 🔬 Математика - режим: БЫСТРЫЙ")
-            elif ai_mode == AI_MODE_THINKING:
-                math_prompt = MATH_PROMPTS["thinking"]
-                print(f"[GET_AI_RESPONSE] 🔬 Математика - режим: ДУМАЮЩИЙ")
-            elif ai_mode == AI_MODE_PRO:
-                math_prompt = MATH_PROMPTS["pro"]
-                print(f"[GET_AI_RESPONSE] 🔬 Математика - режим: ПРО (олимпиадный)")
-            else:
-                math_prompt = MATH_PROMPTS["thinking"]
-                print(f"[GET_AI_RESPONSE] 🔬 Математика - режим: ДУМАЮЩИЙ (по умолчанию)")
-        
-        print(f"[GET_AI_RESPONSE] ⚠️ Интернет ЗАПРЕЩЁН для математических задач")
-        
-        # КРИТИЧНО: Для математических задач ЗАПРЕЩАЕМ интернет
-        use_search = False
-    
-    # ══════════════════════════════════════════════════════════
-    # БЛОК ПОНИМАНИЯ КОНТЕКСТА ДИАЛОГА
-    # ══════════════════════════════════════════════════════════
-    context_understanding_ru = """
-
-
-═══════════════════════════════════════════════════════════
-🧠 ПОНИМАНИЕ КОНТЕКСТА ДИАЛОГА — КРИТИЧЕСКИ ВАЖНО
-═══════════════════════════════════════════════════════════
-
-Ты ВСЕГДА читаешь всю историю переписки перед ответом. Это значит:
-
-1. ССЫЛКИ НА ПРОШЛОЕ ("в неё", "в него", "это", "то самое", "оно"):
-   • "давай сыграем в неё" → посмотри что обсуждалось выше и пойми что "в неё" = та игра/активность
-   • "сделай то же самое" → повтори последнее действие из истории
-   • "продолжай" → продолжи то что делал раньше
-   • "ещё раз" → повтори предыдущий ответ или действие
-   ❌ НЕЛЬЗЯ: делать вид что не понимаешь о чём речь и переспрашивать
-   ✅ НУЖНО: найти референс в истории и выполнить просьбу
-
-2. ПРОСЬБА НАЧАТЬ АКТИВНОСТЬ ("давай сыграем", "поиграем", "начнём", "устроим"):
-   • Немедленно НАЧНИ эту активность — не объясняй что готов, не описывай правила снова
-   • Если это игра — сделай первый ход сам или попроси пользователя начать
-   • ❌ НЕЛЬЗЯ: "Я готов! Пожалуйста задавайте вопросы..." — это игнорирование просьбы
-   • ✅ НУЖНО: сразу начать играть, назвать первое слово/ход/вопрос
-
-3. УТОЧНЕНИЯ И УСЛОВИЯ ("только по России", "только на букву А", "без повторов"):
-   • Запомни условие и соблюдай его во всех последующих ответах
-   • ❌ НЕЛЬЗЯ: игнорировать условие или забыть о нём через 1-2 хода
-   • ✅ НУЖНО: каждый ответ проверять соответствие условию
-
-4. СМЕНА ТЕМЫ:
-   • Если пользователь явно меняет тему — переключайся
-   • Если нет — оставайся в контексте текущей активности
-
-ПРИМЕРЫ ПРАВИЛЬНОГО ПОВЕДЕНИЯ:
-• Пользователь спросил про игру "Города" → ИИ объяснил
-• Пользователь: "давай сыграем, только по России"
-• ✅ ИИ: "Отлично! Начинаю: Москва. Ваш ход — называй город на букву 'А'!"
-• ❌ ИИ: "Я готов помочь с вопросами о России!" (это провал — он не начал игру)
-═══════════════════════════════════════════════════════════"""
-
-    context_understanding_en = """
-
-
-═══════════════════════════════════════════════════════════
-🧠 CONVERSATION CONTEXT UNDERSTANDING — CRITICAL
-═══════════════════════════════════════════════════════════
-
-You ALWAYS read the full chat history before responding:
-
-1. REFERENCES TO PAST ("it", "that", "the same", "do it again"):
-   • Find the reference in history and act on it immediately
-   • ❌ NEVER: pretend you don't understand or ask what they mean
-   • ✅ ALWAYS: look back in history and fulfill the request
-
-2. REQUESTS TO START AN ACTIVITY ("let's play", "let's start", "begin"):
-   • IMMEDIATELY start the activity — don't just say you're ready
-   • ❌ NEVER: "I'm ready! Please ask me questions..." — this ignores the request
-   • ✅ ALWAYS: make the first move, say the first word, start the game
-
-3. CONDITIONS AND RULES ("only Russia", "no repeats", "only letter A"):
-   • Remember and follow the condition in ALL subsequent responses
-═══════════════════════════════════════════════════════════"""
-
-    # ══════════════════════════════════════════════════════════
-    # СБОРКА СИСТЕМНОГО ПРОМПТА
-    # DeepSeek — маленькая (7b) модель: огромный промпт вызывает
-    # галлюцинации и потерю контекста диалога.
-    # Для DeepSeek: только base + memory + math + role + язык.
-    # context_understanding и FILE_GENERATION_PROMPT — только для LLaMA/Mistral.
-    # FILE_GENERATION_PROMPT добавляем когда: прикреплён файл ИЛИ пользователь просит создать файл.
-    # ══════════════════════════════════════════════════════════
-    _has_files_in_request = bool(file_paths and len(file_paths) > 0)
-    _is_file_creation_request = detect_file_request(user_message)
-    _needs_file_gen_prompt = _has_files_in_request or _is_file_creation_request
-    _is_deepseek = _mk in ("deepseek", "deepseek-r1")
-
-    if detected_language == "russian":
-        _lang_rule = (
-            "\n\nВАЖНО: отвечай строго на русском языке. "
-            "Не используй иностранные слова: вместо «your turn» — «ваш ход», "
-            "вместо «sorry» — «извините» и т.д."
-        )
-        if _is_deepseek:
-            # Компактный промпт для DeepSeek — не перегружаем маленькую модель
-            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
-            system_prompt = base_system + memory_context + math_prompt + role_instruction + _lang_rule + _file_gen_part
-        else:
-            # FILE_GENERATION_PROMPT — только когда реально просят файл.
-            # Если добавлять его ВСЕГДА, модель начинает генерировать файлы
-            # при любом обычном вопросе (видит инструкцию → применяет её).
-            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
-            system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_ru + _file_gen_part + """
-
-КРИТИЧЕСКИ ВАЖНО - ЯЗЫК ОТВЕТА:
-• Отвечай СТРОГО ТОЛЬКО на русском языке
-• НЕЛЬЗЯ использовать слова на любом иностранном языке: английском, испанском, итальянском, французском и т.д.
-• ЗАПРЕЩЕНО: "turno", "your turn", "turn", "move", "next", "please", "try", "sorry" и любые другие иностранные слова
-• Вместо иностранных слов используй ТОЛЬКО русские: "ваш ход", "попробуйте", "извините", "далее" и т.д.
-• Русские эквиваленты: however→однако, therefore→поэтому, important→важный, turn→ход, your→ваш, try→попробуйте"""
-    else:
-        if _is_deepseek:
-            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
-            system_prompt = base_system + memory_context + math_prompt + role_instruction + _file_gen_part
-        else:
-            _file_gen_part = FILE_GENERATION_PROMPT if _needs_file_gen_prompt else ""
-            system_prompt = base_system + memory_context + math_prompt + role_instruction + context_understanding_en + _file_gen_part
-
-    final_user_message = user_message
-
-    # ── Если пользователь просит создать файл — вшиваем жёсткую инструкцию
-    # прямо в сообщение. Локальные модели следуют inline-инструкциям намного
-    # надёжнее, чем инструкциям в системном промпте.
-    _file_injection = build_file_injection(user_message, detected_language)
-    if _file_injection:
-        final_user_message = user_message + _file_injection
-        print(f"[FILE_GEN] Обнаружен запрос на создание файла — инструкция вшита в сообщение")
-
-    all_files_context = []  # Инициализируем заранее — используется позже вне блока if file_paths
-    
-    # Обрабатываем прикреплённые файлы
-    if file_paths and len(file_paths) > 0:
-        print(f"[GET_AI_RESPONSE] Обработка файлов: {len(file_paths)}")
-        
-        for file_path in file_paths:
-            # УЛУЧШЕНИЕ: Нормализуем путь к файлу
-            file_path = os.path.normpath(os.path.abspath(file_path))
-            print(f"[GET_AI_RESPONSE] Обработка файла: {file_path}")
-            print(f"[GET_AI_RESPONSE] ════════════════════════════════════════")
-            
-            try:
-                file_ext = os.path.splitext(file_path)[1].lower()
-                file_name = os.path.basename(file_path)
-                
-                # ПРОВЕРКА: убеждаемся что файл существует
-                if not os.path.exists(file_path):
-                    print(f"[GET_AI_RESPONSE] ⚠️ ФАЙЛ НЕ НАЙДЕН: {file_path}")
-                    
-                    # Возвращаем понятную ошибку пользователю
-                    if detected_language == "russian":
-                        error_msg = f"""🔴 Файл '{file_name}' не найден
-
-Путь: {file_path}
-
-Возможные причины:
-• Файл был перемещён или удалён
-• Неправильный путь к файлу
-• Проблема с правами доступа
-
-Попробуйте:
-1. Прикрепите файл заново
-2. Убедитесь что файл существует на диске
-3. Проверьте права доступа к файлу"""
-                    else:
-                        error_msg = f"""🔴 File '{file_name}' not found
-
-Path: {file_path}
-
-Possible reasons:
-• File was moved or deleted
-• Incorrect file path
-• Access permission issue
-
-Try:
-1. Attach the file again
-2. Make sure the file exists on disk
-3. Check file access permissions"""
-                    
-                    return error_msg
-                
-                # Проверяем тип файла
-                if is_image_file(file_path):
-                    # ═══════════════════════════════════════════════════════
-                    # ИЗОБРАЖЕНИЕ — делегируем в vision_handler.py
-                    # ═══════════════════════════════════════════════════════
-                    result = process_image_file(
-                        file_path=file_path,
-                        file_name=file_name,
-                        user_message=user_message,
-                        ai_mode=ai_mode,
-                        language=detected_language,
-                    )
-                    if result["success"]:
-                        all_files_context.append(f"[Изображение: {file_name}]\n{result['content']}")
-                    else:
-                        return result["content"]
-
-                else:
-                    # ═══════════════════════════════════════════════════════
-                    # ТЕКСТОВЫЙ ФАЙЛ - Читаем и обрабатываем обычной моделью
-                    # ═══════════════════════════════════════════════════════
-                    print(f"[GET_AI_RESPONSE] 📄 ТИП: ТЕКСТОВЫЙ ФАЙЛ")
-                    print(f"[GET_AI_RESPONSE] 🤖 МОДЕЛЬ: {OLLAMA_MODEL} (обычная модель)")
-                    print(f"[GET_AI_RESPONSE] 📖 Чтение файла...")
-                    
-                    try:
-                        # Пробуем разные кодировки
-                        encodings = ['utf-8', 'cp1251', 'latin-1']
-                        file_content = None
-                        used_encoding = None
-                        
-                        for encoding in encodings:
-                            try:
-                                with open(file_path, 'r', encoding=encoding) as f:
-                                    file_content = f.read()[:10000]  # Ограничиваем 10000 символов
-                                used_encoding = encoding
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                        
-                        if file_content:
-                            if detected_language == "russian":
-                                all_files_context.append(f"""[Файл: {file_name}]
-СОДЕРЖИМОЕ:
-{file_content}""")
-                            else:
-                                all_files_context.append(f"""[File: {file_name}]
-CONTENT:
-{file_content}""")
-                            print(f"[GET_AI_RESPONSE] ✅ Файл прочитан ({used_encoding}): {file_name}")
-                        else:
-                            raise UnicodeDecodeError("all", b"", 0, 0, "Could not decode with any encoding")
-                            
-                    except Exception as e:
-                        # Не удалось прочитать как текст
-                        print(f"[GET_AI_RESPONSE] ❌ Не удалось прочитать файл: {file_name} ({e})")
-                        
-                        # Показываем понятное сообщение
-                        if detected_language == "russian":
-                            error_msg = f"""⚠️ Файл '{file_name}' не может быть прочитан
-
-Возможные причины:
-• Это бинарный файл (exe, pdf, docx и т.д.)
-• Неподдерживаемая кодировка
-
-Поддерживаемые текстовые файлы: .txt, .py, .js, .html, .css, .md и др.
-Для изображений используйте форматы: .png, .jpg, .jpeg, .gif"""
-                        else:
-                            error_msg = f"""⚠️ File '{file_name}' cannot be read
-
-Possible reasons:
-• This is a binary file (exe, pdf, docx, etc.)
-• Unsupported encoding
-
-Supported text files: .txt, .py, .js, .html, .css, .md, etc.
-For images use formats: .png, .jpg, .jpeg, .gif"""
-                        
-                        return error_msg
-                        
-            except Exception as e:
-                print(f"[GET_AI_RESPONSE] Ошибка обработки файла {file_name}: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # Объединяем контекст всех файлов
-        if all_files_context:
-            # Формируем инструкцию в зависимости от режима
-            if ai_mode == AI_MODE_FAST:
-                if detected_language == "russian":
-                    file_instruction = "Кратко ответь на вопрос используя информацию из файлов."
-                else:
-                    file_instruction = "Answer briefly using information from the files."
-            elif ai_mode == AI_MODE_THINKING:
-                if detected_language == "russian":
-                    file_instruction = "Проанализируй содержимое файлов. Дай развернутый ответ с примерами и пояснениями."
-                else:
-                    file_instruction = "Analyze the file contents. Provide a detailed answer with examples and explanations."
-            else:  # PRO
-                if detected_language == "russian":
-                    file_instruction = """Максимально глубокий анализ файлов:
-1. Обзор всех файлов
-2. Ключевые моменты из каждого файла
-3. Связи между файлами (если применимо)
-4. Детальный ответ на вопрос пользователя с обоснованием"""
-                else:
-                    file_instruction = """Maximum deep file analysis:
-1. Overview of all files
-2. Key points from each file
-3. Connections between files (if applicable)
-4. Detailed answer to user's question with justification"""
-            
-            files_context = "\n\n".join(all_files_context)
-            
-            if detected_language == "russian":
-                final_user_message = f"""[Пользователь прикрепил {len(file_paths)} файл(ов)]
-
-{files_context}
-
-ИНСТРУКЦИЯ:
-{file_instruction}
-
-Вопрос/сообщение пользователя: {user_message}
-
-ВАЖНО: 
-- Если пользователь просто прислал файл без вопроса (например "как тебе фотка?" или просто название файла), ОБЯЗАТЕЛЬНО:
-  1. Опиши ЧТО изображено/написано в файле
-  2. Дай свою оценку/комментарий
-  3. Задай уточняющий вопрос если нужно
-- Если есть конкретный вопрос - отвечай на него используя информацию из файла
-- Отвечай естественно, как будто видишь файл и обсуждаешь его с другом"""
-            else:
-                final_user_message = f"""[User attached {len(file_paths)} file(s)]
-
-{files_context}
-
-INSTRUCTION:
-{file_instruction}
-
-User's question/message: {user_message}
-
-IMPORTANT:
-- If user just sent a file without specific question (e.g. "how's the photo?" or just filename), YOU MUST:
-  1. Describe WHAT is shown/written in the file
-  2. Give your assessment/comment
-  3. Ask clarifying question if needed
-- If there's a specific question - answer it using file information
-- Respond naturally, as if you're seeing the file and discussing it with a friend"""
-            
-            print(f"[GET_AI_RESPONSE] Все файлы добавлены в контекст")
-            
-            # ═══════════════════════════════════════════════════════════
-            # СОХРАНЕНИЕ КОНТЕКСТА ФАЙЛОВ В ПАМЯТЬ
-            # ═══════════════════════════════════════════════════════════
-            # КРИТИЧНО: Сохраняем результаты анализа файлов в историю
-            # чтобы AI помнил содержимое файлов в следующих сообщениях
-            if chat_id and all_files_context:
-                try:
-                    context_mgr = get_memory_manager(_mk)
-                    files_summary = "\n\n".join(all_files_context)
-                    
-                    # Сохраняем компактную версию для истории
-                    # Ограничиваем длину чтобы не засорять память
-                    max_length = 2000  # Максимум 2000 символов
-                    if len(files_summary) > max_length:
-                        files_summary = files_summary[:max_length] + "...[содержимое обрезано]"
-                    
-                    context_mgr.save_context_memory(chat_id, "file_analysis", files_summary)
-                    print(f"[GET_AI_RESPONSE] ✓ Контекст файлов сохранён в память ({len(files_summary)} символов)")
-                except Exception as e:
-                    print(f"[GET_AI_RESPONSE] ⚠️ Ошибка сохранения контекста файлов: {e}")
-    
-    print(f"[GET_AI_RESPONSE] Контекстная память добавлена в системный промпт")
-
-    found_sources = []  # Список (title, url) — заполняется если был поиск
-
-    if use_search:
-        print(f"[GET_AI_RESPONSE] ПОИСК АКТИВИРОВАН! Выполняю поиск...")
-        if detected_language == "russian":
-            region = "ru-ru"
-        else:
-            region = "us-en"
-        num_results = 8 if deep_thinking else 3
-        
-        # 🔥 КОНТЕКСТНЫЙ ПОИСК: формируем запрос с учётом истории диалога
-        contextual_query = build_contextual_search_query(user_message, chat_manager, chat_id, detected_language)
-
-        # ── Подстановка реальных дат вместо "завтра"/"послезавтра" ──────────
-        # Чтобы поисковик получал точную дату, а не относительное слово
-        from datetime import timedelta as _td
-        _sq_now = datetime.now()
-        _sq_months_ru = ["января","февраля","марта","апреля","мая","июня",
-                         "июля","августа","сентября","октября","ноября","декабря"]
-        _sq_tomorrow  = _sq_now + _td(days=1)
-        _sq_dayafter  = _sq_now + _td(days=2)
-        _sq_yesterday = _sq_now - _td(days=1)
-        _sq_tom_ru  = f"{_sq_tomorrow.day} {_sq_months_ru[_sq_tomorrow.month-1]}"
-        _sq_daf_ru  = f"{_sq_dayafter.day} {_sq_months_ru[_sq_dayafter.month-1]}"
-        _sq_yes_ru  = f"{_sq_yesterday.day} {_sq_months_ru[_sq_yesterday.month-1]}"
-        _sq_tom_en  = _sq_tomorrow.strftime("%B %d")
-        _sq_daf_en  = _sq_dayafter.strftime("%B %d")
-        _sq_yes_en  = _sq_yesterday.strftime("%B %d")
-        import re as _re_sq
-        if detected_language == "russian":
-            contextual_query = _re_sq.sub(r'\bпослезавтра\b', _sq_daf_ru,  contextual_query, flags=_re_sq.IGNORECASE)
-            contextual_query = _re_sq.sub(r'\bзавтра\b',      _sq_tom_ru,   contextual_query, flags=_re_sq.IGNORECASE)
-            contextual_query = _re_sq.sub(r'\bвчера\b',       _sq_yes_ru,   contextual_query, flags=_re_sq.IGNORECASE)
-        else:
-            contextual_query = _re_sq.sub(r'\bday after tomorrow\b', _sq_daf_en, contextual_query, flags=_re_sq.IGNORECASE)
-            contextual_query = _re_sq.sub(r'\btomorrow\b',            _sq_tom_en, contextual_query, flags=_re_sq.IGNORECASE)
-            contextual_query = _re_sq.sub(r'\byesterday\b',           _sq_yes_en, contextual_query, flags=_re_sq.IGNORECASE)
-
-        print(f"[GET_AI_RESPONSE] 🔍 Поисковый запрос: {contextual_query}")
-        
-        # ── Маршрутизация запросов: версии ПО → специальный пайплайн ──
-        # Запросы о версиях, релизах, changelog обрабатываются модульным
-        # пайплайном version_search_pipeline (search→filter→extract→validate→answer),
-        # который делает несколько поисковых запросов, фильтрует источники
-        # по качеству, извлекает и валидирует версии, формирует ответ
-        # с явным запретом на галлюцинации.
-        _is_version_q = is_version_query(contextual_query)
-
-        if _is_version_q:
-            print(f"[GET_AI_RESPONSE] 📦 ОПРЕДЕЛЁН ЗАПРОС О ВЕРСИИ ПО "
-                  f"→ Запускаю version_search_pipeline")
-            search_results, _page_contents = version_search_pipeline(
-                contextual_query,
-                region=region,
-                language=detected_language,
-            )
-            # Если пайплайн ничего не вернул — откатываемся к обычному поиску
-            if not _page_contents:
-                print(f"[GET_AI_RESPONSE] ⚠️ Пайплайн версий пуст, откатываюсь к deep_web_search")
-                _is_version_q = False
-
-        if not _is_version_q:
-            # УМНЫЙ ПОИСК: все режимы заходят на сайты, отличается только глубина
-            if ai_mode in [AI_MODE_THINKING, AI_MODE_PRO]:
-                print(f"[GET_AI_RESPONSE] 🧠 Использую ГЛУБОКИЙ веб-поиск (3 сайта)")
-                search_results, _page_contents = deep_web_search(
-                    contextual_query, num_results=num_results,
-                    region=region, language=detected_language, max_pages=3)
-            else:
-                print(f"[GET_AI_RESPONSE] ⚡ Использую БЫСТРЫЙ веб-поиск (1 сайт)")
-                search_results, _page_contents = deep_web_search(
-                    contextual_query, num_results=num_results,
-                    region=region, language=detected_language, max_pages=1)
-
-            # ── ЗАЩИТА ОТ ГАЛЛЮЦИНАЦИЙ (только для обычного поиска) ──
-            _version_guard = validate_versions_before_answer(_page_contents, contextual_query)
-            if _version_guard["retry"]:
-                print(
-                    f"[VERSION_GUARD] 🔄 Источники устаревшие "
-                    f"(лучшая версия: «{_version_guard['best_version']}», "
-                    f"причина: {_version_guard['reason']}). "
-                    f"Повторяю поиск с уточнёнными ключами..."
-                )
-                import datetime as _dt
-                _retry_q = (f"{contextual_query} latest version release "
-                            f"{_dt.datetime.now().year}")
-                _retry_str, _retry_pages = deep_web_search(
-                    _retry_q, num_results=num_results,
-                    region=region, language=detected_language, max_pages=3,
-                )
-                if _retry_pages:
-                    search_results = _retry_str
-                    _page_contents = _retry_pages
-                    print(f"[VERSION_GUARD] ✅ Повторный поиск: {len(_retry_pages)} свежих страниц")
-                else:
-                    print(f"[VERSION_GUARD] ⚠️ Повторный поиск пустой, оставляем исходные данные")
-
-            if _version_guard["best_version"]:
-                print(f"[VERSION_GUARD] 📌 Лучшая версия: «{_version_guard['best_version']}» "
-                      f"из {len(_version_guard['all_versions'])} вариантов")
-        
-        print(f"[GET_AI_RESPONSE] Результаты поиска получены. Длина: {len(search_results)} символов")
-        print(f"[GET_AI_RESPONSE] Первые 300 символов результатов: {search_results[:300]}...")
-
-        # ── Извлекаем источники (Заголовок + Ссылка) для кнопки "Источники" ──
-        _src_titles = re.findall(r'Заголовок:\s*(.+)', search_results)
-        _src_urls   = re.findall(r'Ссылка:\s*(https?://\S+)', search_results)
-        found_sources = []
-        for i, url in enumerate(_src_urls):
-            title = _src_titles[i].strip() if i < len(_src_titles) else url
-            found_sources.append((title, url))
-        print(f"[GET_AI_RESPONSE] 🔗 Извлечено источников: {len(found_sources)}")
-
-        # СЖИМАЕМ результаты поиска под лимит токенов
-        # Примерно 1 токен ≈ 4 символа для русского, ≈ 3 символа для английского
-        # Оставляем место для системного промпта (~500 токенов) и ответа
-        if deep_thinking:
-            # Режим "Думать" - больше токенов на контекст
-            max_search_tokens = 2000  # ~8000 символов для русского
-        else:
-            # Быстрый режим - меньше токенов
-            max_search_tokens = 1000  # ~4000 символов для русского
-        
-        max_search_chars = max_search_tokens * 4 if detected_language == "russian" else max_search_tokens * 3
-        print(f"[GET_AI_RESPONSE] Лимит для результатов поиска: {max_search_tokens} токенов ({max_search_chars} символов)")
-        
-        if len(search_results) > max_search_chars:
-            print(f"[GET_AI_RESPONSE] Результаты поиска слишком длинные, сжимаем...")
-            search_results = compress_search_results(search_results, max_search_chars)
-
-        # ══════════════════════════════════════════════════════════
-        # НОВЫЙ ПАЙПЛАЙН: суммаризация → анализ вопроса → финальная генерация
-        # ══════════════════════════════════════════════════════════
-
-        # ШАГ 1: Извлекаем только факты из сырых результатов
-        facts = summarize_sources(search_results, user_message, detected_language)
-
-        # ШАГ 1.5: Проверяем релевантность фактов
-        # Если суммаризатор вернул "не найдено" — говорим модели использовать свои знания
-        no_facts_markers = ["релевантных фактов не найдено", "no relevant facts found", "не найдено", "нет информации"]
-        facts_are_irrelevant = any(marker in facts.lower() for marker in no_facts_markers)
-        if facts_are_irrelevant:
-            print(f"[GET_AI_RESPONSE] ⚠️ Релевантных фактов из поиска не найдено — модель будет использовать собственные знания")
-            if detected_language == "russian":
-                facts = f"Поиск не дал релевантных результатов по запросу «{user_message}». Ответь на основе своих знаний."
-            else:
-                facts = f"Search did not return relevant results for «{user_message}». Answer based on your own knowledge."
-
-        # ШАГ 2: Определяем структуру вопроса
-        question_parts = detect_question_parts(user_message)
-
-        # ШАГ 3: Строим финальный промпт
-        search_context = build_final_answer_prompt(user_message, facts, question_parts, detected_language)
-        print(f"[GET_AI_RESPONSE] Контекст поиска добавлен. Длина: {len(search_context)} символов")
-        
-        # ИСПРАВЛЕНИЕ: Если есть файлы, добавляем их контекст К поисковым результатам
-        if all_files_context:
-            files_summary = "\n\n".join(all_files_context)
-            if detected_language == "russian":
-                final_user_message = f"""{search_context}
-
-[ДОПОЛНИТЕЛЬНО: Пользователь прикрепил {len(file_paths)} файл(ов)]
-
-{files_summary}
-
-Учитывай информацию из ОБЕИХ источников: результаты поиска И прикреплённые файлы."""
-            else:
-                final_user_message = f"""{search_context}
-
-[ADDITIONALLY: User attached {len(file_paths)} file(s)]
-
-{files_summary}
-
-Consider information from BOTH sources: search results AND attached files."""
-            print(f"[GET_AI_RESPONSE] ✓ Контекст файлов СОХРАНЁН при поиске")
-        else:
-            final_user_message = search_context
-    else:
-        print(f"[GET_AI_RESPONSE] Поиск НЕ активирован")
-
-    # Если запрошено забывание, НЕ загружаем историю
-    if should_forget:
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.append({
-            "role": "user",
-            "content": final_user_message
-        })
-        print(f"[GET_AI_RESPONSE] Режим забывания: история не загружается")
-    else:
-        # Загружаем историю диалога из memory_manager (primary) или chat_manager (fallback)
-        # memory_manager хранит только чистые повороты user/assistant — без мусора.
-        # Это гарантирует, что ИИ ВИДИТ СВОИ предыдущие ответы.
-        _history_limit = 20 if _mk in ("deepseek", "deepseek-r1") else MAX_HISTORY_LOAD
-
-        mem_mgr = get_memory_manager(_mk)
-        mem_messages = []
-        if chat_id and hasattr(mem_mgr, 'get_messages'):
-            try:
-                mem_messages = mem_mgr.get_messages(chat_id, limit=_history_limit)
-                print(f"[GET_AI_RESPONSE] Загружено {len(mem_messages)} сообщений из memory_manager ({_mk})")
-            except Exception as _mex:
-                print(f"[GET_AI_RESPONSE] ⚠️ memory_manager.get_messages: {_mex}")
-
-        # Fallback: если memory_manager пустой (старые чаты) — грузим из chat_manager
-        if not mem_messages:
-            if chat_manager and chat_id:
-                _fb_history = chat_manager.get_chat_messages(chat_id, limit=_history_limit)
-                print(f"[GET_AI_RESPONSE] Fallback: {len(_fb_history)} сообщений из chat_manager")
-                _fb = list(_fb_history)
-                if _fb and _fb[-1][0] == "user" and _fb[-1][1] in (_user_message_raw, user_message):
-                    _fb = _fb[:-1]
-                mem_messages = [
-                    {"role": r[0], "content": r[1]}
-                    for r in _fb if r[0] in ("user", "assistant")
-                ]
-            else:
-                _old_hist = load_history(limit=_history_limit)
-                print(f"[GET_AI_RESPONSE] Загружено {len(_old_hist)} сообщений из старой БД")
-                mem_messages = [
-                    {"role": r[0], "content": r[1]}
-                    for r in _old_hist if r[0] in ("user", "assistant")
-                ]
-        else:
-            # memory_manager уже содержит текущий user_message (сохранён до вызова ИИ)
-            # Убираем последний элемент если он совпадает с текущим запросом (анти-дубль)
-            # ✅ ИСПРАВЛЕНО: сравниваем с _user_message_raw (то что реально сохранено в БД),
-            # а не с нормализованным user_message — иначе при спецсимволах антидубль не срабатывал
-            # и текущий запрос попадал в историю ДВАЖДЫ (raw + normalized).
-            if mem_messages and mem_messages[-1]["role"] == "user" and mem_messages[-1]["content"] in (_user_message_raw, user_message):
-                mem_messages = mem_messages[:-1]
-
-        messages = [{"role": "system", "content": system_prompt}]
-        for _msg in mem_messages:
-            messages.append({"role": _msg["role"], "content": _msg["content"]})
-        messages.append({"role": "user", "content": final_user_message})
-
-        # ── ASSISTANT PREFILL для файловых запросов ──────────────────
-        # Для маленьких моделей (7b) инструкции в промпте недостаточны —
-        # они игнорируют формат и выводят содержимое как обычный текст.
-        # Prefill буквально начинает ответ за модель: она вынуждена
-        # продолжать с того места где мы остановились, то есть внутри тега.
-        #
-        # ВАЖНО: DeepSeek R1 генерирует <think>...</think> ДО ответа.
-        # Prefill-сообщение assistant вставляется перед этим блоком —
-        # модель его игнорирует и пишет ответ после своего think.
-        # Поэтому для R1 prefill НЕ используем — только системный промпт + инструкция в сообщении.
-        if _file_injection and _mk != "deepseek-r1":  # R1 думает сам — prefill ломает её формат
-            import re as _re
-            _pf_match = _re.search(
-                r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
-                _file_injection, _re.IGNORECASE
-            )
-            if _pf_match:
-                _prefill_name = _pf_match.group(1)
-                if detected_language == "russian":
-                    messages.append({
-                        "role": "assistant",
-                        "content": f"Вот файл!\n[FILE:{_prefill_name}]\n"
-                    })
-                else:
-                    messages.append({
-                        "role": "assistant",
-                        "content": f"Here's your file!\n[FILE:{_prefill_name}]\n"
-                    })
-                print(f"[GET_AI_RESPONSE] 📄 Prefill добавлен: [FILE:{_prefill_name}]")
-
-        if use_search:
-            print(f"[GET_AI_RESPONSE] Режим поиска: история загружена для учета контекста диалога")
-
-    print(f"[GET_AI_RESPONSE] Всего сообщений для отправки в AI: {len(messages)}")
-
-    # ═══════════════════════════════════════════════════════════════════
-    # АДАПТИВНОЕ ОПРЕДЕЛЕНИЕ ЛИМИТА ТОКЕНОВ
-    # ═══════════════════════════════════════════════════════════════════
-    # Вместо жестких лимитов используем умную логику, которая:
-    # 1. Анализирует длину запроса пользователя
-    # 2. Учитывает режим AI
-    # 3. Даёт запас для завершения мысли
-    # 
-    # ЦЕЛЬ: Избежать обрыва ответов на полуслове
-    # ═══════════════════════════════════════════════════════════════════
-    
-    # Анализируем длину запроса пользователя
-    user_message_length = len(user_message)
-
-    # Детектируем запрос на генерацию файла — влияет на tokens и timeout
-    _is_file_request = bool(_file_injection) or detect_file_request(user_message)
-    if _is_file_request:
-        print(f"[GET_AI_RESPONSE] 📄 Обнаружен файловый запрос — увеличиваем лимиты")
-    
-    # Базовые лимиты в зависимости от режима AI
-    # DeepSeek получает жёсткие ограничения — модель склонна к болтливости
-    if _mk in ("deepseek", "deepseek-r1"):
-        if _is_file_request:
-            # Для файловых запросов R1 нужно больше токенов — содержимое файла
-            base_tokens = 2000
-        elif ai_mode == AI_MODE_FAST:
-            base_tokens = 600
-        elif ai_mode == AI_MODE_THINKING:
-            base_tokens = 1000
-        elif ai_mode == AI_MODE_PRO:
-            base_tokens = 1800
-        else:
-            base_tokens = 700
-    elif ai_mode == AI_MODE_FAST:
-        base_tokens = 400  # Быстрый режим - короткие ответы, но не слишком
-    elif ai_mode == AI_MODE_THINKING:
-        base_tokens = 1200  # Думающий режим - средние ответы
-    elif ai_mode == AI_MODE_PRO:
-        base_tokens = 2500  # Про режим - детальные ответы
-    else:
-        base_tokens = 800   # По умолчанию
-    
-    # Коэффициент на основе длины запроса
-    if user_message_length < 50:
-        length_multiplier = 1.0  # Короткий вопрос
-    elif user_message_length < 200:
-        length_multiplier = 1.3  # Средний вопрос - больше деталей
-    elif user_message_length < 500:
-        length_multiplier = 1.6  # Длинный вопрос - ещё больше деталей
-    else:
-        length_multiplier = 2.0  # Очень длинный вопрос - максимум деталей
-    
-    # Коэффициент на основе поиска
-    if use_search:
-        search_multiplier = 1.2  # С поиском нужно больше токенов для синтеза
-    else:
-        search_multiplier = 1.0
-    
-    # Итоговый расчёт с запасом
-    calculated_tokens = int(base_tokens * length_multiplier * search_multiplier)
-    
-    # Безопасные границы (минимум и максимум)
-    min_tokens = 300   # Минимум чтобы не обрывать
-    max_tokens_limit = 4000  # Максимум для производительности
-    
-    max_tokens = max(min_tokens, min(calculated_tokens, max_tokens_limit))
-    
-    print(f"[GET_AI_RESPONSE] Адаптивный расчёт токенов:")
-    print(f"  - Режим AI: {ai_mode} (база: {base_tokens})")
-    print(f"  - Длина запроса: {user_message_length} символов (множитель: {length_multiplier}x)")
-    print(f"  - Поиск: {'да' if use_search else 'нет'} (множитель: {search_multiplier}x)")
-    print(f"  - Итоговый лимит: {max_tokens} токенов")
-
-    # Увеличиваем timeout для сложных запросов
-    # R1 генерирует think-блок перед ответом — ему нужно больше времени
-    if _mk == "deepseek-r1":
-        if _is_file_request:
-            timeout = 300  # 5 минут: think-блок + содержимое файла
-        elif use_search and deep_thinking:
-            timeout = 300
-        elif use_search or deep_thinking:
-            timeout = 240
-        else:
-            timeout = 180  # R1 даже на простых запросах думает ~1-2 мин
-        print(f"[GET_AI_RESPONSE] [R1] Timeout установлен: {timeout}s (файл={_is_file_request})")
-    elif use_search and deep_thinking:
-        timeout = 180  # 3 минуты для поиска + глубокое мышление
-    elif use_search or deep_thinking:
-        timeout = 120  # 2 минуты для поиска ИЛИ глубокое мышление
-    else:
-        timeout = 60   # 1 минута для обычных запросов
-
-    response_text = ""
-    
-    # ═══════════════════════════════════════════════════════════════
-    # DEEPSEEK: параметры Ollama для надёжной работы с историей диалога
-    #
-    # deepseek-llm:7b-chat — дефолтный num_ctx Ollama = 2048.
-    # Это КРИТИЧЕСКИ МАЛО: системный промпт + 3-4 сообщения истории
-    # уже не влезают → модель "забывает" предыдущие реплики и начинает
-    # галлюцинировать (отвечать мусором или говорить что она GPT-4).
-    # Решение: явно задаём num_ctx=4096 для обеих DeepSeek-моделей.
-    #
-    # deepseek-r1: temperature=0.6 рекомендована командой DeepSeek.
-    # ═══════════════════════════════════════════════════════════════
-    _extra_options: dict = {}
-    if _mk == "deepseek":
-        _extra_options = {
-            "num_ctx": 4096,        # Хватит для системного промпта + ~15 реплик истории
-            "temperature": 0.7,
-            "repeat_penalty": 1.1,
-        }
-        if _is_file_request:
-            _extra_options["num_ctx"] = 8192
-        print(f"[GET_AI_RESPONSE] [DeepSeek 7b] Опции: {_extra_options}")
-    elif _mk == "deepseek-r1":
-        _extra_options = {
-            "num_ctx": 4096,          # Меньше контекст — быстрее KV-cache
-            "temperature": 0.6,       # Рекомендовано DeepSeek для R1-distilled
-            "repeat_penalty": 1.05,   # Минимальный — не тормозит сэмплинг
-        }
-        if _is_file_request:
-            # Файловый запрос: нужен полный контекст чтобы не обрезать содержимое
-            _extra_options["num_ctx"] = 8192
-            _extra_options["temperature"] = 0.6
-            print(f"[GET_AI_RESPONSE] [R1] Файловый режим: num_ctx=8192")
-        elif ai_mode == AI_MODE_FAST:
-            # Быстрый режим без файла: агрессивно ограничиваем для скорости
-            _extra_options["num_ctx"] = 2048
-            _extra_options["temperature"] = 0.4
-        print(f"[GET_AI_RESPONSE] [R1] Применены R1-опции: {_extra_options}")
-
-    if USE_OLLAMA:
-        print(f"[GET_AI_RESPONSE] Использую Ollama (LLaMA)...")
-        try:
-            if _extra_options:
-                # DeepSeek R1: прямой вызов с кастомными options для скорости
-                _r1_payload = {
-                    "model": get_current_ollama_model(),
-                    "messages": messages,
-                    "stream": False,
-                    "options": {
-                        "num_predict": max_tokens,
-                        **_extra_options
-                    }
-                }
-                _r1_raw = requests.post(
-                    f"{OLLAMA_HOST}/api/chat",
-                    json=_r1_payload,
-                    timeout=timeout
-                )
-                if _r1_raw.status_code == 200:
-                    resp = _r1_raw.json().get("message", {}).get("content", "").strip()
-                    if not resp:
-                        resp = "[Ollama error] Empty response"
-                else:
-                    resp = f"[Ollama error] HTTP {_r1_raw.status_code}"
-            else:
-                resp = call_ollama_chat(messages, max_tokens=max_tokens, timeout=timeout, model_key=_mk)
-            
-            # Проверяем, что ответ не является ошибкой
-            if not resp.startswith("[Ollama error]") and not resp.startswith("[Ollama timeout]") and not resp.startswith("[Ollama connection error]"):
-                print(f"[GET_AI_RESPONSE] Ollama ответил успешно. Длина ответа: {len(resp)}")
-                # Если был assistant prefill для файла — Ollama возвращает только продолжение,
-                # без самого prefill. Восстанавливаем его, чтобы парсер увидел полный [FILE:...][/FILE].
-                _prefill_msg = next(
-                    (m["content"] for m in reversed(messages) if m["role"] == "assistant"),
-                    None
-                )
-                if _prefill_msg and "[FILE:" in _prefill_msg and "[FILE:" not in resp:
-                    resp = _prefill_msg + resp
-                    print(f"[GET_AI_RESPONSE] 📄 Prefill восстановлен в ответе")
-                response_text = resp
-            else:
-                print(f"[GET_AI_RESPONSE] Ollama вернул ошибку: {resp}")
-                response_text = "❌ Ошибка: не удалось получить ответ от локальной модели LLaMA. Проверьте:\n1. Запущена ли Ollama\n2. Загружена ли модель\n3. Достаточно ли памяти"
-        except Exception as e:
-            print(f"[GET_AI_RESPONSE] Исключение при вызове Ollama: {e}")
-            response_text = f"❌ Ошибка подключения к LLaMA: {e}"
-    
-    # ══════════════════════════════════════════════════════════
-    # ШАГ 4 ПАЙПЛАЙНА: Валидация ответа и перегенерация при необходимости
-    # ══════════════════════════════════════════════════════════
-    # Валидация запускается только при поиске И только для содержательных вопросов.
-    # Короткие запросы (< 20 символов) или простые ответы (< 30 символов) пропускаем —
-    # они не требуют развёрнутой проверки и перегенерация только вредит.
-    _skip_validation = (
-        len(user_message.strip()) < 20         # слишком короткий вопрос
-        or len(response_text.strip()) < 30     # слишком короткий ответ (например "Да" / "Нет")
-    )
-    if use_search and response_text and not response_text.startswith("❌") and not _skip_validation:
-        facts_for_validation = locals().get("facts", "")
-        validation = validate_answer(response_text, user_message, detected_language, facts_for_validation)
-        
-        if not validation["valid"]:
-            print(f"[GET_AI_RESPONSE] 🔄 Ответ не прошёл валидацию, перегенерирую...")
-            try:
-                regen_prompt = build_final_answer_prompt(
-                    user_message, facts_for_validation,
-                    detect_question_parts(user_message),
-                    detected_language, validation["issues"]
-                )
-                regen_messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": regen_prompt}
-                ]
-                regen_resp = call_ollama_chat(regen_messages, max_tokens=max_tokens, timeout=timeout, model_key=_mk)
-                if regen_resp and not regen_resp.startswith("[Ollama"):
-                    print(f"[GET_AI_RESPONSE] ✓ Перегенерация успешна. Длина: {len(regen_resp)}")
-                    response_text = regen_resp
-                else:
-                    print(f"[GET_AI_RESPONSE] ⚠️ Перегенерация не удалась, оставляю первый ответ")
-            except Exception as e:
-                print(f"[GET_AI_RESPONSE] ⚠️ Ошибка перегенерации: {e}")
-
-    # КРИТИЧЕСКАЯ ПРОВЕРКА: если вопрос на русском, но ответ содержит много английского - переводим
-    if detected_language == "russian":
-        # Проверяем, есть ли в ответе много английского
-        response_lang = detect_message_language(response_text)
-        if response_lang == "english":
-            print(f"[GET_AI_RESPONSE] ⚠️⚠️⚠️ КРИТИЧНО! Ответ ПОЛНОСТЬЮ на английском! Переводим...")
-            try:
-                response_text = translate_to_russian(response_text)
-                print(f"[GET_AI_RESPONSE] ✓ Перевод завершён успешно")
-            except Exception as e:
-                print(f"[GET_AI_RESPONSE] ✗ Ошибка перевода: {e}")
-    
-    # ═══════════════════════════════════════════════════════════════
-    # DEEPSEEK: очистка LaTeX-разметки из ответа
-    # DeepSeek иногда генерирует \frac{}{}, \sqrt{}, $...$, что
-    # не рендерится и выглядит как мусор. Заменяем на читаемый текст.
-    # ═══════════════════════════════════════════════════════════════
-    # ═══════════════════════════════════════════════════════════════
-    # DEEPSEEK R1: очистка блоков <think>...</think>
-    # R1 генерирует внутренние рассуждения — они замедляют генерацию
-    # и засоряют вывод. Всегда вырезаем их из финального ответа.
-    # В режиме БЫСТРЫЙ (fast) — полностью убираем весь think-блок.
-    # В режиме ДУМАЮЩИЙ/ПРО — убираем теги, но оставляем содержимое
-    # в виде свёрнутого спойлера-заголовка для продвинутых пользователей.
-    # ═══════════════════════════════════════════════════════════════
-    if _mk == "deepseek-r1" and response_text and not response_text.startswith("❌"):
-        import re as _re_r1
-        _think_pattern = _re_r1.compile(r'<think>(.*?)</think>', _re_r1.DOTALL | _re_r1.IGNORECASE)
-        _think_match = _think_pattern.search(response_text)
-        if _think_match:
-            if ai_mode == AI_MODE_FAST:
-                # Быстрый режим: think-блок полностью удаляем — экономим время
-                response_text = _think_pattern.sub('', response_text).strip()
-                print(f"[GET_AI_RESPONSE] [R1] 🧹 Think-блок удалён (режим: быстрый)")
-            else:
-                # Думающий/Про: убираем теги, think-содержимое скрываем в сворачиваемый блок
-                _thinking_content = _think_match.group(1).strip()
-                response_text = _think_pattern.sub('', response_text).strip()
-                if _thinking_content:
-                    _thinking_summary = _thinking_content[:120].replace('\n', ' ').strip()
-                    if len(_thinking_content) > 120:
-                        _thinking_summary += '...'
-                    response_text = f"💭 *Рассуждение:* _{_thinking_summary}_\n\n" + response_text
-                print(f"[GET_AI_RESPONSE] [R1] 🧠 Think-блок свёрнут (режим: {ai_mode})")
-        # Убираем незакрытые <think> без закрывающего тега (прерванная генерация)
-        response_text = _re_r1.sub(r'<think>.*', '', response_text, flags=_re_r1.DOTALL).strip()
-
-    if _mk in ("deepseek", "deepseek-r1") and response_text and not response_text.startswith("❌"):
-        # Постобработка файловых ответов (убираем дубли, мусорные заголовки)
-        response_text = sanitize_deepseek_file_response(response_text)
-
-        # ── Fallback: модель написала содержимое без тегов [FILE:...][/FILE] ──
-        # Если был запрос на создание файла, но в ответе нет тегов FILE —
-        # пробуем обернуть весь ответ в правильный тег.
-        if _is_file_creation_request and _file_injection:
-            import re as _re_fb
-            _has_tag = _re_fb.search(r'\[FILE:', response_text, _re_fb.IGNORECASE)
-            if not _has_tag:
-                # Угадываем имя файла из инжекции
-                _fb_match = _re_fb.search(
-                    r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
-                    _file_injection, _re_fb.IGNORECASE
-                )
-                if _fb_match:
-                    _fb_name = _fb_match.group(1)
-                    # Убираем вводные фразы типа "Вот файл:", "Конечно!", "Создаю файл:" и пустые строки в начале
-                    _clean_resp = _re_fb.sub(
-                        r'^(вот\s+файл[:\s!]*|конечно[!\s]*|создаю\s+файл[:\s]*|готово[!\s]*|пожалуйста[!\s]*)',
-                        '', response_text.strip(), flags=_re_fb.IGNORECASE
-                    ).strip()
-                    if _clean_resp:
-                        response_text = ("Вот файл!\n"
-                                         f"[FILE:{_fb_name}]\n"
-                                         f"{_clean_resp}\n"
-                                         "[/FILE]")
-                        print(f"[GET_AI_RESPONSE] 📄 Fallback: обернули ответ в [FILE:{_fb_name}]")
-        # ШАГ 1: Проверяем на мусор (scss-блоки, выдуманные формулы и т.п.)
-        # Расширено: проверяем мусор даже если is_math_problem=False, но в запросе есть арифметика
-        _should_check_garbage = is_math_problem
-        if not _should_check_garbage and re.search(r'\d+\s*[\+\-\*\/\%\^]\s*\d+', user_message):
-            _should_check_garbage = True
-        if _should_check_garbage and is_garbage_math_response(response_text):
-            print(f"[GET_AI_RESPONSE] [DeepSeek] ⚠️ Обнаружен мусорный мат. ответ — заменяю!")
-            response_text = sanitize_deepseek_math(response_text, user_message, detected_language)
-        # ШАГ 2: Очищаем LaTeX из оставшегося ответа
-        response_text = clean_deepseek_latex(response_text)
-        print(f"[GET_AI_RESPONSE] [DeepSeek] LaTeX-разметка очищена")
-    
-    # ═══════════════════════════════════════════════════════════════
-    # ФИЛЬТРАЦИЯ CJK + АНГЛИЙСКИХ СЛОВ
-    # ═══════════════════════════════════════════════════════════════
-    # Постобработка ответа Mistral — убираем артефакты токенизатора
-    if _mk == "mistral" and response_text and not response_text.startswith("❌"):
-        response_text = clean_mistral_response(response_text)
-        print(f"[GET_AI_RESPONSE] [Mistral] Постобработка применена")
-
-    # CJK (китайский/японский/корейский) фильтруем ВСЕГДА для deepseek
-    if _mk in ("deepseek", "deepseek-r1") and response_text:
-        import re as _re_cjk_check
-        _cjk = _re_cjk_check.compile(
-            '[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
-            '\u3000-\u303f\u30a0-\u30ff\u3040-\u309f\uac00-\ud7af]+'
-        )
-        if _cjk.search(response_text):
-            response_text = _cjk.sub('', response_text)
-            response_text = re.sub(r'  +', ' ', response_text).strip()
-            print("[GET_AI_RESPONSE] [DeepSeek] ⚠️ CJK-символы удалены из ответа")
-            print(f"[GET_AI_RESPONSE] [DeepSeek] ⚠️ CJK-символы удалены из ответа")
-    # Используем расширенный словарь из forbidden_english_words.py
-    # Фильтр отключён для Mistral — он уже настроен на русский язык через промпт
-    if detected_language == "russian" and _mk not in ("mistral", "mistral-nemo", MISTRAL_MODEL_NAME):
-        print(f"[GET_AI_RESPONSE] Фильтрация английских слов...")
-        response_text = remove_english_words_from_russian(response_text)
-    
-    # ИСПРАВЛЕНО: НЕ сохраняем полный контекст поиска, чтобы избежать дублирования
-    # Сохраняем только метаданные о том, что поиск был выполнен
-    if use_search and chat_id and response_text:
-        try:
-            context_mgr = get_memory_manager(_mk)
-            # Только факт поиска, БЕЗ содержимого ответа
-            context_entry = f"[Поиск] {user_message[:80]}"
-            context_mgr.save_context_memory(chat_id, "search_meta", context_entry)
-            print(f"[GET_AI_RESPONSE] Сохранены метаданные поиска (без дублирования)")
-        except Exception as e:
-            print(f"[GET_AI_RESPONSE] Ошибка сохранения метаданных: {e}")
-    
-    print(f"[GET_AI_RESPONSE] ========== КОНЕЦ ==========\n")
-    return response_text, found_sources
-
-# -------------------------
-# New helper: decide short text
-# -------------------------
-def is_short_text(text: str) -> bool:
-    """
-    Возвращает True если текст короткий — критерии:
-    - по символам меньше SHORT_TEXT_THRESHOLD, и
-    - не более 2 строк
-    """
-    if not text:
-        return True
-    s = text.strip()
-    lines = s.count("\n") + 1
-    return len(s) <= SHORT_TEXT_THRESHOLD and lines <= 2
+from ai_core import (
+    get_ai_response,
+    get_memory_manager,
+    clear_chat_all_memories,
+    clear_all_memories_global,
+    on_chat_switched_all_memories,
+    init_db,
+    is_short_text,
+    DB_FILE,
+    MAX_HISTORY_LOAD,
+    SHORT_TEXT_THRESHOLD,
+)
 
 # -------------------------
 # Animated Checkbox
@@ -6683,6 +852,64 @@ class RoundedPopup(QtWidgets.QFrame):
         painter.end()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Кастомный QGraphicsEffect: opacity + горизонтальный сдвиг без конфликта с layout
+# ─────────────────────────────────────────────────────────────────────────────
+class _SlideOpacityEffect(QtWidgets.QGraphicsEffect):
+    """
+    Рисует источник (виджет) со смещением по X и заданной прозрачностью.
+    Поскольку рисование происходит в системе координат эффекта,
+    layout-менеджер Qt не замечает сдвига и не борется с анимацией.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._opacity: float = 0.0
+        self._offset_x: float = 0.0
+
+    # ── Qt-свойства (нужны QPropertyAnimation) ───────────────────────────────
+    def _get_opacity(self) -> float:
+        return self._opacity
+
+    def _set_opacity(self, v: float):
+        self._opacity = max(0.0, min(1.0, v))
+        self.update()
+
+    opacity_val = QtCore.pyqtProperty(float, _get_opacity, _set_opacity)
+
+    def _get_offset_x(self) -> float:
+        return self._offset_x
+
+    def _set_offset_x(self, v: float):
+        self._offset_x = v
+        self.update()
+
+    offset_x_val = QtCore.pyqtProperty(float, _get_offset_x, _set_offset_x)
+
+    # ── Рисование ────────────────────────────────────────────────────────────
+    def draw(self, painter: QtGui.QPainter):
+        # В PyQt6 sourcePixmap возвращает (QPixmap, QPoint)
+        result = self.sourcePixmap(QtCore.Qt.CoordinateSystem.LogicalCoordinates)
+        if isinstance(result, tuple):
+            pixmap, offset = result
+        else:
+            pixmap, offset = result, QtCore.QPoint()
+        if pixmap.isNull():
+            return
+        painter.save()
+        painter.setOpacity(self._opacity)
+        painter.translate(self._offset_x, 0)
+        painter.drawPixmap(offset, pixmap)
+        painter.restore()
+
+    def boundingRectFor(self, src_rect: QtCore.QRectF) -> QtCore.QRectF:
+        # НЕ расширяем по горизонтали: если расширять, Qt пересчитывает ширины
+        # всех соседних MessageWidget → они обрезают текст во время анимации.
+        # Слайд-эффект просто клипируется по границе виджета — визуально незаметно,
+        # т.к. offset за 380ms никогда не достигает края пузыря.
+        return src_rect
+
+
 # -------------------------
 # Message widget (с адаптивным размером эмодзи)
 # -------------------------
@@ -6719,10 +946,11 @@ class MessageWidget(QtWidgets.QWidget):
         self._regen_next_btn = None  # кнопка «›»
         self._regen_counter = None   # метка «2/3»
         
-        # Создаём эффект прозрачности для анимации
-        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(0)  # Начинаем с полной прозрачности
+        # Создаём кастомный эффект (opacity + slide без конфликта с layout)
+        self._slide_eff = _SlideOpacityEffect(self)
+        self.setGraphicsEffect(self._slide_eff)
+        # opacity_effect — алиас для обратной совместимости со старым кодом
+        self.opacity_effect = self._slide_eff
 
         # ═══════════════════════════════════════════════════════════════════════
         # ПОЛУЧАЕМ НАСТРОЙКИ LIQUID GLASS И ТЕМЫ ИЗ ГЛАВНОГО ОКНА
@@ -7560,56 +1788,133 @@ class MessageWidget(QtWidgets.QWidget):
             # ✅ Для системных сообщений - добавляем stretch ПОСЛЕ для полного центрирования
             main_layout.addStretch()
         
-        # ✅ ИДЕАЛЬНАЯ FADE-IN АНИМАЦИЯ: Плавное появление с оптимальными параметрами
-        # Простая, надёжная, красивая - без конфликтов с layout
+        # ✅ ПЛАВНАЯ АНИМАЦИЯ: opacity + slide через _SlideOpacityEffect
         if not IS_WINDOWS:
-            # Создаём fade-in анимацию с идеальными параметрами
-            self.fade_in_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
-            self.fade_in_animation.setDuration(350)  # плавное появление
-            self.fade_in_animation.setStartValue(0.0)
-            self.fade_in_animation.setEndValue(1.0)
-            # OutCubic - создаёт мягкое замедление в конце для естественного появления
-            # Сообщение появляется быстро и элегантно
-            self.fade_in_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            
-            # ✅ НЕ запускаем анимацию автоматически - она будет запущена из add_message_widget
-            # после полного обновления layout
+            # Начальный сдвиг по X: пользователь — справа, ИИ — слева
+            if speaker == "Вы":
+                _start_offset = 40.0
+            elif speaker == "Система":
+                _start_offset = 0.0
+            else:
+                _start_offset = -40.0
+            self._slide_eff._offset_x = _start_offset
+            self._slide_eff._opacity = 0.0
+            self._anim_start_offset = _start_offset   # сохраняем для animate_remove
+
+            # Анимация прозрачности 0 → 1
+            self._anim_opacity = QtCore.QPropertyAnimation(self._slide_eff, b"opacity_val")
+            self._anim_opacity.setDuration(380)
+            self._anim_opacity.setStartValue(0.0)
+            self._anim_opacity.setEndValue(1.0)
+            self._anim_opacity.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+
+            # Анимация сдвига _start_offset → 0
+            self._anim_slide = QtCore.QPropertyAnimation(self._slide_eff, b"offset_x_val")
+            self._anim_slide.setDuration(380)
+            self._anim_slide.setStartValue(_start_offset)
+            self._anim_slide.setEndValue(0.0)
+            self._anim_slide.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+
+            # Группа — оба эффекта идут параллельно
+            self._appear_group = QtCore.QParallelAnimationGroup(self)
+            self._appear_group.addAnimation(self._anim_opacity)
+            self._appear_group.addAnimation(self._anim_slide)
+            # Запуск — из add_message_widget через QTimer
         else:
-            # На Windows сразу показываем без анимации
-            self.opacity_effect.setOpacity(1.0)
+            # Windows: без анимации
+            self._slide_eff._opacity = 1.0
+            self._slide_eff._offset_x = 0.0
 
     @QtCore.pyqtSlot()
     def _start_appear_animation(self):
         """
-        Запускает fade-in анимацию появления сообщения (opacity 0→1).
-        Вызывается через invokeMethod после добавления в layout.
+        Запускает параллельную fade+slide анимацию появления.
+        Вызывается через QTimer из add_message_widget после layout.
         """
-        if not hasattr(self, 'fade_in_animation'):
+        if not hasattr(self, '_appear_group'):
             return
         try:
-            self.fade_in_animation.finished.disconnect()
+            self._appear_group.finished.disconnect()
         except (RuntimeError, TypeError):
             pass
-        self.fade_in_animation.finished.connect(self._remove_graphics_effect_after_animation)
-        self.fade_in_animation.start()
-    
-    def _remove_graphics_effect_after_animation(self):
-        """
-        Удаляет graphicsEffect после завершения анимации.
-        Это предотвращает искажение цветов сообщений.
-        """
+        self._appear_group.finished.connect(self._on_appear_finished)
+        self._appear_group.start()
+
+    def _on_appear_finished(self):
+        """После появления убираем эффект чтобы не было цветовых артефактов."""
         try:
-            # Удаляем graphicsEffect чтобы избежать искажения цветов
             self.setGraphicsEffect(None)
-            # Убираем ссылки на анимации
-            if hasattr(self, 'fade_in_animation'):
-                delattr(self, 'fade_in_animation')
-            if hasattr(self, 'opacity_effect'):
-                delattr(self, 'opacity_effect')
-        except Exception as e:
-            # Игнорируем ошибки при очистке
+            # Чистим ссылки
+            for attr in ('_slide_eff', 'opacity_effect', '_appear_group',
+                         '_anim_opacity', '_anim_slide'):
+                if hasattr(self, attr):
+                    delattr(self, attr)
+        except Exception:
             pass
-    
+
+    def animate_remove(self, on_done_callback=None):
+        """
+        Плавно убирает виджет (обратная анимация: slide-out + fade-out),
+        затем вызывает on_done_callback (там должны быть removeWidget + deleteLater).
+        Если эффект уже снят (анимация давно завершилась) — создаём новый.
+        """
+        if IS_WINDOWS:
+            # Windows — без анимации
+            if on_done_callback:
+                on_done_callback()
+            return
+
+        # Останавливаем appear-анимацию если она ещё идёт
+        if hasattr(self, '_appear_group'):
+            self._appear_group.stop()
+
+        # Направление исхода: туда откуда пришло (или по speaker)
+        start_offset = getattr(self, '_anim_start_offset', None)
+        if start_offset is None:
+            # Определяем направление по speaker если метаданных нет
+            start_offset = 40.0 if getattr(self, 'speaker', '') == "Вы" else -40.0
+
+        # Пересоздаём эффект (мог быть снят после appear)
+        eff = _SlideOpacityEffect(self)
+        eff._opacity = 1.0
+        eff._offset_x = 0.0
+        self.setGraphicsEffect(eff)
+
+        # Анимации fade-out и slide-out
+        fade_out = QtCore.QPropertyAnimation(eff, b"opacity_val")
+        fade_out.setDuration(260)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QtCore.QEasingCurve.Type.InQuart)
+
+        slide_out = QtCore.QPropertyAnimation(eff, b"offset_x_val")
+        slide_out.setDuration(260)
+        slide_out.setStartValue(0.0)
+        slide_out.setEndValue(start_offset * 0.7)  # чуть меньше чтобы не улетал далеко
+        slide_out.setEasingCurve(QtCore.QEasingCurve.Type.InQuart)
+
+        self._remove_group = QtCore.QParallelAnimationGroup(self)
+        self._remove_group.addAnimation(fade_out)
+        self._remove_group.addAnimation(slide_out)
+
+        def _finish():
+            try:
+                self.setGraphicsEffect(None)
+            except Exception:
+                pass
+            if on_done_callback:
+                on_done_callback()
+
+        self._remove_group.finished.connect(_finish)
+        self._remove_group.start(
+            QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped
+        )
+
+    def _remove_graphics_effect_after_animation(self):
+        """Оставлено для обратной совместимости."""
+        self._on_appear_finished()
+
+
     def _cleanup_graphics_effect(self):
         """
         Завершает анимацию появления - удаляет graphicsEffect.
@@ -7797,109 +2102,67 @@ class MessageWidget(QtWidgets.QWidget):
     def copy_text(self):
         clipboard = QtWidgets.QApplication.clipboard()
         clipboard.setText(self.text)
-        
-        # Простая анимация: меняем текст и цвет
+
         if self.copy_button:
             original_text = self.copy_button.text()
-            original_style = self.copy_button.styleSheet()
-            
-            # Меняем на галочку с зеленым цветом
+            # Просто меняем иконку на галочку — стиль не трогаем вообще
             self.copy_button.setText("✓")
-            
-            # Добавляем зеленый фон для индикации успеха
-            success_style = original_style.replace(
-                self.btn_bg, 
-                "rgba(72, 187, 120, 0.3)"  # Зеленый полупрозрачный
-            )
-            self.copy_button.setStyleSheet(success_style)
-            
-            # Через 1.5 секунды возвращаем обратно
-            QtCore.QTimer.singleShot(1500, lambda: self._restore_copy_button(original_text, original_style))
+            QtCore.QTimer.singleShot(1500, lambda: self._restore_copy_button(original_text, None))
     
     def _restore_copy_button(self, original_text, original_style):
         """Восстановление оригинального вида кнопки"""
         if self.copy_button:
             try:
-                # Python-ссылка может быть жива, а C++ объект Qt уже удалён
-                # (виджет удалён пока таймер 1500ms ещё не истёк).
-                # isWidgetType() бросает RuntimeError если объект удалён.
                 self.copy_button.setText(original_text)
-                self.copy_button.setStyleSheet(original_style)
             except RuntimeError:
-                # C++ объект удалён — просто сбрасываем ссылку
                 self.copy_button = None
     
     def fade_out_and_delete(self):
         """
         Плавное исчезновение виджета через прозрачность.
-        
-        ВАЖНО: Работает одинаково во всех темах (светлая/тёмная).
-        Стиль темы НЕ влияет на механизм удаления.
+        Использует _SlideOpacityEffect (совместимо с новой системой анимаций).
         """
-        # На Windows GraphicsOpacityEffect работает медленно - используем упрощённую анимацию
         if IS_WINDOWS:
-            # Упрощённая анимация для Windows без GraphicsOpacityEffect
             try:
-                # Просто удаляем без эффектов (на Windows могут быть проблемы с repaint)
                 self.deleteLater()
             except Exception as e:
                 print(f"[FADE_OUT] Ошибка удаления на Windows: {e}")
             return
-        
-        # Для macOS и Linux - полноценная анимация с opacity
-        # Проверяем, существует ли opacity_effect
-        if not hasattr(self, 'opacity_effect') or self.opacity_effect is None:
-            # Если эффект удалён - создаём новый
-            self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
-            self.setGraphicsEffect(self.opacity_effect)
-            self.opacity_effect.setOpacity(1.0)
-        
-        # Дополнительная проверка: проверяем что эффект не был удалён из C++
-        try:
-            # Пытаемся получить текущую прозрачность - если объект удалён, будет RuntimeError
-            current_opacity = self.opacity_effect.opacity()
-        except RuntimeError:
-            # Объект был удалён на уровне C++ - создаём новый
-            self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
-            self.setGraphicsEffect(self.opacity_effect)
-            self.opacity_effect.setOpacity(1.0)
-        
-        # ✅ ТОЛЬКО fade-out прозрачности, БЕЗ изменения высоты
-        # Layout сам пересчитает позиции после удаления виджета
-        # КРИТИЧНО: Анимация НЕ зависит от темы - работает одинаково везде
-        self.fade_out_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.fade_out_animation.setDuration(350)  # Плавная анимация
-        self.fade_out_animation.setStartValue(1.0)
-        self.fade_out_animation.setEndValue(0.0)
-        self.fade_out_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)  # Плавное замедление
-        
-        # Удаляем виджет после завершения fade-out
+
+        # Останавливаем appear-анимацию если ещё идёт
+        if hasattr(self, '_appear_group'):
+            try:
+                self._appear_group.stop()
+            except Exception:
+                pass
+
+        # Создаём свежий эффект (appear мог его снять)
+        eff = _SlideOpacityEffect(self)
+        eff._opacity = 1.0
+        eff._offset_x = 0.0
+        self.setGraphicsEffect(eff)
+
+        fade = QtCore.QPropertyAnimation(eff, b"opacity_val")
+        fade.setDuration(300)
+        fade.setStartValue(1.0)
+        fade.setEndValue(0.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
         def safe_delete():
             try:
-                # Останавливаем анимацию перед удалением
-                if hasattr(self, 'fade_out_animation') and self.fade_out_animation:
-                    self.fade_out_animation.stop()
-                    self.fade_out_animation = None
-                # Удаляем эффект
-                if self.graphicsEffect():
-                    self.setGraphicsEffect(None)
-                # Обнуляем ссылку на opacity_effect
-                if hasattr(self, 'opacity_effect'):
-                    self.opacity_effect = None
-                # Удаляем виджет
+                self.setGraphicsEffect(None)
                 self.deleteLater()
                 print("[FADE_OUT] Системное сообщение плавно удалено")
             except RuntimeError:
-                # Объект уже удалён
-                print("[FADE_OUT] Объект уже удалён (RuntimeError)")
                 pass
-            except Exception as e:
-                print(f"[FADE_OUT] Неожиданная ошибка при удалении: {e}")
-        
-        self.fade_out_animation.finished.connect(safe_delete)
-        self.fade_out_animation.start()
-        
-        print("[FADE_OUT] Запущена анимация fade-out (универсальная для всех тем)")
+            except Exception as ex:
+                print(f"[FADE_OUT] Ошибка: {ex}")
+
+        fade.finished.connect(safe_delete)
+        self._fade_out_anim = fade  # держим ссылку
+        fade.start()
+        print("[FADE_OUT] Запущена анимация fade-out")
+
 
 
     def _regen_update_nav(self):
@@ -8067,74 +2330,79 @@ class MessageWidget(QtWidgets.QWidget):
 
         is_dark = getattr(parent_window, 'current_theme', 'dark') == 'dark'
 
-        if is_dark:
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(28, 28, 32, 0.98);
-                    border: 1px solid rgba(60, 60, 70, 0.8);
-                    border-radius: 10px;
-                    padding: 4px;
-                }
-                QMenu::item {
-                    padding: 7px 16px;
-                    border-radius: 7px;
-                    color: #e0e0e0;
-                    font-size: 13px;
-                    font-weight: 500;
-                    margin: 1px;
-                    background: transparent;
-                }
-                QMenu::item:selected {
-                    background: rgba(60, 60, 75, 0.9);
-                    color: #ffffff;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(80, 80, 100, 0.4);
-                    margin: 2px 8px;
-                }
-            """)
-        else:
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(255, 255, 255, 0.98);
-                    border: 1px solid rgba(200, 200, 215, 0.9);
-                    border-radius: 10px;
-                    padding: 4px;
-                }
-                QMenu::item {
-                    padding: 7px 16px;
-                    border-radius: 7px;
-                    color: #1a202c;
-                    font-size: 13px;
-                    font-weight: 500;
-                    margin: 1px;
-                    background: transparent;
-                }
-                QMenu::item:selected {
-                    background: rgba(230, 230, 245, 0.95);
-                    color: #0f172a;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(180, 185, 200, 0.5);
-                    margin: 2px 8px;
-                }
-            """)
+        # Единый стиль для main menu и submenu — одинаковый вид
+        _c = {
+            "bg":       "rgba(28,28,32,0.98)"  if is_dark else "rgba(255,255,255,0.98)",
+            "border":   "rgba(60,60,70,0.8)"   if is_dark else "rgba(200,200,215,0.9)",
+            "text":     "#e0e0e0"               if is_dark else "#1a202c",
+            "sel_bg":   "rgba(60,60,75,0.9)"   if is_dark else "rgba(225,228,248,0.95)",
+            "sel_txt":  "#ffffff"               if is_dark else "#0f172a",
+            "sep":      "rgba(80,80,100,0.4)"  if is_dark else "rgba(180,185,200,0.5)",
+            "arrow":    "#9999bb"               if is_dark else "#6677aa",
+            "dim":      "rgba(140,140,160,0.5)" if is_dark else "rgba(120,130,150,0.6)",
+        }
+        _shared_style = f"""
+            QMenu {{
+                background: {_c['bg']};
+                border: 1px solid {_c['border']};
+                border-radius: 12px;
+                padding: 4px 4px;
+                min-width: 200px;
+            }}
+            QMenu::item {{
+                padding: 8px 32px 8px 14px;
+                border-radius: 8px;
+                color: {_c['text']};
+                font-size: 13px;
+                font-weight: 500;
+                margin: 1px 2px;
+            }}
+            QMenu::item:selected {{
+                background: {_c['sel_bg']};
+                color: {_c['sel_txt']};
+            }}
+            QMenu::item:disabled {{
+                color: {_c['dim']};
+                background: transparent;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {_c['sep']};
+                margin: 3px 10px;
+            }}
+            QMenu::right-arrow {{
+                width: 6px;
+                height: 6px;
+                margin-right: 8px;
+            }}
+        """
+        menu.setStyleSheet(_shared_style)
 
-        act_same  = menu.addAction(f"🔄  Перегенерировать  ({current_name})")
+        act_same  = menu.addAction(f"Перегенерировать  ({current_name})")
         menu.addSeparator()
 
-        # Динамические пункты «перегенерировать через <другую модель>»
+        # ── Подменю «Другая модель» ───────────────────────────────────
+        # Используем нативный QMenu::item::menu-arrow для стрелки.
+        # Ключ: стили submenu совпадают с родительским — нет двойной рамки.
+        submenu = QtWidgets.QMenu("Другая модель...", menu)
+        submenu.setWindowFlags(
+            QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint
+        )
+        if not IS_WINDOWS:
+            submenu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        submenu.setStyleSheet(_shared_style)
+
         _alt_actions = {}
         for _alt_key in _alt_keys:
             _alt_display = llama_handler.SUPPORTED_MODELS.get(_alt_key, ("", _alt_key))[1]
             _installed   = check_model_in_ollama(
                 llama_handler.SUPPORTED_MODELS.get(_alt_key, (_alt_key,))[0]
             )
-            _suffix = "" if _installed else "  ↓ (не скачана)"
-            _act = menu.addAction(f"🔀  Перегенерировать через  {_alt_display}{_suffix}")
+            _suffix = "" if _installed else "  (не скачана)"
+            _act    = submenu.addAction(f"{_alt_display}{_suffix}")
             _alt_actions[_act] = (_alt_key, _installed, _alt_display)
+
+        menu.addMenu(submenu)
 
         # ── Показываем меню рядом с кнопкой ─────────────────────────
         btn = self.regenerate_button
@@ -8144,6 +2412,8 @@ class MessageWidget(QtWidgets.QWidget):
             pos = QtGui.QCursor.pos()
 
         chosen = menu.exec(pos)
+        if chosen is None:
+            return
 
         if chosen == act_same:
             parent_window.regenerate_last_response()
@@ -8156,8 +2426,7 @@ class MessageWidget(QtWidgets.QWidget):
                 reply = QtWidgets.QMessageBox.question(
                     self.window(),
                     f"{_target_display} не установлена",
-                    f"⚠️ {_target_display} ещё не скачана.\n\n"
-                    f"Хотите скачать её сейчас?",
+                    f"{_target_display} ещё не скачана.\n\nХотите скачать её сейчас?",
                     QtWidgets.QMessageBox.StandardButton.Yes |
                     QtWidgets.QMessageBox.StandardButton.No,
                     QtWidgets.QMessageBox.StandardButton.Yes,
@@ -9416,6 +3685,7 @@ class SettingsView(QtWidgets.QWidget):
     settings_applied = QtCore.pyqtSignal(dict)
     close_requested = QtCore.pyqtSignal()
     delete_all_chats_requested = QtCore.pyqtSignal()  # Новый сигнал для удаления всех чатов
+    delete_all_models_requested = QtCore.pyqtSignal()  # Сигнал удаления всех моделей ИИ
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -9511,6 +3781,13 @@ class SettingsView(QtWidgets.QWidget):
         settings_layout.addWidget(scroll_group)
 
         # ═══════════════════════════════════════════════
+        # УЛУЧШЕННЫЙ ПОДТЕКСТ
+        # ═══════════════════════════════════════════════
+        if SubtextSettingBlock is not None:
+            self.subtext_block = SubtextSettingBlock()
+            settings_layout.addWidget(self.subtext_block)
+
+        # ═══════════════════════════════════════════════
         # ОПАСНАЯ ЗОНА: Удаление всех чатов
         # ═══════════════════════════════════════════════
         danger_group = self.create_setting_group(
@@ -9529,6 +3806,27 @@ class SettingsView(QtWidgets.QWidget):
         self.delete_all_chats_btn.clicked.connect(self.request_delete_all_chats)
 
         delete_all_layout.addWidget(self.delete_all_chats_btn)
+
+        self.delete_all_models_btn = QtWidgets.QPushButton("🤖 Удалить все модели ИИ")
+        self.delete_all_models_btn.setObjectName("deleteAllModelsBtn")
+        self.delete_all_models_btn.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Medium))
+        self.delete_all_models_btn.setMinimumHeight(45)
+        self.delete_all_models_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.delete_all_models_btn.setStyleSheet(
+            "QPushButton#deleteAllModelsBtn {"
+            "  background: rgba(254, 226, 226, 0.85);"
+            "  border: 2px solid rgba(252, 165, 165, 0.7);"
+            "  border-radius: 14px;"
+            "  color: #dc2626;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton#deleteAllModelsBtn:hover {"
+            "  background: rgba(254, 202, 202, 1.0);"
+            "}"
+        )
+        self.delete_all_models_btn.clicked.connect(self.request_delete_all_models)
+        delete_all_layout.addWidget(self.delete_all_models_btn)
+
         danger_group.layout().addLayout(delete_all_layout)
         settings_layout.addWidget(danger_group)
 
@@ -9555,6 +3853,13 @@ class SettingsView(QtWidgets.QWidget):
         back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         back_btn.clicked.connect(self.close_requested.emit)
         main_page_layout.addWidget(back_btn)
+
+        # Версия — правый нижний угол
+        _ver_lbl = QtWidgets.QLabel("v2.6.0")
+        _ver_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignBottom)
+        _ver_lbl.setFont(_apple_font(11))
+        _ver_lbl.setStyleSheet("color: rgba(128,128,128,0.40); background: transparent; border: none; padding-right: 4px;")
+        main_page_layout.addWidget(_ver_lbl)
 
         self.pages_stack.addWidget(main_page)
 
@@ -9889,6 +4194,11 @@ class SettingsView(QtWidgets.QWidget):
         """Запросить подтверждение удаления всех чатов"""
         print("[SETTINGS] Запрос на удаление всех чатов")
         self.delete_all_chats_requested.emit()
+
+    def request_delete_all_models(self):
+        """Запросить подтверждение удаления всех моделей ИИ"""
+        print("[SETTINGS] Запрос на удаление всех моделей ИИ")
+        self.delete_all_models_requested.emit()
     
     def update_delete_all_btn_state(self, has_chats_with_messages: bool):
         """
@@ -10028,7 +4338,7 @@ class SettingsView(QtWidgets.QWidget):
                     "group_border": "rgba(255, 255, 255, 0.85)",
                     "text": "#222222",
                     "desc": "#5a5a5a",
-                    "btn_bg": "rgba(255, 255, 255, 0.65)",
+                    "btn_bg": "rgba(255, 255, 255, 0.82)",
                     "btn_border": "rgb(200, 210, 222)",
                     "btn_text": "#3a3a3a",
                     "btn_checked_bg_start": "rgba(102, 126, 234, 0.80)",
@@ -10436,18 +4746,50 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ШАГ 1: Удаляем все старые ПУСТЫЕ чаты (без пользовательских сообщений)
         print("[STARTUP] Очистка старых пустых чатов...")
         self._cleanup_empty_chats_on_startup()
-        
-        # ШАГ 2: Создаём новый чат при запуске
-        new_chat_id = self.chat_manager.create_chat("Новый чат")
-        self.chat_manager.set_active_chat(new_chat_id)
-        self.current_chat_id = new_chat_id
-        # Уведомляем память DeepSeek о новом чате
-        on_chat_switched_all_memories(new_chat_id)
-        
-        # Помечаем этот чат как стартовый (пустой)
-        self.startup_chat_id = new_chat_id
-        self.startup_chat_has_messages = False
-        print(f"[STARTUP] Создан новый стартовый чат ID={new_chat_id}")
+
+        # ШАГ 2: Проверяем можно ли восстановить последний чат
+        # Если с момента закрытия прошло < 20 секунд — открываем тот же чат,
+        # иначе (долгий перерыв или первый запуск) — создаём новый чат.
+        _restored_chat_id = None
+        _RESUME_THRESHOLD_SEC = 20
+        try:
+            if os.path.exists("app_settings.json"):
+                with open("app_settings.json", "r", encoding="utf-8") as _sf:
+                    _saved = json.load(_sf)
+                _last_chat_id = _saved.get("last_chat_id")
+                _last_close_ts = _saved.get("last_close_ts", 0)
+                _elapsed = time.time() - _last_close_ts
+                if _last_chat_id and _elapsed < _RESUME_THRESHOLD_SEC:
+                    # Проверяем что чат реально существует
+                    _all = self.chat_manager.get_all_chats()
+                    _ids = {c["id"] for c in _all}
+                    if _last_chat_id in _ids:
+                        _restored_chat_id = _last_chat_id
+                        print(f"[STARTUP] ⚡ Быстрый перезапуск ({_elapsed:.1f}с) — восстанавливаем чат ID={_last_chat_id}")
+                    else:
+                        print(f"[STARTUP] Чат ID={_last_chat_id} не найден — создаём новый")
+                else:
+                    print(f"[STARTUP] Пауза {_elapsed:.0f}с ≥ {_RESUME_THRESHOLD_SEC}с — создаём новый чат")
+        except Exception as _re:
+            print(f"[STARTUP] ⚠️ Ошибка чтения last_chat_id: {_re}")
+
+        if _restored_chat_id:
+            # Восстанавливаем существующий чат
+            self.chat_manager.set_active_chat(_restored_chat_id)
+            self.current_chat_id = _restored_chat_id
+            on_chat_switched_all_memories(_restored_chat_id)
+            self.startup_chat_id = None          # не «стартовый пустой», уже с историей
+            self.startup_chat_has_messages = True
+            print(f"[STARTUP] ✓ Восстановлен чат ID={_restored_chat_id}")
+        else:
+            # Создаём новый пустой чат
+            new_chat_id = self.chat_manager.create_chat("Новый чат")
+            self.chat_manager.set_active_chat(new_chat_id)
+            self.current_chat_id = new_chat_id
+            on_chat_switched_all_memories(new_chat_id)
+            self.startup_chat_id = new_chat_id
+            self.startup_chat_has_messages = False
+            print(f"[STARTUP] Создан новый стартовый чат ID={new_chat_id}")
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1100, 850)
@@ -10461,17 +4803,40 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
         # Главный контейнер
         main_container = QtWidgets.QWidget()
+        main_container.setObjectName("mainContainer")
         self.setCentralWidget(main_container)
+        self.main_container = main_container   # нужен в resizeEvent для overlay-sidebar
         container_layout = QtWidgets.QHBoxLayout(main_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
 
-        # Боковая панель чатов
-        self.sidebar = QtWidgets.QWidget()
+        # ─────────────────────────────────────────────────────────────────────
+        # SIDEBAR — OVERLAY DRAWER
+        # Не в layout! Позиционируется абсолютно поверх контента.
+        # Начальная позиция: x = -SIDEBAR_W (полностью за левым краем).
+        # При открытии: pos.x анимируется от -280 до 0.
+        # При закрытии: обратно. Контент никуда не сдвигается.
+        # ─────────────────────────────────────────────────────────────────────
+        SIDEBAR_W = 280
+        self._SIDEBAR_W   = SIDEBAR_W
+        self._sidebar_open = False    # флаг состояния (вместо sidebar.width())
+
+        self.sidebar = QtWidgets.QWidget(main_container)  # дочерний, но НЕ в layout
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(0)  # Изначально скрыта
+        self.sidebar.setFixedWidth(SIDEBAR_W)
+        self.sidebar.move(-SIDEBAR_W, 0)   # за левым краем — невидим
+        self.sidebar.raise_()              # поверх всего
+
+        # ── Тень sidebar (даёт глубину overlay-drawer) ──────────────────────
+        _sb_shadow = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
+        _sb_shadow.setBlurRadius(28)
+        _sb_shadow.setOffset(6, 0)          # только вправо — панель слева
+        _sb_shadow.setColor(QtGui.QColor(0, 0, 0, 55))
+        self.sidebar.setGraphicsEffect(_sb_shadow)
+        self._sb_shadow_effect = _sb_shadow  # сохраняем чтобы не потерять
+
         sidebar_layout = QtWidgets.QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(0, 12, 0, 0)  # Верхний отступ как у title
+        sidebar_layout.setContentsMargins(0, 12, 0, 0)
         sidebar_layout.setSpacing(0)
 
         # Кнопка "Новый чат"
@@ -10509,8 +4874,15 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         sidebar_layout.addWidget(self.settings_btn)
 
 
-        container_layout.addWidget(self.sidebar)
+        # sidebar НЕ добавляем в container_layout — он overlay
 
+        # ── Dim-overlay: затемняет контент когда sidebar открыт ──────────────
+        # Клик по overlay закрывает sidebar (как в мобильных приложениях).
+        self._dim_overlay = QtWidgets.QWidget(main_container)
+        self._dim_overlay.setObjectName("dimOverlay")
+        self._dim_overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._dim_overlay.hide()
+        self._dim_overlay.installEventFilter(self)   # клик по нему → close sidebar
         # Панель удаления (справа от sidebar)
         self.delete_panel = QtWidgets.QWidget()
         self.delete_panel.setObjectName("deletePanel")
@@ -10708,6 +5080,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.settings_view.close_requested.connect(self.close_settings)
         self.settings_view.settings_applied.connect(self.on_settings_applied)
         self.settings_view.delete_all_chats_requested.connect(self.confirm_delete_all_chats)
+        self.settings_view.delete_all_models_requested.connect(self.confirm_delete_all_models)
         
         # Добавляем страницы в stack
         self.content_stack.addWidget(chat_container)  # index 0
@@ -10888,6 +5261,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Флаг первого показа для финализации layout
         self._first_show_done = False
     
+    # ═══════════════════════════════════════════════════════════════════════
+    # SYSTEM TRAY ICON
+    # ═══════════════════════════════════════════════════════════════════════
+
     def load_saved_settings(self) -> dict:
         """Загрузить сохранённые настройки из файла"""
         try:
@@ -10911,7 +5288,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         if not self._first_show_done:
             self._first_show_done = True
-            # Плавное появление всего окна при запуске
+            # Каскадное появление элементов при запуске
             self._start_window_fade_in()
             # Откладываем финализацию на следующий цикл event loop
             # Это гарантирует что все виджеты полностью отрендерены
@@ -10919,17 +5296,129 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
     def _start_window_fade_in(self):
         """
-        Плавное появление всего окна при запуске.
-        Использует setWindowOpacity — без патчей и QGraphicsEffect.
+        Каскадное появление элементов UI при запуске.
+
+        Шапка: slide-down (maxHeight 0 → натуральный) + fade-in одновременно.
+        Остальные блоки: только fade-in с нарастающей задержкой.
+
+        Хронология:
+          0ms   — шапка начинает slide-down + fade
+          160ms — область чата (fade)
+          300ms — контейнер ввода (fade)
+          400ms — строка статуса (fade)
         """
-        self.setWindowOpacity(0.0)
-        
-        self._fade_in_anim = QtCore.QPropertyAnimation(self, b"windowOpacity")
-        self._fade_in_anim.setDuration(500)          # 500ms — мягко и быстро
-        self._fade_in_anim.setStartValue(0.0)
-        self._fade_in_anim.setEndValue(1.0)
-        self._fade_in_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self._fade_in_anim.start()
+        self.setWindowOpacity(1.0)
+        # Хранилище анимаций — чтобы GC не удалил их раньше завершения
+        self._startup_anims = []
+
+        # ─────────────────────────────────────────────────────────
+        # ШАПКА: slide-down (0 → натуральная высота) + fade одновременно
+        # ─────────────────────────────────────────────────────────
+        if hasattr(self, 'title_widget'):
+            tw = self.title_widget
+
+            # Узнаём натуральную высоту (sizeHint) до того как спрячем
+            natural_h = tw.sizeHint().height()
+            if natural_h < 10:
+                natural_h = 74  # fallback
+
+            # Скрываем шапку: высота 0, opacity 0
+            tw.setMaximumHeight(0)
+            tw.setMinimumHeight(0)
+
+            eff_tw = QtWidgets.QGraphicsOpacityEffect(tw)
+            tw.setGraphicsEffect(eff_tw)
+            eff_tw.setOpacity(0.0)
+            self._startup_anims.append(eff_tw)
+
+            # Анимация высоты: 0 → natural_h
+            anim_h = QtCore.QPropertyAnimation(tw, b"maximumHeight")
+            anim_h.setDuration(480)
+            anim_h.setStartValue(0)
+            anim_h.setEndValue(natural_h)
+            anim_h.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._startup_anims.append(anim_h)
+
+            # Анимация прозрачности: 0 → 1
+            anim_op = QtCore.QPropertyAnimation(eff_tw, b"opacity")
+            anim_op.setDuration(420)
+            anim_op.setStartValue(0.0)
+            anim_op.setEndValue(1.0)
+            anim_op.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._startup_anims.append(anim_op)
+
+            def _cleanup_header():
+                try:
+                    tw.setMaximumHeight(16777215)   # QWIDGETSIZE_MAX — снимаем ограничение
+                    tw.setMinimumHeight(0)
+                    tw.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+
+            anim_h.finished.connect(_cleanup_header)
+
+            # Запускаем обе анимации одновременно через таймер (чтобы layout успел)
+            def _start_header():
+                try:
+                    anim_h.start()
+                    anim_op.start()
+                except RuntimeError:
+                    pass
+
+            QtCore.QTimer.singleShot(0, _start_header)
+
+        # ─────────────────────────────────────────────────────────
+        # Fade-in остальных элементов — ПОСЛЕ шапки
+        # Шапка занимает ~480мс. Остальное стартует после неё,
+        # чтобы каждый элемент появлялся отдельно, красиво.
+        #
+        # Хронология (от старта):
+        #   0ms   — шапка slide-down (480ms)
+        #   520ms — область чата
+        #   680ms — контейнер ввода
+        #   800ms — строка статуса
+        # ─────────────────────────────────────────────────────────
+        def _make_fade(widget, delay_ms: int, duration_ms: int = 400):
+            eff = QtWidgets.QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(eff)
+            eff.setOpacity(0.0)
+
+            anim = QtCore.QPropertyAnimation(eff, b"opacity")
+            anim.setDuration(duration_ms)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+            self._startup_anims.extend([eff, anim])
+
+            def _cleanup():
+                try:
+                    widget.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+
+            anim.finished.connect(_cleanup)
+
+            def _start():
+                try:
+                    eff.setOpacity(0.0)
+                    anim.start()
+                except RuntimeError:
+                    pass
+
+            QtCore.QTimer.singleShot(delay_ms, _start)
+
+        # ── Область чата — после шапки ───────────────────────────
+        if hasattr(self, 'scroll_area'):
+            _make_fade(self.scroll_area, delay_ms=520, duration_ms=420)
+
+        # ── Контейнер ввода ───────────────────────────────────────
+        if hasattr(self, 'input_container'):
+            _make_fade(self.input_container, delay_ms=680, duration_ms=400)
+
+        # ── Строка статуса ────────────────────────────────────────
+        if hasattr(self, 'status_label'):
+            _make_fade(self.status_label, delay_ms=800, duration_ms=320)
     
     def _finalize_initial_layout(self):
         """
@@ -10964,6 +5453,20 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         import os as _os, threading as _thr
 
         print("[CLOSE] Закрытие приложения...")
+
+        # 0. Сохраняем текущий chat_id и время закрытия (для восстановления при быстром перезапуске)
+        try:
+            _s = {}
+            if os.path.exists("app_settings.json"):
+                with open("app_settings.json", "r", encoding="utf-8") as _sf:
+                    _s = json.load(_sf)
+            _s["last_chat_id"] = getattr(self, "current_chat_id", None)
+            _s["last_close_ts"] = time.time()
+            with open("app_settings.json", "w", encoding="utf-8") as _sf:
+                json.dump(_s, _sf, indent=2)
+            print(f"[CLOSE] ✓ Сохранён last_chat_id={_s['last_chat_id']}")
+        except Exception as _ce:
+            print(f"[CLOSE] ⚠️ Не удалось сохранить last_chat_id: {_ce}")
 
         # 1. Флаг — воркеры не шлют сигналы
         llama_handler._APP_SHUTTING_DOWN = True
@@ -11010,6 +5513,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         КРИТИЧНО:
         - Обновляем ТОЛЬКО позицию overlay-кнопки "вниз"
         - Обновляем размер blur overlay если он существует
+        - Обновляем высоту sidebar (overlay — ширина фиксирована, высота = окно)
         - НЕ трогаем layout сообщений
         - НЕ вызываем updateGeometry или invalidate
         """
@@ -11025,6 +5529,19 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ✅ Обновляем размер blur overlay
         if hasattr(self, '_blur_overlay') and self._blur_overlay.isVisible():
             self._blur_overlay.setGeometry(self.rect())
+
+        # ✅ Sidebar overlay — подстраиваем высоту под новый размер контейнера
+        if hasattr(self, 'sidebar') and hasattr(self, 'main_container'):
+            h = self.main_container.height()
+            W = getattr(self, '_SIDEBAR_W', 280)
+            is_open = getattr(self, '_sidebar_open', False)
+            x = 0 if is_open else -W
+            self.sidebar.setGeometry(x, 0, W, h)
+
+        # ✅ Dim overlay — всегда занимает весь main_container
+        if hasattr(self, '_dim_overlay') and hasattr(self, 'main_container'):
+            if self._dim_overlay.isVisible():
+                self._dim_overlay.setGeometry(self.main_container.rect())
 
         # ✅ Если меню не открыто — гарантируем что кнопка «+» видима
         # (защита от случая когда graphicsEffect остался с opacity=0 после ресайза)
@@ -11061,7 +5578,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 colors = {
                     "main_bg": "#1e1e21",  # Тёмный фон
                     "central_bg": "rgba(30, 30, 35, 0.70)",  # Тёмное полупрозрачное стекло
-                    "sidebar_bg": "rgba(24, 24, 28, 0.65)",  # Тёмное стекло для sidebar
+                    "sidebar_bg": "rgba(22, 22, 27, 0.93)",  # Тёмное стекло для sidebar
                     
                     "central_border": "rgba(50, 50, 55, 0.4)",  # Мягкие тёмные границы
                     "sidebar_border": "rgba(50, 50, 55, 0.12)",
@@ -11143,7 +5660,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 colors = {
                     "main_bg": "#a1a1aa",
                     "central_bg": "rgba(255, 255, 255, 0.55)",
-                    "sidebar_bg": "rgba(255, 255, 255, 0.42)",
+                    "sidebar_bg": "rgba(228, 229, 236, 0.93)",
                     
                     "central_border": "rgba(255, 255, 255, 0.72)",
                     "sidebar_border": "rgba(0, 0, 0, 0.08)",
@@ -11152,7 +5669,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     "text_secondary": "#3a3a3a",
                     "text_tertiary": "#5a5a5a",
                     
-                    "btn_bg": "rgba(255, 255, 255, 0.60)",
+                    "btn_bg": "rgba(255, 255, 255, 0.80)",
                     "btn_bg_hover": "rgba(255, 255, 255, 0.78)",
                     "btn_border": "rgba(255, 255, 255, 0.70)",
                     
@@ -11256,9 +5773,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
            ═══════════════════════════════════════════════ */
         #sidebar {{
             background: {colors["sidebar_bg"]};
-            border-right: 1.5px solid {colors["sidebar_border"]};
+            border-right: 1px solid {colors["sidebar_border"]};
             border-radius: 0px;
         }}
+        /* Тень sidebar — отдельный виджет не нужен, имитируем через border */
 
         /* ── New-chat button ── */
         #newChatBtn {{
@@ -11765,7 +6283,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         )
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             dl_dialog = LlamaDownloadDialog(self)
-            dl_dialog.exec()
+            dl_dialog.show()
             self._save_first_launch_flag()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -11936,7 +6454,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         try:
             s = load_settings()
             saved_key = s.get("ai_model_key", "llama3")
-            if saved_key in SUPPORTED_MODELS:
+            # ВАЖНО: проверяем через llama_handler.SUPPORTED_MODELS, а не через
+            # локальную копию SUPPORTED_MODELS — она снимается при импорте, до того
+            # как qwen/mistral/deepseek-r1 регистрируются в словаре.
+            if saved_key in llama_handler.SUPPORTED_MODELS:
                 llama_handler.CURRENT_AI_MODEL_KEY = saved_key
                 llama_handler.ASSISTANT_NAME = get_current_display_name()
                 print(f"[MODEL] Загружена модель из настроек: {llama_handler.ASSISTANT_NAME}")
@@ -11976,6 +6497,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         print(f"[MODEL] ✓ Активная модель: {display} ({get_current_ollama_model()})")
         # Загружаем только новую модель
         warm_up_model(model_key)
+        # Показываем красивый тост-баннер о смене модели
+        QtCore.QTimer.singleShot(80, lambda: self._show_model_switch_toast(model_key, display))
+        # Подготавливаем кастомный вариант модели для Enhanced Subtext (если включён)
+
 
     def show_model_selector(self):
         """
@@ -12330,6 +6855,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         deepseek_installed    = check_model_in_ollama(DEEPSEEK_MODEL_NAME)
         deepseek_r1_installed = check_model_in_ollama(DEEPSEEK_R1_MODEL_NAME)
         mistral_installed     = check_model_in_ollama(MISTRAL_MODEL_NAME)
+        qwen_installed        = check_model_in_ollama(QWEN_MODEL_NAME)
 
         # ── Кнопка удаления модели ───────────────────────────────────
         def _make_delete_btn(model_key, model_name, ollama_name, is_installed):
@@ -12380,7 +6906,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     dialog,
                     f"Удалить {model_name}?",
                     f"⚠️ Вы уверены, что хотите удалить {model_name} с диска?\n\n"
-                    f"Это освободит ~{('4.7' if model_key == 'llama3' else ('4.9' if model_key == 'deepseek-r1' else ('4.1' if model_key == 'deepseek' else '7.1')))} GB, "
+                    f"Это освободит ~{'4.7' if model_key == 'llama3' else '4.9' if model_key == 'deepseek-r1' else '4.1' if model_key == 'deepseek' else '22' if model_key == 'qwen' else '7.1'} GB, "
                     f"но потом придётся скачивать заново.",
                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                     QtWidgets.QMessageBox.StandardButton.No
@@ -12488,6 +7014,20 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         mistral_row.addWidget(mistral_btn)
         mistral_row.addWidget(_make_delete_btn("mistral", "Mistral Nemo", MISTRAL_MODEL_NAME, mistral_installed))
         cl.addLayout(mistral_row)
+
+        cl.addSpacing(8)  # Отступ между карточками моделей
+
+        qwen_btn = make_model_card(
+            "qwen", "Qwen",
+            "Быстрая · гибридная · 14B параметров",
+            "14B", llama_handler.CURRENT_AI_MODEL_KEY == "qwen", qwen_installed
+        )
+        qwen_row = QtWidgets.QHBoxLayout()
+        qwen_row.setContentsMargins(0, 0, 0, 0)
+        qwen_row.setSpacing(6)
+        qwen_row.addWidget(qwen_btn)
+        qwen_row.addWidget(_make_delete_btn("qwen", "Qwen", QWEN_MODEL_NAME, qwen_installed))
+        cl.addLayout(qwen_row)
 
         cl.addSpacing(16)
 
@@ -12637,7 +7177,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                                 self._save_first_launch_flag()
                             ) if ok else None
                         )
-                        dl_dialog.exec()
+                        dl_dialog.show()
                 elif llama_handler.CURRENT_AI_MODEL_KEY != "llama3":
                     self.change_ai_model("llama3")
             _fade_and_close(_after)
@@ -12702,10 +7242,32 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         self._start_mistral_download()
             _fade_and_close(_after)
 
+        def _select_qwen():
+            def _after():
+                if llama_handler.CURRENT_AI_MODEL_KEY == "qwen":
+                    return
+                if qwen_installed:
+                    self.change_ai_model("qwen")
+                else:
+                    reply = QtWidgets.QMessageBox.question(
+                        self,
+                        "Модель не найдена",
+                        "⚠️ Qwen 3 не скачана (~9 GB).\n\n"
+                        "Мощная модель с 14B параметрами.\n"
+                        "Требует ~9 GB дискового пространства.\n\n"
+                        "Хотите скачать её сейчас?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        self._start_qwen_download()
+            _fade_and_close(_after)
+
         llama_btn.clicked.connect(_select_llama)
         deepseek_btn.clicked.connect(_select_deepseek)
         deepseek_r1_btn.clicked.connect(_select_deepseek_r1)
         mistral_btn.clicked.connect(_select_mistral)
+        qwen_btn.clicked.connect(_select_qwen)
 
         dialog.exec()
 
@@ -12715,7 +7277,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dl_dialog.download_finished.connect(
             lambda success, msg: self._on_deepseek_downloaded(success, msg)
         )
-        dl_dialog.exec()
+        dl_dialog.show()
 
     def _on_deepseek_downloaded(self, success: bool, message: str):
         """Вызывается после завершения скачивания DeepSeek."""
@@ -12730,7 +7292,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dl_dialog.download_finished.connect(
             lambda success, msg: self._on_deepseek_r1_downloaded(success, msg)
         )
-        dl_dialog.exec()
+        dl_dialog.show()
 
     def _on_deepseek_r1_downloaded(self, success: bool, message: str):
         """Вызывается после завершения скачивания DeepSeek-R1 8B."""
@@ -12745,7 +7307,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dl_dialog.download_finished.connect(
             lambda success, msg: self._on_mistral_downloaded(success, msg)
         )
-        dl_dialog.exec()
+        dl_dialog.show()
 
     def _on_mistral_downloaded(self, success: bool, message: str):
         """Вызывается после завершения скачивания Mistral Nemo."""
@@ -12753,6 +7315,24 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.change_ai_model("mistral")
         else:
             print(f"[MODEL] Скачивание Mistral Nemo не удалось: {message}")
+
+    def _start_qwen_download(self):
+        """Открывает диалог скачивания Qwen 3 и после успеха активирует модель."""
+        from model_downloader import QwenDownloadDialog
+        # ВАЖНО: сохраняем как self._qwen_dl_dialog, иначе Python сразу
+        # уничтожает локальную переменную и окно закрывается мгновенно.
+        self._qwen_dl_dialog = QwenDownloadDialog(self)
+        self._qwen_dl_dialog.download_finished.connect(
+            lambda success, msg: self._on_qwen_downloaded(success, msg)
+        )
+        self._qwen_dl_dialog.show()
+
+    def _on_qwen_downloaded(self, success: bool, message: str):
+        """Вызывается после завершения скачивания Qwen 3."""
+        if success:
+            self.change_ai_model("qwen")
+        else:
+            print(f"[MODEL] Скачивание Qwen не удалось: {message}")
 
     def _start_model_download(self, model_key: str):
         """
@@ -12764,13 +7344,15 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             dl.download_finished.connect(
                 lambda ok, msg: self.change_ai_model("llama3") if ok else None
             )
-            dl.exec()
+            dl.show()
         elif model_key == "deepseek":
             self._start_deepseek_download()
         elif model_key == "deepseek-r1":
             self._start_deepseek_r1_download()
         elif model_key == "mistral":
             self._start_mistral_download()
+        elif model_key == "qwen":
+            self._start_qwen_download()
 
     # ─────────────────────────────────────────────────────────────────
     def _delete_model(self, model_key: str, model_name: str, ollama_name: str):
@@ -12893,6 +7475,224 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         pass
         except Exception as e:
             print(f"[MODEL_UI] _refresh_model_ui: {e}")
+
+
+    def _show_model_switch_toast(self, model_key: str, display_name: str):
+        """
+        Красивый тост-баннер при смене модели ИИ.
+
+        Анимация:
+          Появление    — карточка вылетает снизу + fade-in (320ms, OutBack)
+          Пауза        — висит по центру экрана (1200ms)
+          Исчезновение — улетает вверх + fade-out (280ms, InCubic)
+
+        Карточка: логотип + название + "Модель активирована" + пульсирующая точка.
+        """
+        is_dark  = self.current_theme == "dark"
+        is_glass = getattr(self, "current_liquid_glass", True)
+
+        if is_dark and is_glass:
+            bg     = "rgba(28, 28, 40, 0.93)"
+            border = "rgba(100, 100, 160, 0.55)"
+            name_c = "#e8e8ff"
+            sub_c  = "rgba(160, 160, 200, 0.80)"
+            dot_c  = "#6ee89a"
+            logo_bg = "rgba(255,255,255,0.12)"
+        elif is_dark:
+            bg     = "rgb(26, 26, 36)"
+            border = "rgba(70, 70, 100, 0.90)"
+            name_c = "#e2e2f2"
+            sub_c  = "#8888aa"
+            dot_c  = "#52c87a"
+            logo_bg = "rgba(255,255,255,0.08)"
+        elif is_glass:
+            bg     = "rgba(255, 255, 255, 0.82)"
+            border = "rgba(200, 210, 240, 0.85)"
+            name_c = "#1a1a3a"
+            sub_c  = "rgba(80, 90, 150, 0.75)"
+            dot_c  = "#22aa66"
+            logo_bg = "rgba(102,126,234,0.10)"
+        else:
+            bg     = "rgb(248, 248, 252)"
+            border = "rgba(200, 205, 230, 0.95)"
+            name_c = "#1a1a3a"
+            sub_c  = "#7788aa"
+            dot_c  = "#1aaa60"
+            logo_bg = "rgba(102,126,234,0.08)"
+
+        # ── Прозрачный оверлей поверх главного окна ─────────────────
+        overlay = QtWidgets.QWidget(self)
+        overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.setGeometry(self.rect())
+        overlay.show()
+        overlay.raise_()
+
+        # ── Карточка ─────────────────────────────────────────────────
+        card = QtWidgets.QFrame(overlay)
+        card.setFixedWidth(300)
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {bg};
+                border: 1.5px solid {border};
+                border-radius: 22px;
+            }}
+        """)
+
+        cl = QtWidgets.QHBoxLayout(card)
+        cl.setContentsMargins(16, 14, 20, 14)
+        cl.setSpacing(14)
+
+        # Логотип
+        logo_lbl = QtWidgets.QLabel()
+        logo_lbl.setFixedSize(44, 44)
+        logo_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        logo_lbl.setStyleSheet(
+            f"background: {logo_bg}; border-radius: 12px; border: none;"
+        )
+        px = _get_model_logo_pixmap(model_key, size=28)
+        if not px.isNull():
+            logo_lbl.setPixmap(px)
+        else:
+            logo_lbl.setText(display_name[0].upper())
+            logo_lbl.setFont(_apple_font(20, weight=QtGui.QFont.Weight.Bold))
+            logo_lbl.setStyleSheet(
+                logo_lbl.styleSheet() +
+                f"color: {'#aaaaee' if is_dark else '#667eea'};"
+            )
+        cl.addWidget(logo_lbl)
+
+        # Текст
+        txt = QtWidgets.QVBoxLayout()
+        txt.setSpacing(2)
+        txt.setContentsMargins(0, 0, 0, 0)
+
+        name_lbl = QtWidgets.QLabel(display_name)
+        name_lbl.setFont(_apple_font(15, weight=QtGui.QFont.Weight.Bold))
+        name_lbl.setStyleSheet(f"color: {name_c}; background: transparent; border: none;")
+        txt.addWidget(name_lbl)
+
+        sub_lbl = QtWidgets.QLabel("Модель активирована")
+        sub_lbl.setFont(_apple_font(11))
+        sub_lbl.setStyleSheet(f"color: {sub_c}; background: transparent; border: none;")
+        txt.addWidget(sub_lbl)
+
+        cl.addLayout(txt)
+        cl.addStretch()
+
+        # Пульсирующая точка-индикатор
+        dot = QtWidgets.QLabel("●")
+        dot.setStyleSheet(
+            f"color: {dot_c}; background: transparent; border: none; font-size: 13px;"
+        )
+        cl.addWidget(dot, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+        card.adjustSize()
+
+        # ── Позиционирование: центр по X, чуть выше центра по Y ────
+        ow, oh = overlay.width(), overlay.height()
+        cx = (ow - 300) // 2
+        final_y = int(oh * 0.42)
+        start_y = final_y + 40
+        card.move(cx, start_y)
+        card.show()
+
+        # ── Анимация появления ────────────────────────────────────────
+        eff_in = QtWidgets.QGraphicsOpacityEffect(card)
+        card.setGraphicsEffect(eff_in)
+        eff_in.setOpacity(0.0)
+
+        a_pos_in = QtCore.QPropertyAnimation(card, b"pos")
+        a_pos_in.setDuration(340)
+        a_pos_in.setStartValue(QtCore.QPoint(cx, start_y))
+        a_pos_in.setEndValue(QtCore.QPoint(cx, final_y))
+        a_pos_in.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
+
+        a_op_in = QtCore.QPropertyAnimation(eff_in, b"opacity")
+        a_op_in.setDuration(280)
+        a_op_in.setStartValue(0.0)
+        a_op_in.setEndValue(1.0)
+        a_op_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+        grp_in = QtCore.QParallelAnimationGroup()
+        grp_in.addAnimation(a_pos_in)
+        grp_in.addAnimation(a_op_in)
+
+        # ── Анимация исчезновения ─────────────────────────────────────
+        def _start_hide():
+            card.setGraphicsEffect(None)
+            eff_out = QtWidgets.QGraphicsOpacityEffect(card)
+            card.setGraphicsEffect(eff_out)
+            eff_out.setOpacity(1.0)
+            hide_y = final_y - 28
+
+            a_pos_out = QtCore.QPropertyAnimation(card, b"pos")
+            a_pos_out.setDuration(280)
+            a_pos_out.setStartValue(QtCore.QPoint(cx, final_y))
+            a_pos_out.setEndValue(QtCore.QPoint(cx, hide_y))
+            a_pos_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+            a_op_out = QtCore.QPropertyAnimation(eff_out, b"opacity")
+            a_op_out.setDuration(260)
+            a_op_out.setStartValue(1.0)
+            a_op_out.setEndValue(0.0)
+            a_op_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+            grp_out = QtCore.QParallelAnimationGroup()
+            grp_out.addAnimation(a_pos_out)
+            grp_out.addAnimation(a_op_out)
+
+            def _cleanup():
+                try:
+                    overlay.hide()
+                    overlay.deleteLater()
+                except RuntimeError:
+                    pass
+
+            grp_out.finished.connect(_cleanup)
+            card._out_anims = [eff_out, a_pos_out, a_op_out, grp_out]
+            grp_out.start()
+
+        def _on_in_done():
+            card.setGraphicsEffect(None)
+            QtCore.QTimer.singleShot(1200, _start_hide)
+
+        grp_in.finished.connect(_on_in_done)
+        card._in_anims = [eff_in, a_pos_in, a_op_in, grp_in]
+        grp_in.start()
+
+        # Пульс точки-индикатора
+        _dot_eff = QtWidgets.QGraphicsOpacityEffect(dot)
+        dot.setGraphicsEffect(_dot_eff)
+        _dot_pulse = QtCore.QPropertyAnimation(_dot_eff, b"opacity")
+        _dot_pulse.setDuration(700)
+        _dot_pulse.setStartValue(1.0)
+        _dot_pulse.setKeyValueAt(0.5, 0.25)
+        _dot_pulse.setEndValue(1.0)
+        _dot_pulse.setLoopCount(3)
+        _dot_pulse.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
+        card._dot_anims = [_dot_eff, _dot_pulse]
+        _dot_pulse.start()
+
+        # Быстрый pulse кнопки режима в шапке
+        if hasattr(self, "mode_btn"):
+            _mb_eff = QtWidgets.QGraphicsOpacityEffect(self.mode_btn)
+            self.mode_btn.setGraphicsEffect(_mb_eff)
+            _mb_pulse = QtCore.QPropertyAnimation(_mb_eff, b"opacity")
+            _mb_pulse.setDuration(220)
+            _mb_pulse.setStartValue(1.0)
+            _mb_pulse.setKeyValueAt(0.5, 0.30)
+            _mb_pulse.setEndValue(1.0)
+            _mb_pulse.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
+
+            def _mb_done():
+                try:
+                    self.mode_btn.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+
+            _mb_pulse.finished.connect(_mb_done)
+            card._mb_anims = [_mb_eff, _mb_pulse]
+            _mb_pulse.start()
 
     def animate_mode_change(self, new_mode: str):
         """Плавная смена режима: fade-out → смена текста → fade-in."""
@@ -13486,13 +8286,15 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ═══════════════════════════════════════════════
         # АВТОЗАКРЫТИЕ SIDEBAR (клик вне sidebar)
         # ═══════════════════════════════════════════════
-        # Проверяем, открыт ли sidebar
-        if self.sidebar.width() > 0:
-            # Если событие - клик мышью
-            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
-                # Закрываем sidebar
-                self.toggle_sidebar()
-        
+        # АВТОЗАКРЫТИЕ SIDEBAR через dim-overlay
+        # ═══════════════════════════════════════════════
+        # Dim-overlay перехватывает клик и закрывает sidebar.
+        if (obj is getattr(self, '_dim_overlay', None)
+                and event.type() == QtCore.QEvent.Type.MouseButtonPress
+                and getattr(self, '_sidebar_open', False)):
+            self.toggle_sidebar()
+            return True   # поглощаем событие — клик не проходит сквозь overlay
+
         # Для всех остальных случаев - стандартная обработка
         return super().eventFilter(obj, event)
     
@@ -14015,6 +8817,189 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         print("[BLUR] Blur эффект применён, кнопка + скрыта")
     
+    def _dim_input_for_generation(self):
+        """
+        Плавно затемняет поле ввода и кнопку голоса во время генерации ИИ.
+        Opacity: 1.0 → 0.35 за 250мс.
+        Также блокирует mic_btn программно.
+        """
+        targets = []
+        if hasattr(self, 'input_wrapper'):
+            targets.append(self.input_wrapper)
+        if hasattr(self, 'mic_btn'):
+            targets.append(self.mic_btn)
+            try:
+                self.mic_btn.setEnabled(False)
+            except RuntimeError:
+                pass
+
+        self._input_dim_effs = []
+        self._input_dim_anims = []
+
+        for w in targets:
+            eff = QtWidgets.QGraphicsOpacityEffect(w)
+            w.setGraphicsEffect(eff)
+            eff.setOpacity(1.0)
+
+            anim = QtCore.QPropertyAnimation(eff, b"opacity")
+            anim.setDuration(250)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.35)
+            anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            anim.start()
+
+            self._input_dim_effs.append(eff)
+            self._input_dim_anims.append(anim)
+
+    def _restore_input_after_generation(self):
+        """
+        Плавно восстанавливает яркость поля ввода и кнопки голоса.
+        Opacity: 0.35 → 1.0 за 220мс. Разблокирует mic_btn.
+        """
+        targets = []
+        if hasattr(self, 'input_wrapper'):
+            targets.append(self.input_wrapper)
+        if hasattr(self, 'mic_btn'):
+            targets.append(self.mic_btn)
+
+        restore_anims = []
+        restore_effs = []
+
+        for w in targets:
+            # Берём текущий эффект или создаём новый
+            cur_eff = w.graphicsEffect()
+            if not isinstance(cur_eff, QtWidgets.QGraphicsOpacityEffect):
+                cur_eff = QtWidgets.QGraphicsOpacityEffect(w)
+                w.setGraphicsEffect(cur_eff)
+
+            cur_op = cur_eff.opacity()
+
+            anim = QtCore.QPropertyAnimation(cur_eff, b"opacity")
+            anim.setDuration(220)
+            anim.setStartValue(cur_op)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+            def _make_cleanup(widget, effect, animation):
+                def _cleanup():
+                    try:
+                        widget.setGraphicsEffect(None)
+                    except RuntimeError:
+                        pass
+                animation.finished.connect(_cleanup)
+            _make_cleanup(w, cur_eff, anim)
+
+            anim.start()
+            restore_anims.append(anim)
+            restore_effs.append(cur_eff)
+
+        # Разблокируем mic_btn после анимации
+        if hasattr(self, 'mic_btn'):
+            def _unlock_mic():
+                try:
+                    self.mic_btn.setEnabled(True)
+                except RuntimeError:
+                    pass
+            QtCore.QTimer.singleShot(220, _unlock_mic)
+
+        # Держим ссылки
+        self._input_restore_anims = restore_anims
+        self._input_restore_effs = restore_effs
+
+    def _apply_regen_blur_effect(self):
+        """
+        Плавный blur-оверлей на время перегенерации ответа.
+        Аналог _apply_menu_blur_effect, но:
+         - не прячет кнопку «+»
+         - не ставит флаг _menu_is_open
+         - чуть мягче (blurRadius=10 вместо 15)
+        """
+        print("[REGEN_BLUR] Применяю blur для перегенерации")
+
+        if not hasattr(self, '_regen_blur_overlay'):
+            self._regen_blur_overlay = QtWidgets.QLabel(self)
+            self._regen_blur_overlay.setObjectName("regenBlurOverlay")
+            self._regen_blur_overlay.setScaledContents(True)
+            self._regen_blur_eff = QtWidgets.QGraphicsOpacityEffect(self._regen_blur_overlay)
+            self._regen_blur_overlay.setGraphicsEffect(self._regen_blur_eff)
+            self._regen_blur_eff.setOpacity(0.0)
+        else:
+            self._regen_blur_overlay.clear()
+
+        self._regen_blur_overlay.hide()
+        QtWidgets.QApplication.processEvents()
+        snapshot = self.grab()
+
+        temp = QtWidgets.QLabel()
+        temp.setPixmap(snapshot)
+        temp.resize(snapshot.size())
+        blur_fx = QtWidgets.QGraphicsBlurEffect()
+        blur_fx.setBlurRadius(10)
+        temp.setGraphicsEffect(blur_fx)
+
+        blurred = QtGui.QPixmap(snapshot.size())
+        blurred.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(blurred)
+        temp.render(p)
+        p.end()
+        temp.deleteLater()
+
+        # Лёгкое затемнение / осветление поверх
+        tint = QtGui.QPixmap(blurred.size())
+        if self.current_theme == "dark":
+            tint.fill(QtGui.QColor(0, 0, 0, 55))
+        else:
+            tint.fill(QtGui.QColor(255, 255, 255, 55))
+        p2 = QtGui.QPainter(blurred)
+        p2.drawPixmap(0, 0, tint)
+        p2.end()
+
+        self._regen_blur_overlay.setPixmap(blurred)
+        self._regen_blur_overlay.setGeometry(self.rect())
+        # Поднимаем оверлей, но НЕ выше кнопки отправки — поле ввода блокировано,
+        # но пользователь видит кнопку стоп.
+        self._regen_blur_overlay.raise_()
+        self._regen_blur_overlay.show()
+
+        if not hasattr(self, '_regen_blur_anim'):
+            self._regen_blur_anim = QtCore.QPropertyAnimation(self._regen_blur_eff, b"opacity")
+        self._regen_blur_anim.stop()
+        self._regen_blur_anim.setDuration(280)
+        self._regen_blur_anim.setStartValue(0.0)
+        self._regen_blur_anim.setEndValue(1.0)
+        self._regen_blur_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._regen_blur_anim.start()
+        print("[REGEN_BLUR] Blur оверлей показан")
+
+    def _remove_regen_blur_effect(self):
+        """Плавно убирает blur-оверлей после завершения перегенерации."""
+        print("[REGEN_BLUR] Убираю blur оверлей")
+        if not hasattr(self, '_regen_blur_anim') or not hasattr(self, '_regen_blur_overlay'):
+            return
+
+        cur_op = self._regen_blur_eff.opacity() if hasattr(self, '_regen_blur_eff') else 1.0
+        self._regen_blur_anim.stop()
+        self._regen_blur_anim.setDuration(220)
+        self._regen_blur_anim.setStartValue(cur_op)
+        self._regen_blur_anim.setEndValue(0.0)
+        self._regen_blur_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+        try:
+            self._regen_blur_anim.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+
+        def _cleanup():
+            try:
+                self._regen_blur_overlay.hide()
+                self._regen_blur_overlay.clear()
+                print("[REGEN_BLUR] Overlay скрыт")
+            except RuntimeError:
+                pass
+
+        self._regen_blur_anim.finished.connect(_cleanup)
+        self._regen_blur_anim.start()
+
     def _remove_menu_blur_effect(self):
         """Убрать overlay эффект и восстановить кнопку + при закрытии меню"""
         print("[BLUR] Убираю overlay эффект")
@@ -14146,45 +9131,182 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.status_label.setText("")
 
     def toggle_sidebar(self):
-        """Переключение боковой панели с плавной анимацией (БЕЗ ДЁРГАНИЙ)"""
-        current_width = self.sidebar.width()
-        target_width = 280 if current_width == 0 else 0
-        is_opening = target_width > 0
-        
-        # Скрываем панель удаления при закрытии sidebar
-        if target_width == 0:
+        """
+        Drawer-анимация боковой панели.
+
+        Sidebar — overlay поверх контента (не в layout). 
+        Анимируется pos.x: от -SIDEBAR_W (скрыт) до 0 (открыт).
+        Контент не сдвигается вообще.
+
+        Открытие  : OutCubic 320ms + fade-in контента 200ms + dim overlay
+        Закрытие  : InCubic  240ms + fade-out контента 120ms + убираем dim
+        """
+        is_opening = not self._sidebar_open
+        self._sidebar_open = is_opening
+
+        W = self._SIDEBAR_W
+        cur_x = self.sidebar.x()
+        target_x = 0 if is_opening else -W
+
+        # ── Скрываем панель удаления при закрытии ───────────────────────────
+        if not is_opening:
             self.hide_delete_panel()
-        
-        # ═══════════════════════════════════════════════════════════════
-        # АНИМАЦИЯ SIDEBAR (плавное выдвижение/скрытие)
-        # ═══════════════════════════════════════════════════════════════
-        # Останавливаем предыдущие анимации если ещё идут
-        if hasattr(self, 'animation') and self.animation:
-            self.animation.stop()
-        if hasattr(self, 'animation2') and self.animation2:
-            self.animation2.stop()
-        
-        # Плавная анимация sidebar
-        duration = 300   # ms
-        easing = QtCore.QEasingCurve.Type.InOutQuad  # Плавная кривая
-        
-        self.animation = QtCore.QPropertyAnimation(self.sidebar, b"minimumWidth")
-        self.animation.setDuration(duration)
-        self.animation.setStartValue(current_width)
-        self.animation.setEndValue(target_width)
-        self.animation.setEasingCurve(easing)
-        
-        self.animation2 = QtCore.QPropertyAnimation(self.sidebar, b"maximumWidth")
-        self.animation2.setDuration(duration)
-        self.animation2.setStartValue(current_width)
-        self.animation2.setEndValue(target_width)
-        self.animation2.setEasingCurve(easing)
-        
-        self.animation.start()
-        self.animation2.start()
-        
-        print(f"[SIDEBAR] {'Открываю' if is_opening else 'Закрываю'} sidebar с плавной анимацией")
-    
+
+        # ── Останавливаем предыдущие анимации ────────────────────────────────
+        for attr in ('_sb_pos_anim', '_sb_fade_anim',
+                     '_sb_rotate_anim', 'animation', 'animation2'):
+            a = getattr(self, attr, None)
+            if a:
+                try:
+                    a.stop()
+                except RuntimeError:
+                    pass
+
+        # ════════════════════════════════════════════════════════════════════
+        # 1. SLIDE — pos.x sidebar
+        # ════════════════════════════════════════════════════════════════════
+        if is_opening:
+            dur_slide = 320
+            easing    = QtCore.QEasingCurve.Type.OutCubic
+        else:
+            dur_slide = 240
+            easing    = QtCore.QEasingCurve.Type.InCubic
+
+        self._sb_pos_anim = QtCore.QPropertyAnimation(self.sidebar, b"pos")
+        self._sb_pos_anim.setDuration(dur_slide)
+        self._sb_pos_anim.setStartValue(QtCore.QPoint(cur_x, 0))
+        self._sb_pos_anim.setEndValue(QtCore.QPoint(target_x, 0))
+        self._sb_pos_anim.setEasingCurve(easing)
+
+        # Обратная совместимость: open_settings ищет self.animation
+        self.animation  = self._sb_pos_anim
+        self.animation2 = self._sb_pos_anim
+
+        # ════════════════════════════════════════════════════════════════════
+        # 2. FADE — прозрачность содержимого sidebar
+        # ════════════════════════════════════════════════════════════════════
+        if (not hasattr(self, '_sb_opacity_effect')
+                or self._sb_opacity_effect is None):
+            self._sb_opacity_effect = QtWidgets.QGraphicsOpacityEffect(self.sidebar)
+            self.sidebar.setGraphicsEffect(self._sb_opacity_effect)
+
+        eff = self._sb_opacity_effect
+
+        if is_opening:
+            eff.setOpacity(0.0)
+            self._sb_fade_anim = QtCore.QPropertyAnimation(eff, b"opacity")
+            self._sb_fade_anim.setDuration(200)
+            self._sb_fade_anim.setStartValue(0.0)
+            self._sb_fade_anim.setEndValue(1.0)
+            self._sb_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+            QtCore.QTimer.singleShot(80, self._sb_fade_anim.start)
+        else:
+            self._sb_fade_anim = QtCore.QPropertyAnimation(eff, b"opacity")
+            self._sb_fade_anim.setDuration(120)
+            self._sb_fade_anim.setStartValue(eff.opacity())
+            self._sb_fade_anim.setEndValue(0.0)
+            self._sb_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            self._sb_fade_anim.start()
+
+        # ════════════════════════════════════════════════════════════════════
+        # 3. DIM OVERLAY — полупрозрачное затемнение контента
+        # ════════════════════════════════════════════════════════════════════
+        is_dark = getattr(self, 'current_theme', 'light') == 'dark'
+        dim_color = "rgba(0,0,0,18)" if is_dark else "rgba(0,0,0,12)"
+        self._dim_overlay.setStyleSheet(
+            f"background:{dim_color}; border:none;"
+        )
+
+        if not hasattr(self, '_dim_opacity_eff') or self._dim_opacity_eff is None:
+            self._dim_opacity_eff = QtWidgets.QGraphicsOpacityEffect(self._dim_overlay)
+            self._dim_overlay.setGraphicsEffect(self._dim_opacity_eff)
+
+        dim_eff = self._dim_opacity_eff
+
+        # Останавливаем предыдущую dim-анимацию
+        old_dim = getattr(self, '_dim_anim', None)
+        if old_dim:
+            try:
+                old_dim.stop()
+            except RuntimeError:
+                pass
+
+        if is_opening:
+            # Dim появляется вместе со слайдом
+            self._dim_overlay.setGeometry(
+                self.main_container.rect()
+            )
+            self._dim_overlay.stackUnder(self.sidebar)
+            self._dim_overlay.show()
+            self._dim_overlay.raise_()
+            self.sidebar.raise_()
+
+            dim_eff.setOpacity(0.0)
+            self._dim_anim = QtCore.QPropertyAnimation(dim_eff, b"opacity")
+            self._dim_anim.setDuration(320)
+            self._dim_anim.setStartValue(0.0)
+            self._dim_anim.setEndValue(1.0)
+            self._dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+            self._dim_anim.start()
+        else:
+            # Dim исчезает вместе со слайдом
+            self._dim_anim = QtCore.QPropertyAnimation(dim_eff, b"opacity")
+            self._dim_anim.setDuration(240)
+            self._dim_anim.setStartValue(dim_eff.opacity())
+            self._dim_anim.setEndValue(0.0)
+            self._dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+            def _hide_dim():
+                try:
+                    self._dim_overlay.hide()
+                except RuntimeError:
+                    pass
+
+            self._dim_anim.finished.connect(_hide_dim)
+            self._dim_anim.start()
+
+        # ════════════════════════════════════════════════════════════════════
+        # 4. CLEANUP — после закрытия сбрасываем opacity effect
+        # ════════════════════════════════════════════════════════════════════
+        if not is_opening:
+            def _cleanup_effects():
+                try:
+                    self.sidebar.setGraphicsEffect(None)
+                    self._sb_opacity_effect = None
+                    # Восстанавливаем тень (убрана из-за opacity effect)
+                    if hasattr(self, '_sb_shadow_effect'):
+                        # Создаём новый объект — старый мог удалиться
+                        _sh = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
+                        _sh.setBlurRadius(28)
+                        _sh.setOffset(6, 0)
+                        _sh.setColor(QtGui.QColor(0, 0, 0, 55))
+                        self.sidebar.setGraphicsEffect(_sh)
+                        self._sb_shadow_effect = _sh
+                except RuntimeError:
+                    pass
+
+            self._sb_pos_anim.finished.connect(_cleanup_effects)
+        else:
+            def _cleanup_open():
+                try:
+                    self.sidebar.setGraphicsEffect(None)
+                    self._sb_opacity_effect = None
+                    # Восстанавливаем тень
+                    _sh = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
+                    _sh.setBlurRadius(28)
+                    _sh.setOffset(6, 0)
+                    _sh.setColor(QtGui.QColor(0, 0, 0, 55))
+                    self.sidebar.setGraphicsEffect(_sh)
+                    self._sb_shadow_effect = _sh
+                except RuntimeError:
+                    pass
+
+            self._sb_fade_anim.finished.connect(_cleanup_open) if hasattr(self, '_sb_fade_anim') else None
+
+        # ── Запуск ───────────────────────────────────────────────────────────
+        self._sb_pos_anim.start()
+
+        print(f"[SIDEBAR] {'▶ Открываю' if is_opening else '◀ Закрываю'} drawer (pos.x overlay)")
 
 
     def manual_scroll_to_bottom(self):
@@ -14314,199 +9436,58 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     def open_settings(self):
         """Открыть экран настроек"""
         print("[SETTINGS] Открытие настроек")
-        
+
         # Скрываем кнопку скролла
         if hasattr(self, 'scroll_to_bottom_btn'):
             self.scroll_to_bottom_btn.smooth_hide()
-        
-        # Скрываем ВСЕ элементы чата
-        if hasattr(self, 'scroll_area'):
-            self.scroll_area.hide()
-        if hasattr(self, 'title_label'):
-            self.title_label.hide()
-        if hasattr(self, 'clear_btn'):
-            self.clear_btn.hide()
-        if hasattr(self, 'input_container'):
-            self.input_container.hide()
-        
-        # Отключаем toggle_sidebar, подключаем close_settings
+
+        # Скрываем элементы чата
+        for attr in ('scroll_area', 'title_label', 'clear_btn', 'input_container'):
+            w = getattr(self, attr, None)
+            if w:
+                w.hide()
+
+        # Меняем кнопку меню: toggle → close_settings
         if hasattr(self, 'menu_btn'):
             try:
                 self.menu_btn.clicked.disconnect()
             except (RuntimeError, TypeError):
                 pass
             self.menu_btn.clicked.connect(self.close_settings)
-        
-        # Обновляем стили экрана настроек ПЕРЕД показом
+
+        # Обновляем стили настроек заранее
         if hasattr(self, 'settings_view'):
             self.settings_view.apply_settings_styles()
-            has_messages = self.check_has_chats_with_messages()
-            self.settings_view.update_delete_all_btn_state(has_messages)
-            
-            # ═══════════════════════════════════════════════════════════════
-            # ВАЖНО: Скрываем settings_view чтобы не было двойного появления
-            # ═══════════════════════════════════════════════════════════════
+            self.settings_view.update_delete_all_btn_state(
+                self.check_has_chats_with_messages()
+            )
             self.settings_view.hide()
-        
-        # Функция для показа настроек с анимацией (вызывается ПОСЛЕ переключения страницы)
-        def show_settings_animated():
-            print("[SETTINGS] Страница переключена, запускаю fade-in...")
-            
+
+        def _show_settings():
             if not hasattr(self, 'settings_view'):
                 return
-            
-            # Показываем виджет
+            self.content_stack.setCurrentIndex(1)
             self.settings_view.show()
-            
-            # Применяем эффект opacity
-            effect = QtWidgets.QGraphicsOpacityEffect(self.settings_view)
-            self.settings_view.setGraphicsEffect(effect)
-            effect.setOpacity(0.0)
-            
-            # Анимация появления
-            anim = QtCore.QPropertyAnimation(effect, b"opacity")
-            anim.setDuration(300)
+            eff = QtWidgets.QGraphicsOpacityEffect(self.settings_view)
+            self.settings_view.setGraphicsEffect(eff)
+            eff.setOpacity(0.0)
+            anim = QtCore.QPropertyAnimation(eff, b"opacity")
+            anim.setDuration(280)
             anim.setStartValue(0.0)
             anim.setEndValue(1.0)
             anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            anim.finished.connect(lambda: self.settings_view.setGraphicsEffect(None))
             anim.start()
-            
-            # Сохраняем ссылку
-            if not hasattr(self, '_settings_fade_animations'):
-                self._settings_fade_animations = []
-            self._settings_fade_animations.append(anim)
-            
-            print("[SETTINGS] ✓ Настройки плавно появляются")
-        
-        # Закрываем sidebar если открыт
-        if self.sidebar.width() > 0:
-            print("[SETTINGS] Закрываю sidebar...")
+            self._settings_open_anim = anim   # держим ссылку
+
+        # Если sidebar открыт — сначала закрываем его, потом показываем настройки
+        if getattr(self, '_sidebar_open', False):
             self.toggle_sidebar()
-            # Ждём закрытия sidebar + переключаем страницу + показываем с анимацией
-            QtCore.QTimer.singleShot(400, lambda: [
-                self.content_stack.setCurrentIndex(1),
-                QtCore.QTimer.singleShot(50, show_settings_animated)
-            ])
+            QtCore.QTimer.singleShot(280, _show_settings)
         else:
-            print("[SETTINGS] Sidebar закрыт, открываю настройки")
-            # Сразу переключаем страницу + показываем с анимацией
-            self.content_stack.setCurrentIndex(1)
-            QtCore.QTimer.singleShot(50, show_settings_animated)
-        
-        print(f"[SETTINGS] Текущий индекс: {self.content_stack.currentIndex()}")
-    
-        def switch_to_settings():
-            print("[SETTINGS] ▶ switch_to_settings() вызвана")
-            
-            # Скрываем элементы header кроме кнопки меню
-            if hasattr(self, 'title_label'):
-                print("[SETTINGS] Скрываю title_label")
-                self.title_label.hide()
-            if hasattr(self, 'clear_btn'):
-                print("[SETTINGS] Скрываю clear_btn")
-                self.clear_btn.hide()
-            
-            # Скрываем footer (поле ввода, кнопки)
-            if hasattr(self, 'input_container'):
-                print("[SETTINGS] Скрываю input_container")
-                self.input_container.hide()
-            
-            # Отключаем toggle_sidebar, подключаем close_settings
-            if hasattr(self, 'menu_btn'):
-                try:
-                    self.menu_btn.clicked.disconnect()
-                    print("[SETTINGS] Отключил старый обработчик menu_btn")
-                except RuntimeError:
-                    pass
-                self.menu_btn.clicked.connect(self.close_settings)
-                print("[SETTINGS] Подключил close_settings к menu_btn")
-            
-            # Плавный переход к настройкам
-            print("[SETTINGS] Запускаю _animate_stack_transition(0 → 1)")
-            self._animate_stack_transition(from_index=0, to_index=1, callback=None)
-            print(f"[SETTINGS] ✓ Переключен на индекс: {self.content_stack.currentIndex()}")
-        
-        # Проверяем ширину sidebar
-        sidebar_width = self.sidebar.width()
-        print(f"[SETTINGS] Ширина sidebar: {sidebar_width}")
-        
-        # Если sidebar открыт - сначала закрываем его
-        if sidebar_width > 0:
-            print("[SETTINGS] Sidebar открыт, сначала закрываю его...")
-            
-            # Ждем завершения анимации закрытия sidebar
-            def on_sidebar_closed():
-                print("[SETTINGS] ✓ Sidebar закрыт (callback вызван)")
-                # Небольшая задержка для плавности
-                print("[SETTINGS] Задержка 100ms перед открытием настроек...")
-                QtCore.QTimer.singleShot(100, switch_to_settings)
-            
-            # Подключаем callback к анимации
-            if hasattr(self, 'animation') and self.animation:
-                try:
-                    self.animation.finished.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                self.animation.finished.connect(on_sidebar_closed)
-                print("[SETTINGS] Callback подключен к анимации sidebar")
-            else:
-                print("[SETTINGS] ⚠️ animation не найдена!")
-            
-            print("[SETTINGS] Запускаю toggle_sidebar()")
-            self.toggle_sidebar()
-        else:
-            print("[SETTINGS] Sidebar уже закрыт, сразу открываю настройки")
-            switch_to_settings()
-        
-        print("[SETTINGS] ========================================")
-        print("[SETTINGS] Открытие настроек - КОНЕЦ метода")
-        print("[SETTINGS] ========================================")
-    
-        def switch_to_settings():
-            # Скрываем элементы header кроме кнопки меню
-            if hasattr(self, 'title_label'):
-                self.title_label.hide()
-            if hasattr(self, 'clear_btn'):
-                self.clear_btn.hide()
-            
-            # Скрываем footer (поле ввода, кнопки)
-            if hasattr(self, 'input_container'):
-                self.input_container.hide()
-            
-            # Отключаем toggle_sidebar, подключаем close_settings
-            if hasattr(self, 'menu_btn'):
-                try:
-                    self.menu_btn.clicked.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                self.menu_btn.clicked.connect(self.close_settings)
-            
-            # Плавный переход к настройкам
-            self._animate_stack_transition(from_index=0, to_index=1, callback=None)
-            print(f"[SETTINGS] Переключен на индекс: {self.content_stack.currentIndex()}")
-        
-        # Если sidebar открыт - сначала закрываем его
-        if self.sidebar.width() > 0:
-            print("[SETTINGS] Сначала закрываю sidebar...")
-            # Ждем завершения анимации закрытия sidebar
-            def on_sidebar_closed():
-                print("[SETTINGS] Sidebar закрыт, переключаюсь на настройки...")
-                # Небольшая задержка для плавности
-                QtCore.QTimer.singleShot(100, switch_to_settings)
-            
-            # Подключаем callback к анимации
-            if hasattr(self, 'animation') and self.animation:
-                try:
-                    self.animation.finished.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                self.animation.finished.connect(on_sidebar_closed)
-            
-            self.toggle_sidebar()
-        else:
-            # Sidebar уже закрыт, сразу переходим к настройкам
-            switch_to_settings()
-    
+            QtCore.QTimer.singleShot(20, _show_settings)
+
+
     def close_settings(self):
         """Закрыть настройки и вернуться к чату — с плавным fade-переходом"""
         print("[SETTINGS] Возврат к чату")
@@ -15066,6 +10047,36 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             if chat['is_active']:
                 self.chats_list.setCurrentItem(item)
 
+    def _update_chat_preview(self, chat_id: int, new_text: str):
+        """
+        Точечно обновить превью одного чата в боковой панели.
+
+        Не перезагружает весь список — просто меняет текст нужного QListWidgetItem.
+        Вызывается после каждого нового сообщения (пользователя и ИИ).
+
+        chat_id  — ID чата для обновления
+        new_text — полный текст последнего сообщения (будет обрезан до 55 символов)
+        """
+        try:
+            import re as _re
+            clean = _re.sub(r'<[^>]+>', '', new_text or '')
+            clean = _re.sub(r'\s+', ' ', clean).strip()
+            preview = clean[:55] + ("…" if len(clean) > 55 else "")
+
+            for i in range(self.chats_list.count()):
+                item = self.chats_list.item(i)
+                if item and item.data(QtCore.Qt.ItemDataRole.UserRole) == chat_id:
+                    # Берём текущий заголовок (первая строка до \n)
+                    current = item.text()
+                    title = current.split("\n", 1)[0]
+                    item.setText(title + ("\n" + preview if preview else ""))
+                    item.setSizeHint(QtCore.QSize(0, 58 if preview else 42))
+                    # Перерисовываем строку без полной перезагрузки списка
+                    self.chats_list.update(self.chats_list.indexFromItem(item))
+                    break
+        except Exception as e:
+            print(f"[CHAT_PREVIEW] ✗ Ошибка обновления превью: {e}")
+
     def load_current_chat(self):
         """Загрузить текущий активный чат (УЛУЧШЕНО: загрузка файлов)"""
         if not self.current_chat_id:
@@ -15173,15 +10184,27 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 except Exception as e:
                     print(f"[LOAD_CHAT] ⚠️ Ошибка восстановления истории: {e}")
 
-            # Для старых сообщений сразу убираем анимацию
+            # Для старых сообщений сразу убираем анимацию — показываем мгновенно
             if not is_recent:
-                if hasattr(message_widget, 'opacity_effect'):
-                    message_widget.opacity_effect.setOpacity(1.0)
-                # Отключаем анимации появления
-                if hasattr(message_widget, 'fade_in_animation'):
-                    message_widget.fade_in_animation.stop()
-                if hasattr(message_widget, 'pos_animation'):
-                    message_widget.pos_animation.stop()
+                # Останавливаем appear-группу и снимаем graphics effect целиком.
+                # _SlideOpacityEffect (и старый QGraphicsOpacityEffect) больше не нужен —
+                # виджет уже должен быть полностью видим без каких-либо переходов.
+                try:
+                    if hasattr(message_widget, '_appear_group'):
+                        message_widget._appear_group.stop()
+                    if hasattr(message_widget, 'fade_in_animation'):
+                        message_widget.fade_in_animation.stop()
+                    if hasattr(message_widget, 'pos_animation'):
+                        message_widget.pos_animation.stop()
+                    # Убираем эффект — виджет станет полностью непрозрачным
+                    message_widget.setGraphicsEffect(None)
+                    # Чистим ссылки
+                    for _attr in ('_slide_eff', 'opacity_effect', '_appear_group',
+                                  '_anim_opacity', '_anim_slide', 'fade_in_animation'):
+                        if hasattr(message_widget, _attr):
+                            delattr(message_widget, _attr)
+                except Exception:
+                    pass
             else:
                 # Для последних 2 - анимация включена по умолчанию (оптимизировано)
                 pass
@@ -15414,8 +10437,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         self.load_chats_list()
         
-        # Принудительно скрываем кнопку "вниз" ДО загрузки чата, чтобы
-        # add_message_widget внутри load_current_chat не успел её показать снова
+        # Принудительно скрываем кнопку "вниз" ДО загрузки чата
         if hasattr(self, 'scroll_to_bottom_btn'):
             btn = self.scroll_to_bottom_btn
             btn.fade_animation.stop()
@@ -15423,12 +10445,59 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             btn.hide()
             btn._is_visible_animated = False
         
-        self.load_current_chat()
-        
-        # Закрываем sidebar после создания с небольшой задержкой для анимации
-        QtCore.QTimer.singleShot(150, self.toggle_sidebar)
+        # Закрываем sidebar → после его закрытия делаем fade-переход в новый чат
+        if getattr(self, '_sidebar_open', False):
+            self.toggle_sidebar()
+            # Дожидаемся конца анимации закрытия (240ms) и делаем fade-in
+            QtCore.QTimer.singleShot(260, lambda: self._animate_chat_transition(self.load_current_chat))
+        else:
+            self._animate_chat_transition(self.load_current_chat)
         
         print(f"[NEW_CHAT] ✓ Создан новый чат ID={chat_id}")
+
+    def _animate_chat_transition(self, callback):
+        """
+        Плавный переход между чатами: fade-out → callback → fade-in.
+        callback — функция загрузки нового чата (load_current_chat).
+        """
+        if not hasattr(self, 'messages_widget'):
+            callback()
+            return
+
+        # Fade-out
+        eff_out = QtWidgets.QGraphicsOpacityEffect(self.messages_widget)
+        self.messages_widget.setGraphicsEffect(eff_out)
+        anim_out = QtCore.QPropertyAnimation(eff_out, b"opacity")
+        anim_out.setDuration(120)
+        anim_out.setStartValue(1.0)
+        anim_out.setEndValue(0.0)
+        anim_out.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+        def _do_switch():
+            try:
+                callback()
+            except Exception as e:
+                print(f"[CHAT_TRANSITION] ошибка callback: {e}")
+            # Fade-in
+            eff_in = QtWidgets.QGraphicsOpacityEffect(self.messages_widget)
+            self.messages_widget.setGraphicsEffect(eff_in)
+            anim_in = QtCore.QPropertyAnimation(eff_in, b"opacity")
+            anim_in.setDuration(200)
+            anim_in.setStartValue(0.0)
+            anim_in.setEndValue(1.0)
+            anim_in.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+            def _cleanup():
+                try:
+                    self.messages_widget.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+            anim_in.finished.connect(_cleanup)
+            self._chat_fade_in_anim = anim_in   # защита от GC
+            anim_in.start()
+
+        anim_out.finished.connect(_do_switch)
+        self._chat_fade_out_anim = anim_out     # защита от GC
+        anim_out.start()
 
     def switch_chat(self, item):
         """Переключить чат с полной остановкой генерации (УЛУЧШЕНО: очистка файлов)"""
@@ -15502,10 +10571,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.startup_chat_has_messages = False
         
         self.load_chats_list()
-        self.load_current_chat()
-        
+        self._animate_chat_transition(self.load_current_chat)
+
         # ═══════════════════════════════════════════════════════════════
-        # ШАГ 3: ЗАГРУЗКА ФАЙЛОВ ОТКЛЮЧЕНА
         # ═══════════════════════════════════════════════════════════════
         # ИСПРАВЛЕНИЕ: НЕ загружаем файлы в поле прикрепления
         # Файлы сохраняются только для контекста AI (через memory)
@@ -15636,17 +10704,19 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ═══════════════════════════════════════════════════════════════
         _auto_scroll = getattr(self, "auto_scroll_enabled", False)
         if _auto_scroll:
-            # Автоскролл включён — плавная анимация вниз
+            # Автоскролл включён — плавная анимация вниз.
+            # Запускаем ПОСЛЕ завершения appear-анимации (380ms + запас),
+            # чтобы не пересекаться с ней и не вызывать лаг layout-пересчёта.
             def _do_smooth_scroll():
-                self.messages_layout.activate()
-                self.messages_widget.updateGeometry()
+                # НЕ вызываем activate/updateGeometry — layout уже актуален
+                # после addWidget. Повторный вызов во время анимации = лаг.
                 sb = self.scroll_area.verticalScrollBar()
                 target = sb.maximum()
                 current = sb.value()
                 if target <= current:
                     return
                 _scroll_anim = QtCore.QPropertyAnimation(sb, b"value", self)
-                _scroll_anim.setDuration(300)
+                _scroll_anim.setDuration(260)
                 _scroll_anim.setStartValue(current)
                 _scroll_anim.setEndValue(target)
                 _scroll_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
@@ -15654,7 +10724,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 # Скрываем кнопку вниз — мы уже едем вниз
                 if hasattr(self, 'scroll_to_bottom_btn'):
                     self.scroll_to_bottom_btn.smooth_hide()
-            QtCore.QTimer.singleShot(60, _do_smooth_scroll)
+            # ПОРЯДОК: сначала скролл (20ms), потом анимация появления (после скролла).
+            # Скролл длится 260ms → анимацию запускаем через 20+260+60=340ms.
+            QtCore.QTimer.singleShot(20, _do_smooth_scroll)
         elif old_max > 0 and not was_at_bottom:
             # Автоскролл выключен — сохраняем позицию пользователя
             scrollbar.setValue(old_value)
@@ -15665,12 +10737,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         if hasattr(self, 'scroll_to_bottom_btn'):
             self.update_scroll_button_visibility()
         
-        # Анимация появления — запускаем через QTimer чтобы гарантированно
-        # дождаться завершения layout перед стартом opacity анимации.
-        # QMetaObject.invokeMethod иногда не срабатывал для нижних сообщений.
+        # Анимация появления — запускаем ПОСЛЕ скролла.
+        # Если автоскролл включён: ждём окончания скролла (260ms) + запас 80ms = 340ms.
+        # Если автоскролл выключен: запускаем сразу через 20ms как раньше.
         if not IS_WINDOWS and hasattr(message_widget, '_start_appear_animation'):
             _mw_ref = message_widget  # локальная ссылка чтобы не потерять в closure
-            QtCore.QTimer.singleShot(20, _mw_ref._start_appear_animation)
+            _appear_delay = 340 if getattr(self, "auto_scroll_enabled", False) else 20
+            QtCore.QTimer.singleShot(_appear_delay, _mw_ref._start_appear_animation)
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 6: УПРАВЛЕНИЕ ВИДИМОСТЬЮ КНОПОК РЕГЕНЕРАЦИИ И РЕДАКТИРОВАНИЯ
@@ -15777,6 +10850,49 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         """, (self.current_chat_id, self.current_chat_id))
                         conn.commit()
                         print("[SEND] ✓ Незавершённое сообщение пользователя удалено из БД")
+
+                        # ✅ FIX ДУБЛЕЙ: удаляем последнее user-сообщение из ВСЕХ
+                        # memory_manager-ов, иначе при повторной отправке ИИ видит
+                        # старое сообщение + новое и отвечает «двойным» контекстом.
+                        # Используем прямой SQL — надёжно для любых memory-бэкендов.
+                        _MEMORY_DBS = [
+                            "context_memory.db",
+                            "deepseek_memory.db",
+                            "mistral_memory.db",
+                            "qwen_memory.db",
+                        ]
+                        for _mdb in _MEMORY_DBS:
+                            if not os.path.exists(_mdb):
+                                continue
+                            try:
+                                _mc = sqlite3.connect(_mdb)
+                                _mcur = _mc.cursor()
+                                # Ищем таблицу с колонкой chat_id
+                                _mcur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                                for (_tname,) in _mcur.fetchall():
+                                    try:
+                                        _mcur.execute(
+                                            f"SELECT name FROM pragma_table_info('{_tname}') WHERE name='chat_id'"
+                                        )
+                                        if not _mcur.fetchone():
+                                            continue
+                                        # Удаляем последнюю запись с role='user' для этого chat_id
+                                        _mcur.execute(f"""
+                                            DELETE FROM {_tname}
+                                            WHERE id = (
+                                                SELECT id FROM {_tname}
+                                                WHERE chat_id = ? AND role = 'user'
+                                                ORDER BY id DESC LIMIT 1
+                                            )
+                                        """, (self.current_chat_id,))
+                                        if _mcur.rowcount > 0:
+                                            print(f"[SEND] ✓ Удалено user-сообщение из {_mdb}.{_tname}")
+                                    except Exception:
+                                        pass
+                                _mc.commit()
+                                _mc.close()
+                            except Exception as _me:
+                                print(f"[SEND] ⚠️ memory cleanup {_mdb}: {_me}")
                     conn.close()
                 except Exception as e:
                     print(f"[SEND] ⚠️ Ошибка удаления сообщения из БД: {e}")
@@ -15791,9 +10907,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                                 # Забираем файлы из виджета если они там есть
                                 if hasattr(w, 'attached_files') and w.attached_files:
                                     restored_files = list(w.attached_files)
-                                self.messages_layout.removeWidget(w)
-                                w.deleteLater()
-                                print("[SEND] ✓ Виджет сообщения пользователя удалён из UI")
+                                # ✅ Плавное удаление с анимацией slide-out + fade-out
+                                def _do_remove(widget=w):
+                                    try:
+                                        self.messages_layout.removeWidget(widget)
+                                        widget.deleteLater()
+                                        print("[SEND] ✓ Виджет сообщения пользователя удалён из UI")
+                                    except Exception as _e:
+                                        print(f"[SEND] ⚠️ Ошибка удаления виджета: {_e}")
+                                if hasattr(w, 'animate_remove'):
+                                    w.animate_remove(_do_remove)
+                                else:
+                                    _do_remove()
                                 break
                 except Exception as e:
                     print(f"[SEND] ⚠️ Ошибка удаления виджета: {e}")
@@ -15813,6 +10938,27 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
             _set_send_icon(self.send_btn)
+
+            # ✅ Восстанавливаем яркость поля ввода и разблокируем mic_btn
+            self._restore_input_after_generation()
+
+            # ✅ Убираем все blur-оверлеи (перегенерация и обычный)
+            if hasattr(self, '_regen_blur_overlay') and self._regen_blur_overlay.isVisible():
+                try:
+                    self._remove_regen_blur_effect()
+                except Exception as _e:
+                    print(f"[SEND] ⚠️ _remove_regen_blur_effect: {_e}")
+                    try:
+                        self._regen_blur_overlay.hide()
+                    except Exception:
+                        pass
+            if hasattr(self, '_blur_overlay') and self._blur_overlay.isVisible():
+                try:
+                    self._blur_overlay.hide()
+                    self._blur_overlay.clear()
+                    print("[SEND] ✓ _blur_overlay скрыт")
+                except Exception as _e:
+                    print(f"[SEND] ⚠️ _blur_overlay hide: {_e}")
             
             if restored_text:
                 self.input_field.setText(restored_text)
@@ -16080,6 +11226,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Сохраняем сообщение с файлами в БД (полный путь, чтобы можно было открыть позже)
             files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
+            # Обновляем превью в сайдбаре сразу после отправки сообщения пользователя
+            self._update_chat_preview(self.current_chat_id, user_text)
             
             # Сохраняем поворот диалога в memory_manager (для истории ИИ)
             try:
@@ -16128,6 +11276,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             # Сохраняем сообщение с файлами в БД (полный путь для открытия)
             files_to_save = list(self.attached_files) if self.attached_files else None
             self.chat_manager.save_message(self.current_chat_id, "user", user_text, files_to_save)
+            # Обновляем превью (режим редактирования)
+            self._update_chat_preview(self.current_chat_id, user_text)
             
             # Сохраняем поворот диалога в memory_manager (для истории ИИ)
             try:
@@ -16164,6 +11314,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _set_stop_icon(self.send_btn)
         self.send_btn.setEnabled(True)
         self.is_generating = True
+        # Плавно затемняем поле ввода и кнопку голоса
+        self._dim_input_for_generation()
 
         # ═══════════════════════════════════════════════════════════
         # ДВУХФАЗНЫЙ РЕЖИМ ОТВЕТА
@@ -16179,7 +11331,9 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.thinking_start_time = time.time()
 
         # Запускаем воркер с ПРАВИЛЬНЫМИ флагами и режимом AI
-        worker = AIWorker(user_text, self.current_language, actual_deep_thinking, actual_use_search, False, self.chat_manager, self.current_chat_id, self.attached_files, self.ai_mode)
+        _locked_model_key = llama_handler.CURRENT_AI_MODEL_KEY
+        print(f"[SEND] Модель зафиксирована: {_locked_model_key}")
+        worker = AIWorker(user_text, self.current_language, actual_deep_thinking, actual_use_search, False, self.chat_manager, self.current_chat_id, self.attached_files, self.ai_mode, model_key_override=_locked_model_key)
         worker.signals.finished.connect(self.handle_response)
         self.current_worker = worker  # Сохраняем ссылку на текущего воркера
         self._current_request_id = worker.request_id  # Запоминаем ID запроса
@@ -16245,7 +11399,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             
             # ВАЖНО: Сбрасываем флаг генерации
             self.is_generating = False
-            
+
             # Вычисляем время обдумывания с защитой
             thinking_time_to_show = 0
             try:
@@ -16470,6 +11624,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                         regen_history=_save_regen_hist,
                         generated_files=_gen_files if _gen_files else None,
                     )
+                    # Обновляем превью в сайдбаре сразу после получения ответа ИИ
+                    self._update_chat_preview(self.current_chat_id, response)
                     if _save_regen_hist:
                         print(f"[HANDLE_RESPONSE] ✓ Сохранено с историей перегенерации ({len(_save_regen_hist)} вариантов)")
                     if _gen_files:
@@ -16539,6 +11695,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 # Останавливаем анимацию точек
                 if hasattr(self, 'stop_status_animation'):
                     self.stop_status_animation()
+                # Плавно восстанавливаем яркость поля ввода и mic_btn
+                self._restore_input_after_generation()
+                if getattr(self, '_is_regenerating', False):
+                    self._is_regenerating = False
             except Exception as e:
                 print(f"[HANDLE_RESPONSE] Ошибка восстановления UI: {e}")
 
@@ -16642,6 +11802,65 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             print("[REGENERATE] ⚠️ Последнее сообщение в БД не от ассистента")
         
         conn.close()
+
+        # ── Удаляем последний assistant-ответ из memory_manager ────────────
+        # КРИТИЧНО: chat_manager.save_message удаляет из chats.db, но
+        # memory_manager (context_memory.db / deepseek_memory.db и т.д.)
+        # при каждом ответе добавляет запись и НИКОГДА её не удаляет.
+        # После нескольких перегенераций в памяти накапливаются:
+        # ..., user, assistant_v1, assistant_v2, assistant_v3 ...
+        # Модель видит два assistant подряд и начинает "разговаривать сама с собой".
+        # Решение: удалять последний assistant-элемент из memory_manager здесь.
+        try:
+            _regen_mem_mgr = get_memory_manager(llama_handler.CURRENT_AI_MODEL_KEY)
+            if hasattr(_regen_mem_mgr, 'delete_last_assistant_message'):
+                _regen_mem_mgr.delete_last_assistant_message(self.current_chat_id)
+            elif hasattr(_regen_mem_mgr, 'get_messages'):
+                # Универсальный fallback через прямой SQL по имени таблицы
+                import sqlite3 as _sq
+                # Определяем файл БД по типу менеджера
+                _db_map = {
+                    'ContextMemoryManager':    'context_memory.db',
+                    'DeepSeekMemoryManager':   'deepseek_memory.db',
+                    'MistralMemoryManager':    'mistral_memory.db',
+                    'QwenMemoryManager':       'qwen_memory.db',
+                }
+                _mgr_name = type(_regen_mem_mgr).__name__
+                _db_file  = _db_map.get(_mgr_name)
+                if _db_file and os.path.exists(_db_file):
+                    _rc = _sq.connect(_db_file)
+                    # Автоматически находим таблицу с колонками chat_id + role + id
+                    _tbls = _rc.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                    _tbl = None
+                    for (_t,) in _tbls:
+                        _cols = {r[1] for r in _rc.execute(f"PRAGMA table_info({_t})")}
+                        if {'id', 'chat_id', 'role', 'content'}.issubset(_cols):
+                            # Берём таблицу с "messages" в имени если есть
+                            if 'message' in _t.lower():
+                                _tbl = _t
+                                break
+                    if _tbl:
+                        _rc.execute(f"""
+                            DELETE FROM {_tbl}
+                            WHERE chat_id = ? AND role = 'assistant'
+                              AND id = (
+                                  SELECT id FROM {_tbl}
+                                  WHERE chat_id = ? AND role = 'assistant'
+                                  ORDER BY id DESC LIMIT 1
+                              )
+                        """, (self.current_chat_id, self.current_chat_id))
+                        _rows = _rc.execute("SELECT changes()").fetchone()[0]
+                        _rc.commit()
+                        print(f"[REGENERATE] ✓ memory_manager ({_mgr_name}/{_tbl}): удалено {_rows} assistant-записей")
+                    else:
+                        print(f"[REGENERATE] ⚠️ Таблица messages не найдена в {_db_file}")
+                    _rc.close()
+                else:
+                    print(f"[REGENERATE] ⚠️ Неизвестный/отсутствующий memory_manager: {_mgr_name}")
+        except Exception as _rme:
+            print(f"[REGENERATE] ⚠️ Ошибка очистки memory_manager: {_rme}")
         
         # Отправляем запрос заново
         self._is_regenerating = True  # флаг: идёт перегенерация (не обычный запрос)
@@ -16649,6 +11868,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _set_stop_icon(self.send_btn)
         self.send_btn.setEnabled(True)
         self.is_generating = True
+        # Плавно затемняем поле ввода и кнопку голоса
+        self._dim_input_for_generation()
         
         # Адаптируем deep_thinking в зависимости от режима AI (как в send_message)
         if self.ai_mode == AI_MODE_FAST:
@@ -17276,6 +12497,185 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
     
+    def confirm_delete_all_models(self):
+        """Показать диалог подтверждения и удалить ВСЕ модели ИИ с диска"""
+        print("[DELETE_ALL_MODELS] Запрос подтверждения")
+
+        is_dark = self.current_theme == "dark"
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("")
+        dialog.setModal(True)
+        dialog.setFixedSize(450, 230)
+        dialog.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint |
+            QtCore.Qt.WindowType.Dialog |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        if not IS_WINDOWS:
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
+        dialog.move(screen_geo.center().x() - 225, screen_geo.center().y() - 115)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        frame = QtWidgets.QFrame()
+        frame.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        if is_dark:
+            frame.setStyleSheet("QFrame { background-color: rgba(30,30,35,0.97); border: 1px solid rgba(60,60,70,0.8); border-radius: 20px; }")
+        else:
+            frame.setStyleSheet("QFrame { background-color: rgba(255,255,255,0.97); border: 1px solid rgba(200,200,210,0.9); border-radius: 20px; }")
+
+        frame_layout = QtWidgets.QVBoxLayout(frame)
+        frame_layout.setContentsMargins(30, 24, 30, 24)
+        frame_layout.setSpacing(0)
+
+        title = QtWidgets.QLabel("🤖 Удалить все модели ИИ?")
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        title.setFont(_apple_font(18, weight=QtGui.QFont.Weight.Bold))
+        title.setStyleSheet(f"QLabel {{ color: {'#e89999' if is_dark else '#c85555'}; background-color: none; border: none; }}")
+        frame_layout.addWidget(title)
+        frame_layout.addSpacing(14)
+
+        warning = QtWidgets.QLabel(
+            "Все скачанные модели ИИ будут удалены с диска.\n"
+            "Это действие невозможно отменить.\n"
+            "Для работы потребуется повторная загрузка."
+        )
+        warning.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        warning.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Normal))
+        warning.setWordWrap(True)
+        warning.setStyleSheet(f"QLabel {{ color: {'#b0b0b0' if is_dark else '#64748b'}; background-color: none; border: none; }}")
+        frame_layout.addWidget(warning)
+        frame_layout.addSpacing(18)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(15)
+
+        no_btn = QtWidgets.QPushButton("Отмена")
+        no_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
+        no_btn.setMinimumHeight(48)
+        no_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        if is_dark:
+            no_btn.setStyleSheet("QPushButton { background: rgba(60,60,70,0.70); color: #e6e6e6; border: none; border-radius: 13px; padding: 8px 18px; } QPushButton:hover { background: rgba(70,70,80,0.85); }")
+        else:
+            no_btn.setStyleSheet("QPushButton { background: rgba(226,232,240,0.90); color: #334155; border: none; border-radius: 13px; padding: 8px 18px; } QPushButton:hover { background: rgba(203,213,225,1.0); }")
+
+        yes_btn = QtWidgets.QPushButton("Удалить все модели")
+        yes_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Bold))
+        yes_btn.setMinimumHeight(48)
+        yes_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        yes_btn.setStyleSheet("QPushButton { background: rgba(239,68,68,0.95); color: white; border: none; border-radius: 13px; padding: 8px 18px; } QPushButton:hover { background: rgba(220,38,38,1.0); }")
+
+        buttons.addWidget(no_btn)
+        buttons.addWidget(yes_btn)
+        frame_layout.addLayout(buttons)
+        layout.addWidget(frame)
+
+        def _close_animated(accept: bool):
+            no_btn.setEnabled(False)
+            yes_btn.setEnabled(False)
+            _eff = QtWidgets.QGraphicsOpacityEffect(dialog)
+            dialog.setGraphicsEffect(_eff)
+            _eff.setOpacity(1.0)
+            _anim = QtCore.QPropertyAnimation(_eff, b"opacity")
+            _anim.setDuration(160)
+            _anim.setStartValue(1.0)
+            _anim.setEndValue(0.0)
+            _anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _anim.finished.connect(lambda: dialog.accept() if accept else dialog.reject())
+            _anim.start()
+            dialog._anims = [_anim, _eff]
+
+        no_btn.clicked.connect(lambda: _close_animated(False))
+        yes_btn.clicked.connect(lambda: _close_animated(True))
+
+        # Fade-in открытие
+        _open_eff = QtWidgets.QGraphicsOpacityEffect(dialog)
+        dialog.setGraphicsEffect(_open_eff)
+        _open_eff.setOpacity(0.0)
+        _open_anim = QtCore.QPropertyAnimation(_open_eff, b"opacity")
+        _open_anim.setDuration(220)
+        _open_anim.setStartValue(0.0)
+        _open_anim.setEndValue(1.0)
+        _open_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        _open_anim.finished.connect(lambda: dialog.setGraphicsEffect(None) if dialog else None)
+        _open_anim.start()
+        dialog._open_anims = [_open_anim, _open_eff]
+
+        dialog.raise_()
+        dialog.activateWindow()
+        result = dialog.exec()
+
+        if result == QtWidgets.QDialog.DialogCode.Accepted:
+            print("[DELETE_ALL_MODELS] Пользователь подтвердил — начинаем удаление")
+            self._perform_delete_all_models()
+        else:
+            print("[DELETE_ALL_MODELS] Пользователь отменил")
+
+    def _perform_delete_all_models(self):
+        """Удаляет все модели из Ollama и с диска"""
+        models_dir = get_ollama_models_dir()
+        total_freed = 0
+        errors = []
+
+        prog = QtWidgets.QProgressDialog("Удаление моделей…", None, 0, 0, self)
+        prog.setWindowTitle("Удаление всех моделей")
+        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        if IS_WINDOWS:
+            prog.setWindowFlags(QtCore.Qt.WindowType.Dialog | QtCore.Qt.WindowType.WindowTitleHint)
+        prog.show()
+        QtWidgets.QApplication.processEvents()
+
+        for model_key, (ollama_name, display_name) in list(SUPPORTED_MODELS.items()):
+            print(f"[DELETE_ALL_MODELS] Удаляем: {display_name} ({ollama_name})")
+            prog.setLabelText(f"Удаление {display_name}…")
+            QtWidgets.QApplication.processEvents()
+
+            # ollama rm
+            try:
+                kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                if IS_WINDOWS:
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                subprocess.run(["ollama", "rm", ollama_name], timeout=60, **kwargs)
+            except Exception as e:
+                print(f"[DELETE_ALL_MODELS] ollama rm {ollama_name}: {e}")
+
+            # физическое удаление файлов
+            try:
+                freed, deleted = delete_model_files_from_disk(ollama_name, models_dir)
+                total_freed += freed
+                print(f"[DELETE_ALL_MODELS] {display_name}: удалено {len(deleted)} файлов, {freed/1024**3:.2f} GB")
+            except Exception as e:
+                errors.append(f"{display_name}: {e}")
+                print(f"[DELETE_ALL_MODELS] Ошибка при удалении {display_name}: {e}")
+
+        prog.close()
+
+        freed_str = f"{total_freed / 1024**3:.1f} GB" if total_freed > 0 else "неизвестно"
+
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                self, "Удаление завершено с ошибками",
+                f"Большинство моделей удалено. Освобождено: {freed_str}\n\n"
+                + "\n".join(errors),
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "✅ Модели удалены",
+                f"Все модели ИИ успешно удалены с диска.\n\n"
+                f"Освобождено места: {freed_str}\n\n"
+                f"Для работы с ИИ откройте «Выбор модели» и скачайте нужную модель.",
+                QtWidgets.QMessageBox.StandardButton.Ok
+            )
+        print(f"[DELETE_ALL_MODELS] ✓ Завершено. Освобождено: {freed_str}")
+
     def confirm_delete_all_chats(self):
         """Показать диалог подтверждения удаления ВСЕХ чатов"""
         print("[DELETE_ALL_CHATS] Запрос подтверждения удаления всех чатов")
