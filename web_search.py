@@ -61,6 +61,14 @@ except ImportError:
 MAX_HISTORY_LOAD = 15
 SHORT_TEXT_THRESHOLD = 80
 
+# Запрещённые английские слова (используются в remove_english_words_from_russian)
+FORBIDDEN_WORDS_DICT = {}
+try:
+    from forbidden_english_words import FORBIDDEN_WORDS_DICT as _fw_ws
+    FORBIDDEN_WORDS_DICT = _fw_ws
+except ImportError:
+    pass
+
 # Google / DuckDuckGo helper config
 DB_FILE = "chat_memory.db" 
 MAX_HISTORY_LOAD = 15

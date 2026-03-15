@@ -910,6 +910,18 @@ class _SlideOpacityEffect(QtWidgets.QGraphicsEffect):
         return src_rect
 
 
+# ── TTS-движок (вынесен в tts_engine.py) ──────────────────────────────────
+try:
+    from tts_engine import get_engine as _get_tts_engine, normalize_text as _tts_normalize
+    _TTS_AVAILABLE = True
+    print("[TTS] ✓ tts_engine загружен")
+except ImportError:
+    _TTS_AVAILABLE = False
+    _get_tts_engine = None
+    _tts_normalize = None
+    print("[TTS] ⚠ tts_engine.py не найден")
+
+
 # -------------------------
 # Message widget (с адаптивным размером эмодзи)
 # -------------------------
@@ -1289,6 +1301,7 @@ class MessageWidget(QtWidgets.QWidget):
 
         # панель кнопок (вне пузыря)
         controls_widget = QtWidgets.QWidget()
+        self.controls_widget = controls_widget   # ← сохраняем для stream-финализации
         controls_layout = QtWidgets.QHBoxLayout(controls_widget)
         controls_layout.setSpacing(10)
         bubble_padding = 18
@@ -1307,8 +1320,8 @@ class MessageWidget(QtWidgets.QWidget):
         copy_btn.setFixedSize(btn_size, btn_size)
         copy_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         copy_btn.clicked.connect(self.copy_text)
-        # ✅ ИСПРАВЛЕНИЕ: Кнопка копирования видна всегда (игнорируем short)
         copy_btn.setVisible(add_controls)
+        self.copy_btn = copy_btn
         copy_btn.setObjectName("floatingControl")
         copy_btn.setStyleSheet(f"""
             QPushButton#floatingControl {{
@@ -1363,8 +1376,45 @@ class MessageWidget(QtWidgets.QWidget):
         else:
             self.edit_button = None
 
+        # Кнопка озвучки (только для ИИ)
+        self.tts_button = None
+        # copy_btn и regenerate_btn уже присвоены выше — не перезаписываем
+        self.regenerate_btn = None
+        self._tts_proc = None   # subprocess (say/espeak/pyttsx3 thread)
+        if speaker != "Вы" and speaker != "Система" and add_controls:
+            tts_btn = QtWidgets.QPushButton()
+            tts_btn.setText("🔊")
+            tts_btn.setToolTip("Озвучить ответ")
+            tts_btn.setFixedSize(btn_size, btn_size)
+            tts_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            tts_btn.setCheckable(True)
+            tts_btn.setObjectName("floatingControl")
+            tts_btn.setStyleSheet(f"""
+                QPushButton#floatingControl {{
+                    background: {self.btn_bg};
+                    color: {self.icon_color};
+                    border: 1px solid {self.btn_border};
+                    border-radius: {btn_radius}px;
+                    font-size: {emoji_size}px;
+                }}
+                QPushButton#floatingControl:hover {{
+                    background: {self.btn_bg_hover};
+                    border: 1px solid {self.hover_border_color};
+                }}
+                QPushButton#floatingControl:checked {{
+                    background: rgba(102, 126, 234, 0.18);
+                    border: 1px solid rgba(102, 126, 234, 0.55);
+                }}
+                QPushButton#floatingControl:pressed {{
+                    background: {self.btn_bg_hover};
+                    border: 1px solid {self.pressed_border_color};
+                }}
+            """)
+            tts_btn.clicked.connect(self._toggle_tts)
+            controls_layout.addWidget(tts_btn, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.tts_button = tts_btn
+
         
-        # Кнопка перегенерации (только для ассистента, только если НЕ acknowledgment)
         if speaker != "Вы" and speaker != "Система" and add_controls and not self.is_acknowledgment:
             regenerate_btn = QtWidgets.QPushButton()
             regenerate_btn.setText("🔄")
@@ -1375,6 +1425,7 @@ class MessageWidget(QtWidgets.QWidget):
             # ✅ ИСПРАВЛЕНИЕ: Кнопка перегенерации видна всегда (игнорируем short)
             regenerate_btn.setVisible(add_controls)
             regenerate_btn.setObjectName("floatingControl")
+            self.regenerate_btn = regenerate_btn
             regenerate_btn.setStyleSheet(f"""
                 QPushButton#floatingControl {{
                     background: {self.btn_bg};
@@ -2096,6 +2147,33 @@ class MessageWidget(QtWidgets.QWidget):
             except RuntimeError:
                 pass
 
+        # Обновляем кнопку TTS
+        if hasattr(self, 'tts_button') and self.tts_button:
+            try:
+                self.tts_button.setStyleSheet(f"""
+                    QPushButton#floatingControl {{
+                        background: {btn_bg};
+                        color: {icon_color};
+                        border: 1px solid {btn_border};
+                        border-radius: {btn_radius}px;
+                        font-size: {emoji_size}px;
+                    }}
+                    QPushButton#floatingControl:hover {{
+                        background: {btn_bg_hover};
+                        border: 1px solid {hover_border_color};
+                    }}
+                    QPushButton#floatingControl:checked {{
+                        background: rgba(102, 126, 234, 0.18);
+                        border: 1px solid rgba(102, 126, 234, 0.55);
+                    }}
+                    QPushButton#floatingControl:pressed {{
+                        background: {btn_bg_hover};
+                        border: 1px solid {pressed_border_color};
+                    }}
+                """)
+            except RuntimeError:
+                pass
+
         print(f"[MSG_UPDATE] Стили обновлены: theme={theme}, liquid_glass={liquid_glass}")
 
 
@@ -2116,12 +2194,87 @@ class MessageWidget(QtWidgets.QWidget):
                 self.copy_button.setText(original_text)
             except RuntimeError:
                 self.copy_button = None
-    
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TTS — Озвучка текста ответа ИИ (движок: tts_engine.py)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _toggle_tts(self):
+        """Запускает или останавливает озвучку ответа."""
+        btn = self.tts_button
+        if btn is None:
+            return
+
+        # Если уже играет — стоп
+        if getattr(self, '_tts_active', False):
+            self._stop_tts()
+            return
+
+        if not _TTS_AVAILABLE:
+            print("[TTS] tts_engine.py не загружен — озвучка недоступна")
+            return
+
+        if not self.text or not self.text.strip():
+            return
+
+        self._tts_active = True
+        btn.setText("⏹")
+        btn.setToolTip("Остановить озвучку")
+        btn.setChecked(True)
+
+        def _on_done():
+            # Вызывается из фонового потока — переходим в GUI через invokeMethod
+            try:
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_tts_done",
+                    QtCore.Qt.ConnectionType.QueuedConnection
+                )
+            except Exception:
+                pass
+
+        engine = _get_tts_engine()
+        engine.speak(self.text, on_done=_on_done)
+
+
+
+    @QtCore.pyqtSlot()
+    def _tts_done(self):
+        """Вызывается по завершении озвучки (в GUI-потоке)."""
+        self._tts_active = False
+        btn = self.tts_button
+        if btn:
+            try:
+                btn.setText("🔊")
+                btn.setToolTip("Озвучить ответ")
+                btn.setChecked(False)
+            except RuntimeError:
+                pass
+
+    def _stop_tts(self):
+        """Принудительно останавливает озвучку."""
+        self._tts_active = False
+        if _TTS_AVAILABLE:
+            try:
+                _get_tts_engine().stop()
+            except Exception:
+                pass
+        btn = self.tts_button
+        if btn:
+            try:
+                btn.setText("🔊")
+                btn.setToolTip("Озвучить ответ")
+                btn.setChecked(False)
+            except RuntimeError:
+                pass
+
+
     def fade_out_and_delete(self):
         """
         Плавное исчезновение виджета через прозрачность.
         Использует _SlideOpacityEffect (совместимо с новой системой анимаций).
         """
+        # Останавливаем TTS при удалении виджета
+        self._stop_tts()
         if IS_WINDOWS:
             try:
                 self.deleteLater()
@@ -2786,9 +2939,92 @@ class _TextViewerDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось открыть:\n{e}")
 
 
+class ThinkingBubbleWidget(QtWidgets.QWidget):
+    """
+    Простой пульсирующий кружок пока ИИ думает.
+    Рисуется через paintEvent — никаких дочерних виджетов.
+    """
+
+    _R_MIN = 6
+    _R_MAX = 11
+
+    def __init__(self, model_name: str = "", theme: str = "light",
+                 liquid_glass: bool = True, parent=None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedHeight(40)
+        # Растягиваем на всю ширину, чтобы cx считался правильно
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        # Серый цвет — нейтральный
+        if theme == "dark":
+            self._color = QtGui.QColor(190, 190, 195)
+        else:
+            self._color = QtGui.QColor(155, 155, 163)
+
+        # Состояние пульса
+        self._radius  = float(self._R_MIN)
+        self._alpha   = 0.45
+        self._r_dir   = 1
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+
+    def _tick(self):
+        step = 0.18 * self._r_dir
+        self._radius += step
+        if self._radius >= self._R_MAX:
+            self._radius = self._R_MAX
+            self._r_dir  = -1
+        elif self._radius <= self._R_MIN:
+            self._radius = self._R_MIN
+            self._r_dir  = 1
+        t = (self._radius - self._R_MIN) / (self._R_MAX - self._R_MIN)
+        self._alpha = 0.35 + 0.60 * t
+        try:
+            self.update()
+        except RuntimeError:
+            self._timer.stop()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        c = QtGui.QColor(self._color)
+        c.setAlphaF(self._alpha)
+        painter.setBrush(QtGui.QBrush(c))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        # cx = messages_layout margin (5) + MessageWidget AI left margin (6) + bubble_padding (18) + R_MAX
+        # Это совпадает с центром кнопки копировать под пузырём ИИ
+        cx = 5 + 6 + 18 + self._R_MAX
+        cy = self.height() // 2
+        r  = int(self._radius)
+        painter.drawEllipse(QtCore.QPoint(cx, cy), r, r)
+        painter.end()
+
+    def fade_out_and_remove(self, on_done=None):
+        self._timer.stop()
+        self._opacity_eff = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_eff)
+        self._opacity_eff.setOpacity(1.0)
+        anim = QtCore.QPropertyAnimation(self._opacity_eff, b"opacity", self)
+        anim.setDuration(150)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        if on_done:
+            anim.finished.connect(on_done)
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._fade_anim = anim
+
+
 class WorkerSignals(QtCore.QObject):
     # (response_text, list of (title, url) source tuples)
     finished = QtCore.pyqtSignal(str, list)
+    chunk    = QtCore.pyqtSignal(str)   # очередной токен из стрима
 
 class AIWorker(QtCore.QRunnable):
     def __init__(self, user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key_override: str = None):
@@ -2832,6 +3068,14 @@ class AIWorker(QtCore.QRunnable):
                     # На последней попытке просто идём дальше — get_ai_response
                     # сам вернёт ошибку если Ollama так и не поднялась
 
+            def _on_chunk(token: str):
+                if self._cancelled or llama_handler._APP_SHUTTING_DOWN:
+                    return
+                try:
+                    self.signals.chunk.emit(token)
+                except RuntimeError:
+                    pass
+
             response, sources = get_ai_response(
                 self.user_message,
                 self.current_language,
@@ -2842,7 +3086,9 @@ class AIWorker(QtCore.QRunnable):
                 self.chat_id,
                 self.file_paths,
                 self.ai_mode,
-                self.model_key   # ← явная передача модели
+                self.model_key,
+                on_chunk=_on_chunk,
+                cancelled_flag=lambda: self._cancelled or llama_handler._APP_SHUTTING_DOWN,
             )
             # Проверяем ещё раз после долгого ожидания ответа от Ollama
             if self._cancelled or llama_handler._APP_SHUTTING_DOWN:
@@ -3697,6 +3943,11 @@ class SettingsView(QtWidgets.QWidget):
             "theme": "light",
             "liquid_glass": True,
             "auto_scroll": False,
+            "show_tts": True,
+            "show_regen": True,
+            "show_copy": True,
+            "show_user_copy": True,
+            "show_user_edit": True,
         }
         
         # Временные настройки (pending - до нажатия "Применить")
@@ -3704,6 +3955,11 @@ class SettingsView(QtWidgets.QWidget):
             "theme": "light",
             "liquid_glass": True,
             "auto_scroll": False,
+            "show_tts": True,
+            "show_regen": True,
+            "show_copy": True,
+            "show_user_copy": True,
+            "show_user_edit": True,
         }
         
         self.init_ui()
@@ -3842,6 +4098,7 @@ class SettingsView(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding
         )
+        self.main_scroll_area = scroll_area   # для сброса позиции при открытии
         main_page_layout.addWidget(scroll_area, stretch=1)
 
         # Кнопка «Назад к чату» на главной странице настроек
@@ -3855,70 +4112,161 @@ class SettingsView(QtWidgets.QWidget):
         main_page_layout.addWidget(back_btn)
 
         # Версия — правый нижний угол
-        _ver_lbl = QtWidgets.QLabel("v2.6.0")
+        _ver_lbl = QtWidgets.QLabel("v3.0.0")
         _ver_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignBottom)
         _ver_lbl.setFont(_apple_font(11))
-        _ver_lbl.setStyleSheet("color: rgba(128,128,128,0.40); background: transparent; border: none; padding-right: 4px;")
+        _ver_lbl.setStyleSheet("color: #94a3b8;")
         main_page_layout.addWidget(_ver_lbl)
 
-        self.pages_stack.addWidget(main_page)
+        self.pages_stack.addWidget(main_page)  # index 0
 
-        # ════════════════════════════════════════════════════════
-        # СТРАНИЦА 1: Интерфейс (тема + стекло)
+        # СТРАНИЦА 1: Интерфейс (навигация к подменю)
         # ════════════════════════════════════════════════════════
         iface_page = QtWidgets.QWidget()
         iface_layout = QtWidgets.QVBoxLayout(iface_page)
         iface_layout.setContentsMargins(40, 30, 40, 30)
         iface_layout.setSpacing(20)
 
-        # Заголовок подстраницы
         iface_title = QtWidgets.QLabel("🖥  Интерфейс")
         iface_title.setObjectName("settingsTitle")
         iface_title.setFont(_apple_font(28, weight=QtGui.QFont.Weight.Bold))
         iface_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         iface_layout.addWidget(iface_title)
 
-        iface_container = QtWidgets.QWidget()
-        iface_container.setObjectName("settingsContainer")
-        iface_settings_layout = QtWidgets.QVBoxLayout(iface_container)
-        iface_settings_layout.setSpacing(16)
+        iface_nav_container = QtWidgets.QWidget()
+        iface_nav_container.setObjectName("settingsContainer")
+        iface_nav_layout = QtWidgets.QVBoxLayout(iface_nav_container)
+        iface_nav_layout.setSpacing(12)
 
-        # ── Тема оформления ──────────────────────────────────────
+        themes_nav_btn = QtWidgets.QPushButton("🎨  Темы")
+        themes_nav_btn.setObjectName("settingsNavBtn")
+        themes_nav_btn.setFont(_apple_font(16, weight=QtGui.QFont.Weight.Medium))
+        themes_nav_btn.setMinimumHeight(56)
+        themes_nav_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        themes_nav_btn.clicked.connect(lambda: self._slide_pages(1, 2))
+        iface_nav_layout.addWidget(themes_nav_btn)
+
+        glass_nav_btn = QtWidgets.QPushButton("🪟  Liquid Glass")
+        glass_nav_btn.setObjectName("settingsNavBtn")
+        glass_nav_btn.setFont(_apple_font(16, weight=QtGui.QFont.Weight.Medium))
+        glass_nav_btn.setMinimumHeight(56)
+        glass_nav_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        glass_nav_btn.clicked.connect(lambda: self._slide_pages(1, 3))
+        iface_nav_layout.addWidget(glass_nav_btn)
+
+        elements_nav_btn = QtWidgets.QPushButton("🧩  Элементы")
+        elements_nav_btn.setObjectName("settingsNavBtn")
+        elements_nav_btn.setFont(_apple_font(16, weight=QtGui.QFont.Weight.Medium))
+        elements_nav_btn.setMinimumHeight(56)
+        elements_nav_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        elements_nav_btn.clicked.connect(lambda: self._slide_pages(1, 4))
+        iface_nav_layout.addWidget(elements_nav_btn)
+
+        iface_nav_layout.addStretch()
+
+        iface_nav_scroll = QtWidgets.QScrollArea()
+        iface_nav_scroll.setObjectName("settingsScrollArea")
+        iface_nav_scroll.setWidget(iface_nav_container)
+        iface_nav_scroll.setWidgetResizable(True)
+        iface_nav_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        iface_nav_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        iface_layout.addWidget(iface_nav_scroll, stretch=1)
+
+        iface_back_btn = QtWidgets.QPushButton("← Назад к настройкам")
+        iface_back_btn.setObjectName("settingsBackBtn")
+        iface_back_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
+        iface_back_btn.setMinimumHeight(50)
+        iface_back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        iface_back_btn.clicked.connect(lambda: self._slide_pages(1, 0))
+        iface_layout.addWidget(iface_back_btn)
+
+        self.pages_stack.addWidget(iface_page)  # index 1
+
+        # ════════════════════════════════════════════════════════
+        # СТРАНИЦА 2: Темы
+        # ════════════════════════════════════════════════════════
+        themes_page = QtWidgets.QWidget()
+        themes_layout = QtWidgets.QVBoxLayout(themes_page)
+        themes_layout.setContentsMargins(40, 30, 40, 30)
+        themes_layout.setSpacing(20)
+
+        themes_title = QtWidgets.QLabel("🎨  Темы")
+        themes_title.setObjectName("settingsTitle")
+        themes_title.setFont(_apple_font(28, weight=QtGui.QFont.Weight.Bold))
+        themes_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        themes_layout.addWidget(themes_title)
+
+        themes_container = QtWidgets.QWidget()
+        themes_container.setObjectName("settingsContainer")
+        themes_settings_layout = QtWidgets.QVBoxLayout(themes_container)
+        themes_settings_layout.setSpacing(16)
+
         theme_group = self.create_setting_group(
             "Тема оформления",
             "Переключение между светлой и тёмной темой"
         )
-
         theme_layout = QtWidgets.QHBoxLayout()
         theme_layout.setSpacing(15)
-
         self.theme_light_btn = QtWidgets.QPushButton("☀️ Светлая")
         self.theme_light_btn.setObjectName("themeLightBtn")
         self.theme_light_btn.setCheckable(True)
         self.theme_light_btn.setChecked(True)
         self.theme_light_btn.clicked.connect(lambda: self.set_theme("light"))
-
         self.theme_dark_btn = QtWidgets.QPushButton("🌙 Тёмная")
         self.theme_dark_btn.setObjectName("themeDarkBtn")
         self.theme_dark_btn.setCheckable(True)
         self.theme_dark_btn.clicked.connect(lambda: self.set_theme("dark"))
-
         theme_layout.addWidget(self.theme_light_btn)
         theme_layout.addWidget(self.theme_dark_btn)
         theme_group.layout().addLayout(theme_layout)
-        iface_settings_layout.addWidget(theme_group)
+        themes_settings_layout.addWidget(theme_group)
 
-        # ── Liquid Glass ─────────────────────────────────────────
+        themes_settings_layout.addStretch()
+
+        themes_scroll = QtWidgets.QScrollArea()
+        themes_scroll.setObjectName("settingsScrollArea")
+        themes_scroll.setWidget(themes_container)
+        themes_scroll.setWidgetResizable(True)
+        themes_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        themes_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        themes_layout.addWidget(themes_scroll, stretch=1)
+
+        themes_back_btn = QtWidgets.QPushButton("← Назад к интерфейсу")
+        themes_back_btn.setObjectName("settingsBackBtn")
+        themes_back_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
+        themes_back_btn.setMinimumHeight(50)
+        themes_back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        themes_back_btn.clicked.connect(lambda: self._slide_pages(2, 1))
+        themes_layout.addWidget(themes_back_btn)
+
+        self.pages_stack.addWidget(themes_page)  # index 2
+
+        # ════════════════════════════════════════════════════════
+        # СТРАНИЦА 3: Liquid Glass
+        # ════════════════════════════════════════════════════════
+        glass_page = QtWidgets.QWidget()
+        glass_layout_outer = QtWidgets.QVBoxLayout(glass_page)
+        glass_layout_outer.setContentsMargins(40, 30, 40, 30)
+        glass_layout_outer.setSpacing(20)
+
+        glass_page_title = QtWidgets.QLabel("🪟  Liquid Glass")
+        glass_page_title.setObjectName("settingsTitle")
+        glass_page_title.setFont(_apple_font(28, weight=QtGui.QFont.Weight.Bold))
+        glass_page_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        glass_layout_outer.addWidget(glass_page_title)
+
+        glass_container = QtWidgets.QWidget()
+        glass_container.setObjectName("settingsContainer")
+        glass_settings_layout = QtWidgets.QVBoxLayout(glass_container)
+        glass_settings_layout.setSpacing(16)
+
         glass_group = self.create_setting_group(
             "Liquid Glass",
             "Стеклянный эффект для элементов интерфейса"
         )
-
-        # Превью пузырей
         preview_layout = QtWidgets.QHBoxLayout()
         preview_layout.setSpacing(20)
         preview_layout.setContentsMargins(0, 8, 0, 8)
-
         try:
             if os.path.exists("app_settings.json"):
                 with open("app_settings.json", "r", encoding="utf-8") as _f:
@@ -3928,15 +4276,13 @@ class SettingsView(QtWidgets.QWidget):
                 _theme = "light"
         except Exception:
             _theme = "light"
-
         self.preview_glass_bubble = self._make_preview_bubble(liquid_glass=True, theme=_theme, label="Со стеклом")
         self.preview_matte_bubble = self._make_preview_bubble(liquid_glass=False, theme=_theme, label="Без стекла")
         preview_layout.addWidget(self.preview_glass_bubble)
         preview_layout.addWidget(self.preview_matte_bubble)
         glass_group.layout().addLayout(preview_layout)
-
-        glass_layout = QtWidgets.QHBoxLayout()
-        glass_layout.setSpacing(15)
+        glass_btn_layout = QtWidgets.QHBoxLayout()
+        glass_btn_layout.setSpacing(15)
         self.glass_on_btn = QtWidgets.QPushButton("🪟 Включено")
         self.glass_on_btn.setObjectName("glassOnBtn")
         self.glass_on_btn.setCheckable(True)
@@ -3946,35 +4292,97 @@ class SettingsView(QtWidgets.QWidget):
         self.glass_off_btn.setObjectName("glassOffBtn")
         self.glass_off_btn.setCheckable(True)
         self.glass_off_btn.clicked.connect(lambda: self.set_liquid_glass(False))
-        glass_layout.addWidget(self.glass_on_btn)
-        glass_layout.addWidget(self.glass_off_btn)
-        glass_group.layout().addLayout(glass_layout)
-        iface_settings_layout.addWidget(glass_group)
+        glass_btn_layout.addWidget(self.glass_on_btn)
+        glass_btn_layout.addWidget(self.glass_off_btn)
+        glass_group.layout().addLayout(glass_btn_layout)
+        glass_settings_layout.addWidget(glass_group)
+        glass_settings_layout.addStretch()
 
-        iface_settings_layout.addStretch()
+        glass_scroll = QtWidgets.QScrollArea()
+        glass_scroll.setObjectName("settingsScrollArea")
+        glass_scroll.setWidget(glass_container)
+        glass_scroll.setWidgetResizable(True)
+        glass_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        glass_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        glass_layout_outer.addWidget(glass_scroll, stretch=1)
 
-        iface_scroll = QtWidgets.QScrollArea()
-        iface_scroll.setObjectName("settingsScrollArea")
-        iface_scroll.setWidget(iface_container)
-        iface_scroll.setWidgetResizable(True)
-        iface_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        iface_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        iface_scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
+        glass_back_btn = QtWidgets.QPushButton("← Назад к интерфейсу")
+        glass_back_btn.setObjectName("settingsBackBtn")
+        glass_back_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
+        glass_back_btn.setMinimumHeight(50)
+        glass_back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        glass_back_btn.clicked.connect(lambda: self._slide_pages(3, 1))
+        glass_layout_outer.addWidget(glass_back_btn)
+
+        self.pages_stack.addWidget(glass_page)  # index 3
+
+        # ════════════════════════════════════════════════════════
+        # СТРАНИЦА 4: Элементы интерфейса
+        # ════════════════════════════════════════════════════════
+        elements_page = QtWidgets.QWidget()
+        elements_layout = QtWidgets.QVBoxLayout(elements_page)
+        elements_layout.setContentsMargins(40, 30, 40, 30)
+        elements_layout.setSpacing(20)
+
+        elements_title = QtWidgets.QLabel("🧩  Элементы")
+        elements_title.setObjectName("settingsTitle")
+        elements_title.setFont(_apple_font(28, weight=QtGui.QFont.Weight.Bold))
+        elements_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        elements_layout.addWidget(elements_title)
+
+        elements_container = QtWidgets.QWidget()
+        elements_container.setObjectName("settingsContainer")
+        elements_settings_layout = QtWidgets.QVBoxLayout(elements_container)
+        elements_settings_layout.setSpacing(16)
+
+        elements_group = self.create_setting_group(
+            "Элементы управления",
+            "Отключённые элементы скрываются во всех сообщениях"
         )
-        iface_layout.addWidget(iface_scroll, stretch=1)
 
-        # Кнопка «← Назад к настройкам» на подстранице
-        back_to_settings_btn = QtWidgets.QPushButton("← Назад к настройкам")
-        back_to_settings_btn.setObjectName("settingsBackBtn")
-        back_to_settings_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
-        back_to_settings_btn.setMinimumHeight(50)
-        back_to_settings_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        back_to_settings_btn.clicked.connect(lambda: self._slide_pages(1, 0))
-        iface_layout.addWidget(back_to_settings_btn)
+        def _make_element_row(label_text, setting_key, default=True):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(14)
+            row.setContentsMargins(0, 4, 0, 4)
+            toggle = ToggleSwitch(checked=self.current_settings.get(setting_key, default))
+            lbl = QtWidgets.QLabel(label_text)
+            lbl.setFont(_apple_font(14))
+            def _on_toggle(checked, key=setting_key):
+                self.current_settings[key] = checked
+                self.save_settings()
+                self.settings_applied.emit(self.current_settings)
+            toggle.toggled.connect(_on_toggle)
+            row.addWidget(toggle)
+            row.addWidget(lbl)
+            row.addStretch()
+            return row
 
-        self.pages_stack.addWidget(iface_page)
+        elements_group.layout().addLayout(_make_element_row("🔊  Озвучка (ИИ)",        "show_tts",       True))
+        elements_group.layout().addLayout(_make_element_row("🔄  Перегенерация (ИИ)",  "show_regen",     True))
+        elements_group.layout().addLayout(_make_element_row("📋  Копировать (ИИ)",     "show_copy",      True))
+        elements_group.layout().addLayout(_make_element_row("📋  Копировать (Вы)",     "show_user_copy", True))
+        elements_group.layout().addLayout(_make_element_row("✏️  Редактировать (Вы)",  "show_user_edit", True))
+
+        elements_settings_layout.addWidget(elements_group)
+        elements_settings_layout.addStretch()
+
+        elements_scroll = QtWidgets.QScrollArea()
+        elements_scroll.setObjectName("settingsScrollArea")
+        elements_scroll.setWidget(elements_container)
+        elements_scroll.setWidgetResizable(True)
+        elements_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        elements_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        elements_layout.addWidget(elements_scroll, stretch=1)
+
+        elements_back_btn = QtWidgets.QPushButton("← Назад к интерфейсу")
+        elements_back_btn.setObjectName("settingsBackBtn")
+        elements_back_btn.setFont(_apple_font(14, weight=QtGui.QFont.Weight.Medium))
+        elements_back_btn.setMinimumHeight(50)
+        elements_back_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        elements_back_btn.clicked.connect(lambda: self._slide_pages(4, 1))
+        elements_layout.addWidget(elements_back_btn)
+
+        self.pages_stack.addWidget(elements_page)  # index 4
 
         self.apply_settings_styles()
     
@@ -4063,54 +4471,74 @@ class SettingsView(QtWidgets.QWidget):
     # ── Плавный слайд-переход между страницами pages_stack ───────────────────
     def _slide_pages(self, from_index: int, to_index: int):
         """
-        Плавный slide-переход между страницами pages_stack.
-        from_index=0→to_index=1  : слайд влево  (вход в раздел)
+        Slide + fade переход между страницами pages_stack.
+        from_index=0→to_index=1  : слайд влево  (вход в подраздел)
         from_index=1→to_index=0  : слайд вправо (возврат назад)
         """
-        # Защита от двойного вызова во время анимации
         if getattr(self, '_pages_animating', False):
             return
         self._pages_animating = True
 
         stack = self.pages_stack
         w = stack.width()
-        direction = 1 if to_index > from_index else -1   # 1 = влево, -1 = вправо
-        duration = 320
+        direction = 1 if to_index > from_index else -1
+        dur = 300
 
-        # Показываем новую страницу рядом (сдвинута за экран)
         new_page = stack.widget(to_index)
         old_page = stack.widget(from_index)
 
-        # Фиксируем размеры для анимации
         new_page.setGeometry(direction * w, 0, w, stack.height())
         stack.setCurrentIndex(to_index)
         new_page.show()
         new_page.raise_()
-        QtWidgets.QApplication.processEvents()
 
-        # Анимация старой страницы: уходит в сторону
-        anim_old = QtCore.QPropertyAnimation(old_page, b"pos")
-        anim_old.setDuration(duration)
-        anim_old.setStartValue(QtCore.QPoint(0, 0))
-        anim_old.setEndValue(QtCore.QPoint(-direction * w, 0))
-        anim_old.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        # ── Fade-out старой страницы ─────────────────────────────────────────
+        eff_out = QtWidgets.QGraphicsOpacityEffect(old_page)
+        old_page.setGraphicsEffect(eff_out)
+        a_out_op = QtCore.QPropertyAnimation(eff_out, b"opacity")
+        a_out_op.setDuration(dur // 2)
+        a_out_op.setStartValue(1.0)
+        a_out_op.setEndValue(0.0)
+        a_out_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
 
-        # Анимация новой страницы: въезжает
-        anim_new = QtCore.QPropertyAnimation(new_page, b"pos")
-        anim_new.setDuration(duration)
-        anim_new.setStartValue(QtCore.QPoint(direction * w, 0))
-        anim_new.setEndValue(QtCore.QPoint(0, 0))
-        anim_new.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        # ── Fade-in новой страницы ───────────────────────────────────────────
+        eff_in = QtWidgets.QGraphicsOpacityEffect(new_page)
+        new_page.setGraphicsEffect(eff_in)
+        eff_in.setOpacity(0.0)
+        a_in_op = QtCore.QPropertyAnimation(eff_in, b"opacity")
+        a_in_op.setDuration(dur)
+        a_in_op.setStartValue(0.0)
+        a_in_op.setEndValue(1.0)
+        a_in_op.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
-        # Параллельная группа
+        # ── Slide старой страницы ────────────────────────────────────────────
+        a_old = QtCore.QPropertyAnimation(old_page, b"pos")
+        a_old.setDuration(dur)
+        a_old.setStartValue(QtCore.QPoint(0, 0))
+        a_old.setEndValue(QtCore.QPoint(-direction * w // 3, 0))  # уходит на 1/3 — параллакс
+        a_old.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+        # ── Slide новой страницы ─────────────────────────────────────────────
+        a_new = QtCore.QPropertyAnimation(new_page, b"pos")
+        a_new.setDuration(dur)
+        a_new.setStartValue(QtCore.QPoint(direction * w, 0))
+        a_new.setEndValue(QtCore.QPoint(0, 0))
+        a_new.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
         grp = QtCore.QParallelAnimationGroup(self)
-        grp.addAnimation(anim_old)
-        grp.addAnimation(anim_new)
+        grp.addAnimation(a_out_op)
+        grp.addAnimation(a_in_op)
+        grp.addAnimation(a_old)
+        grp.addAnimation(a_new)
 
         def _on_done():
-            # Сбрасываем геометрию чтобы layout не сломался
             old_page.move(0, 0)
             new_page.move(0, 0)
+            try:
+                old_page.setGraphicsEffect(None)
+                new_page.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
             self._pages_animating = False
             self._pages_anim_group = None
 
@@ -4145,6 +4573,11 @@ class SettingsView(QtWidgets.QWidget):
         self.apply_settings_styles()
         print(f"[SETTINGS] Стекло: {'вкл' if enabled else 'выкл'}")
     
+    def scroll_to_top(self):
+        """Сбрасывает прокрутку в самый верх — вызывается каждый раз при открытии настроек."""
+        if hasattr(self, 'main_scroll_area'):
+            self.main_scroll_area.verticalScrollBar().setValue(0)
+
     def load_settings(self):
         """Загрузить сохранённые настройки"""
         try:
@@ -4574,112 +5007,494 @@ class SettingsView(QtWidgets.QWidget):
 # ГОЛОСОВОЙ ВВОД
 # ══════════════════════════════════════════════════════════════════════════════
 
-class VoiceRecorder(QtCore.QObject):
+class WhisperDownloadDialog(QtWidgets.QDialog):
     """
-    Запись аудио с микрофона + транскрипция через SpeechRecognition (Google).
-    Работает в фоновом потоке — не блокирует UI.
+    Диалог скачивания модели Whisper base.
+    Показывает прогресс, сохраняет в ~/.cache/whisper (постоянный кэш).
+    После скачивания модель остаётся между перезапусками программы.
     """
-    # Сигналы
-    recording_started  = QtCore.pyqtSignal()
-    recording_stopped  = QtCore.pyqtSignal()
-    transcription_done = QtCore.pyqtSignal(str)   # готовый текст
-    error_occurred     = QtCore.pyqtSignal(str)   # сообщение об ошибке
-
-    SAMPLE_RATE = 16000
-    CHANNELS    = 1
+    download_finished = QtCore.pyqtSignal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._recording   = False
-        self._frames      = []
-        self._thread      = None
-        self._stop_event  = threading.Event()
+        self.setWindowTitle("Скачивание Whisper")
+        self.setFixedSize(420, 220)
+        self.setWindowFlags(QtCore.Qt.WindowType.Dialog | QtCore.Qt.WindowType.FramelessWindowHint)
 
-    # ── Запуск записи ────────────────────────────────────────────────────────
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(16)
+
+        title = QtWidgets.QLabel("🎤  Загрузка Whisper base")
+        title.setFont(_apple_font(16, weight=QtGui.QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        self._status_lbl = QtWidgets.QLabel("Подготовка…")
+        self._status_lbl.setFont(_apple_font(12))
+        self._status_lbl.setWordWrap(True)
+        layout.addWidget(self._status_lbl)
+
+        self._progress = QtWidgets.QProgressBar()
+        self._progress.setRange(0, 0)   # бесконечный пока не известен размер
+        self._progress.setFixedHeight(8)
+        self._progress.setTextVisible(False)
+        self._progress.setStyleSheet("""
+            QProgressBar { background: rgba(102,126,234,0.15); border-radius: 4px; }
+            QProgressBar::chunk { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #667eea,stop:1 #764ba2); border-radius: 4px; }
+        """)
+        layout.addWidget(self._progress)
+
+        self._info_lbl = QtWidgets.QLabel("Модель сохраняется в ~/.cache/whisper и остаётся между перезапусками программы")
+        self._info_lbl.setFont(_apple_font(11))
+        self._info_lbl.setStyleSheet("color: #7888aa;")
+        self._info_lbl.setWordWrap(True)
+        layout.addWidget(self._info_lbl)
+
+        self._cancel_btn = QtWidgets.QPushButton("Отмена")
+        self._cancel_btn.setFixedHeight(36)
+        self._cancel_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        layout.addWidget(self._cancel_btn)
+
+        self._cancelled = False
+        self._thread = None
+        QtCore.QTimer.singleShot(100, self._start_download)
+
+    def _start_download(self):
+        import threading
+        self._thread = threading.Thread(target=self._do_download, daemon=True)
+        self._thread.start()
+
+    def _do_download(self):
+        try:
+            QtCore.QMetaObject.invokeMethod(self, "_set_status",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(str, "Скачиваю модель Whisper base (~150 MB)…"))
+            import whisper
+            import os
+            # Whisper сам скачивает в ~/.cache/whisper при load_model
+            # Это постоянный кэш — не удаляется при закрытии программы
+            model = whisper.load_model("base")
+            if self._cancelled:
+                return
+            QtCore.QMetaObject.invokeMethod(self, "_on_done",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(bool, True),
+                QtCore.Q_ARG(str, "✅ Whisper base успешно скачан"))
+        except ImportError:
+            QtCore.QMetaObject.invokeMethod(self, "_on_done",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(bool, False),
+                QtCore.Q_ARG(str, "Whisper не установлен. Выполните: pip install openai-whisper"))
+        except Exception as e:
+            QtCore.QMetaObject.invokeMethod(self, "_on_done",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(bool, False),
+                QtCore.Q_ARG(str, f"Ошибка: {e}"))
+
+    @QtCore.pyqtSlot(str)
+    def _set_status(self, text: str):
+        self._status_lbl.setText(text)
+
+    @QtCore.pyqtSlot(bool, str)
+    def _on_done(self, success: bool, msg: str):
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1 if success else 0)
+        self._status_lbl.setText(msg)
+        self._cancel_btn.setText("Закрыть")
+        self.download_finished.emit(success, msg)
+        if success:
+            QtCore.QTimer.singleShot(2000, self.accept)
+
+    def _on_cancel(self):
+        self._cancelled = True
+        self.reject()
+
+
+class VoiceRecorder(QtCore.QObject):
+    """
+    Умная запись голоса + транскрипция.
+    - Автоопределение языка (Whisper локально или Google multi-lang)
+    - Детектирование музыки / шума — не транскрибирует не-речь
+    - VAD: обрезает тишину в начале и конце
+    - Авто-стоп после 2 сек тишины
+    - level_updated(float 0..1) для плавной анимации
+    - status_updated(str) для статусной строки
+    """
+    recording_started  = QtCore.pyqtSignal()
+    recording_stopped  = QtCore.pyqtSignal()
+    transcription_done = QtCore.pyqtSignal(str)
+    error_occurred     = QtCore.pyqtSignal(str)
+    level_updated      = QtCore.pyqtSignal(float)
+    status_updated     = QtCore.pyqtSignal(str)
+
+    SAMPLE_RATE   = 16000
+    CHANNELS      = 1
+    CHUNK_SEC     = 0.05      # 50 мс — маленький чанк для плавного уровня
+    SILENCE_SEC   = 3.0       # авто-стоп после N сек тишины (больше для нечёткой речи)
+    MIN_REC_SEC   = 0.3       # минимальная длина для транскрипции
+
+    # Пороги RMS (int16) — снижены чтобы ловить тихую и нечёткую речь
+    RMS_SILENCE   = 90        # ниже = точно тишина (было 180)
+    RMS_SPEECH    = 250       # выше = есть речь (было 400)
+
+    # Языки для Google (приоритет: вверх списка важнее)
+    GOOGLE_LANGS  = ["ru-RU", "en-US", "uk-UA", "de-DE",
+                     "fr-FR", "es-ES", "zh-CN", "ja-JP",
+                     "ko-KR", "it-IT", "pt-BR", "pl-PL"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._recording  = False
+        self._frames     = []
+        self._stop_event = threading.Event()
+        self._lock       = threading.Lock()
+        # Кеш: проверяем движки один раз
+        self._has_whisper = self._check_whisper()
+        self._has_google  = self._check_google()
+        print(f"[VOICE] Whisper={'✓' if self._has_whisper else '✗'}  "
+              f"Google={'✓' if self._has_google else '✗'}  "
+              f"sounddevice={'✓' if _VOICE_AVAILABLE else '✗'}")
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def start(self):
-        if not _VOICE_AVAILABLE or not _SR_AVAILABLE:
+        if not _VOICE_AVAILABLE:
             self.error_occurred.emit(
-                "Для голосового ввода установите:\n"
-                "pip install sounddevice SpeechRecognition numpy"
+                "Установите:\npip install sounddevice numpy"
             )
             return
-        if self._recording:
+        if not self._has_whisper and not self._has_google:
+            self.error_occurred.emit(
+                "Нет движка распознавания.\n"
+                "Установите один из:\n"
+                "  pip install openai-whisper   ← рекомендуется\n"
+                "  pip install SpeechRecognition"
+            )
             return
-        self._recording  = True
-        self._frames     = []
+        with self._lock:
+            if self._recording:
+                return
+            self._recording = True
+            self._frames    = []
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._record_loop, daemon=True)
-        self._thread.start()
+        threading.Thread(target=self._record_loop, daemon=True).start()
         self.recording_started.emit()
 
-    # ── Остановка записи ─────────────────────────────────────────────────────
     def stop(self):
-        if not self._recording:
-            return
-        self._recording = False
-        self._stop_event.set()
-
-    # ── Поток записи ─────────────────────────────────────────────────────────
-    def _record_loop(self):
-        try:
-            # Записываем чанками по 0.1 сек пока не придёт stop
-            chunk_size = int(self.SAMPLE_RATE * 0.1)
-            with _sd.InputStream(
-                samplerate=self.SAMPLE_RATE,
-                channels=self.CHANNELS,
-                dtype="int16",
-                blocksize=chunk_size,
-            ) as stream:
-                while not self._stop_event.is_set():
-                    data, _ = stream.read(chunk_size)
-                    self._frames.append(data.copy())
-
-            self.recording_stopped.emit()
-
-            if not self._frames:
-                self.error_occurred.emit("Нет аудио для распознавания")
+        with self._lock:
+            if not self._recording:
                 return
-
-            # Объединяем все чанки
-            audio_data = _np.concatenate(self._frames, axis=0).flatten()
-            self._transcribe(audio_data)
-
-        except Exception as e:
-            self._recording = False
-            self.error_occurred.emit(f"Ошибка записи: {e}")
-
-    # ── Транскрипция ─────────────────────────────────────────────────────────
-    def _transcribe(self, audio_np: Any):
-        try:
-            import io, wave, struct
-
-            # Конвертируем numpy int16 → WAV bytes
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(self.CHANNELS)
-                wf.setsampwidth(2)   # int16 = 2 bytes
-                wf.setframerate(self.SAMPLE_RATE)
-                wf.writeframes(audio_np.tobytes())
-            buf.seek(0)
-
-            recognizer = _sr.Recognizer()
-            with _sr.AudioFile(buf) as source:
-                audio = recognizer.record(source)
-
-            # Google Web Speech API — бесплатно, без ключа
-            text = recognizer.recognize_google(audio, language="ru-RU")
-            self.transcription_done.emit(text)
-
-        except _sr.UnknownValueError:
-            self.error_occurred.emit("Речь не распознана — попробуйте ещё раз")
-        except _sr.RequestError as e:
-            self.error_occurred.emit(f"Ошибка сети: {e}")
-        except Exception as e:
-            self.error_occurred.emit(f"Ошибка распознавания: {e}")
+        self._stop_event.set()
 
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    # ── Поток записи ─────────────────────────────────────────────────────────
+
+    def _record_loop(self):
+        import math as _math
+        chunk_size     = int(self.SAMPLE_RATE * self.CHUNK_SEC)
+        silence_chunks = int(self.SILENCE_SEC / self.CHUNK_SEC)
+        silent_count   = 0
+        has_speech     = False
+        start_time     = __import__('time').time()
+        smooth_level   = 0.0
+
+        try:
+            with _sd.InputStream(samplerate=self.SAMPLE_RATE,
+                                  channels=self.CHANNELS,
+                                  dtype="int16",
+                                  blocksize=chunk_size) as stream:
+                self.status_updated.emit("🔴 Говорите…")
+                while not self._stop_event.is_set():
+                    data, _ = stream.read(chunk_size)
+                    chunk   = data.copy().flatten()
+                    with self._lock:
+                        self._frames.append(chunk)
+
+                    # RMS → уровень 0..1 с экспоненциальным сглаживанием
+                    sq  = _np.mean(chunk.astype(_np.float32) ** 2)
+                    rms = _math.sqrt(max(float(sq), 0.0))
+                    raw_level   = min(rms / 3000.0, 1.0)
+                    smooth_level = smooth_level * 0.6 + raw_level * 0.4
+                    self.level_updated.emit(smooth_level)
+
+                    # VAD: трекинг тишины
+                    if rms > self.RMS_SPEECH:
+                        has_speech   = True
+                        silent_count = 0
+                    elif rms < self.RMS_SILENCE:
+                        silent_count += 1
+                    else:
+                        silent_count = max(silent_count - 1, 0)
+
+                    # Авто-стоп по тишине (только после начала речи)
+                    elapsed = __import__('time').time() - start_time
+                    if (has_speech
+                            and silent_count >= silence_chunks
+                            and elapsed >= self.MIN_REC_SEC + self.SILENCE_SEC):
+                        self.status_updated.emit("⏹ Молчание — останавливаю…")
+                        break
+
+        except Exception as e:
+            with self._lock:
+                self._recording = False
+            self.level_updated.emit(0.0)
+            self.error_occurred.emit(f"Ошибка записи: {e}")
+            return
+
+        with self._lock:
+            self._recording = False
+        self.level_updated.emit(0.0)
+        self.recording_stopped.emit()
+
+        # Собираем буфер
+        with self._lock:
+            frames = list(self._frames)
+        if not frames:
+            self.error_occurred.emit("Нет аудио — попробуйте ещё раз")
+            return
+
+        audio = _np.concatenate(frames, axis=0)
+        dur   = len(audio) / self.SAMPLE_RATE
+        if dur < self.MIN_REC_SEC:
+            self.error_occurred.emit("Запись слишком короткая — попробуйте ещё раз")
+            return
+
+        # Детектирование музыки / шума
+        if self._is_music_or_noise(audio):
+            self.error_occurred.emit(
+                "Обнаружен фоновый шум или музыка.\n"
+                "Попробуйте говорить чётче или уменьшите громкость фона."
+            )
+            return
+
+        # VAD: обрезаем тишину по краям
+        audio = self._vad_trim(audio)
+        if len(audio) < self.SAMPLE_RATE * self.MIN_REC_SEC:
+            self.error_occurred.emit("Речь не обнаружена — попробуйте ещё раз")
+            return
+
+        self.status_updated.emit("⏳ Распознаю речь…")
+        self._transcribe(audio)
+
+    # ── Анализ аудио ─────────────────────────────────────────────────────────
+
+    def _is_music_or_noise(self, audio: Any) -> bool:
+        """
+        Определяет явную инструментальную музыку без голоса.
+        Намеренно консервативная — лучше пропустить шум, чем заблокировать речь.
+        НЕ блокирует: пение, нечёткую речь, речь с фоновой музыкой, акценты.
+        Блокирует ТОЛЬКО: чистый инструментал (нет речевой энергии) + очень стабильный.
+        """
+        import math as _math
+        try:
+            sig = audio.astype(_np.float32)
+            seg = sig[:self.SAMPLE_RATE]
+            if len(seg) < self.SAMPLE_RATE // 3:
+                return False   # слишком мало данных — не блокировать
+
+            fft  = _np.abs(_np.fft.rfft(seg))
+            freq = _np.fft.rfftfreq(len(seg), 1.0 / self.SAMPLE_RATE)
+
+            # Проверяем долю энергии в широком речевом диапазоне 80–5000 Гц
+            m     = (freq >= 80) & (freq <= 5000)
+            total = float(_np.sum(fft)) + 1e-9
+            ratio = float(_np.sum(fft[m])) / total
+
+            # Если речевой диапазон занят — это речь (или пение), не блокируем
+            if ratio >= 0.25:
+                return False
+
+            # Только при очень низкой речевой энергии проверяем тональность
+            fft_s = fft.copy(); fft_s[~m] = 0
+            top = sorted(range(len(fft_s)), key=lambda i: -fft_s[i])[:20]
+            clean, used = [], set()
+            for p in sorted(top, key=lambda i: -fft_s[i]):
+                if all(abs(p - u) >= 5 for u in used):
+                    clean.append(p); used.add(p)
+                if len(clean) >= 6: break
+
+            if len(clean) < 2:
+                return False
+
+            pf   = [freq[i] for i in clean]
+            base = pf[0]
+            if base < 60:
+                return False
+
+            harm = sum(1 for f in pf[1:] if abs((f / base) - round(f / base)) < 0.10)
+            harm_ratio = harm / max(len(pf) - 1, 1)
+
+            # Стабильность: музыка = ровная огибающая, речь/пение = резкая
+            ch = int(self.SAMPLE_RATE * 0.1)
+            rms_v = [
+                _math.sqrt(max(float(_np.mean(sig[i:i+ch].astype(_np.float32)**2)), 0))
+                for i in range(0, len(sig) - ch, ch)
+            ]
+            if len(rms_v) > 2:
+                mu = sum(rms_v) / len(rms_v) + 1e-9
+                cv = _math.sqrt(sum((x - mu)**2 for x in rms_v) / len(rms_v)) / mu
+            else:
+                cv = 1.0
+
+            # Блокируем только ОЧЕНЬ тональный + очень стабильный + нет речи
+            return harm_ratio > 0.85 and cv < 0.22
+
+        except Exception:
+            return False   # при любой ошибке — не блокировать
+
+    def _vad_trim(self, audio: Any) -> Any:
+        """Обрезает только явную тишину по краям. Консервативно — не режет тихую речь."""
+        trim_thr = max(50, self.RMS_SILENCE * 0.55)  # намного ниже основного порога
+        chunk    = int(self.SAMPLE_RATE * 0.05)
+        rms_vals = []
+        for i in range(0, len(audio), chunk):
+            sq = _np.mean(audio[i:i+chunk].astype(_np.float32)**2)
+            rms_vals.append(float(sq) ** 0.5)
+        first = next((i for i, r in enumerate(rms_vals) if r > trim_thr), None)
+        last  = next((i for i, r in reversed(list(enumerate(rms_vals))) if r > trim_thr), None)
+        if first is None or last is None:
+            return audio
+        # Большой запас: ±8 чанков (400 мс) — не обрезаем начало/конец фразы
+        s = max(0, (first - 8) * chunk)
+        e = min(len(audio), (last + 9) * chunk)
+        return audio[s:e]
+
+    # ── Транскрипция ─────────────────────────────────────────────────────────
+
+    def _transcribe(self, audio: Any):
+        if self._has_whisper:
+            self._transcribe_whisper(audio)
+        elif self._has_google:
+            self._transcribe_google(audio)
+        else:
+            self.error_occurred.emit("Нет движка распознавания")
+
+    # Кэш модели Whisper в памяти — грузим один раз за сессию
+    _whisper_model_cache = None
+
+    def _transcribe_whisper(self, audio: Any):
+        """
+        Whisper — локальный, автоопределение языка.
+        Модель кэшируется в памяти (_whisper_model_cache) и на диске
+        (~/.cache/whisper) — не скачивается повторно между запусками.
+        """
+        try:
+            import whisper, ssl, urllib.request as _ur
+
+            # Если модель ещё не загружена в память
+            if VoiceRecorder._whisper_model_cache is None:
+                self.status_updated.emit("⏳ Загрузка Whisper…")
+                _orig_ctx = ssl._create_default_https_context
+                ssl._create_default_https_context = ssl._create_unverified_context
+                _orig_opener = _ur.build_opener(
+                    _ur.HTTPSHandler(context=ssl._create_unverified_context()))
+                _ur.install_opener(_orig_opener)
+                try:
+                    # load_model читает из ~/.cache/whisper если уже скачано,
+                    # иначе скачивает и кэширует там же автоматически
+                    VoiceRecorder._whisper_model_cache = whisper.load_model("base")
+                    print("[VOICE] Whisper base загружен в память")
+                finally:
+                    ssl._create_default_https_context = _orig_ctx
+
+            model = VoiceRecorder._whisper_model_cache
+            self.status_updated.emit("🎤 Распознаю…")
+
+            af32 = audio.astype(_np.float32) / 32768.0
+            result = model.transcribe(af32, fp16=False)
+            text = (result.get("text") or "").strip()
+            lang = result.get("language", "?")
+            print(f"[VOICE] Whisper: lang={lang} text={text[:60]}")
+            if text:
+                self.status_updated.emit(f"✅ Язык: {lang}")
+                self.transcription_done.emit(text)
+            else:
+                if self._has_google:
+                    self._transcribe_google(audio)
+                else:
+                    self.error_occurred.emit("Речь не распознана")
+        except ImportError:
+            self._has_whisper = False
+            if self._has_google:
+                self._transcribe_google(audio)
+            else:
+                self.error_occurred.emit("Whisper недоступен; установите SpeechRecognition")
+        except Exception as e:
+            self.error_occurred.emit(f"Whisper ошибка: {e}")
+
+    def _transcribe_google(self, audio: Any):
+        """Google Web Speech — пробует несколько языков по очереди."""
+        try:
+            import io, wave
+            import speech_recognition as sr_lib
+
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(self.CHANNELS)
+                wf.setsampwidth(2)
+                wf.setframerate(self.SAMPLE_RATE)
+                wf.writeframes(audio.tobytes())
+            buf.seek(0)
+
+            rec = sr_lib.Recognizer()
+            rec.energy_threshold         = 100   # было 300 — ловим тихую речь
+            rec.dynamic_energy_threshold = True
+            rec.pause_threshold          = 1.2
+            with sr_lib.AudioFile(buf) as src:
+                aud = rec.record(src)
+
+            best_text, best_conf, best_lang = "", -1.0, ""
+
+            for lang in self.GOOGLE_LANGS:
+                try:
+                    # show_all=True возвращает варианты с confidence
+                    result = rec.recognize_google(aud, language=lang, show_all=True)
+                    if not result:
+                        continue
+                    alts = result.get('alternative', []) if isinstance(result, dict) else []
+                    if not alts:
+                        continue
+                    text = alts[0].get('transcript', '')
+                    conf = float(alts[0].get('confidence', 0.5))
+                    if text and conf > best_conf:
+                        best_conf, best_text, best_lang = conf, text, lang
+                    if best_conf >= 0.88:   # достаточно уверен — не продолжаем
+                        break
+                except sr_lib.UnknownValueError:
+                    continue
+                except sr_lib.RequestError as e:
+                    self.error_occurred.emit(f"Ошибка сети: {e}")
+                    return
+
+            if best_text:
+                print(f"[VOICE] Google: lang={best_lang} conf={best_conf:.2f} text={best_text[:60]}")
+                self.status_updated.emit(f"✅ {best_lang}")
+                self.transcription_done.emit(best_text)
+            else:
+                self.error_occurred.emit(
+                    "Речь не распознана.\n"
+                    "Совет: pip install openai-whisper — лучше работает офлайн."
+                )
+        except ImportError:
+            self.error_occurred.emit("pip install SpeechRecognition")
+        except Exception as e:
+            self.error_occurred.emit(f"Ошибка распознавания: {e}")
+
+    # ── Проверка движков ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _check_whisper() -> bool:
+        try: import whisper; return True       # noqa
+        except ImportError: return False
+
+    @staticmethod
+    def _check_google() -> bool:
+        try: import speech_recognition; return True   # noqa
+        except ImportError: return False
 
 
 class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
@@ -4827,13 +5642,25 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.sidebar.move(-SIDEBAR_W, 0)   # за левым краем — невидим
         self.sidebar.raise_()              # поверх всего
 
-        # ── Тень sidebar (даёт глубину overlay-drawer) ──────────────────────
-        _sb_shadow = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
-        _sb_shadow.setBlurRadius(28)
-        _sb_shadow.setOffset(6, 0)          # только вправо — панель слева
-        _sb_shadow.setColor(QtGui.QColor(0, 0, 0, 55))
-        self.sidebar.setGraphicsEffect(_sb_shadow)
-        self._sb_shadow_effect = _sb_shadow  # сохраняем чтобы не потерять
+        # ── Тень sidebar — отдельный виджет-градиент справа от панели ────────
+        # QGraphicsDropShadowEffect нельзя совмещать с QGraphicsOpacityEffect
+        # (Qt поддерживает только один graphicsEffect на виджет).
+        # Решение: узкий QLabel с градиентом от чёрного к прозрачному.
+        SHADOW_W = 22
+        self._sb_shadow_widget = QtWidgets.QLabel(main_container)
+        self._sb_shadow_widget.setObjectName("sidebarShadow")
+        self._sb_shadow_widget.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self._sb_shadow_widget.setStyleSheet(
+            "background: qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 rgba(0,0,0,55), stop:1 rgba(0,0,0,0));"
+            "border:none;"
+        )
+        # Изначально скрыт вместе с sidebar (за левым краем)
+        self._sb_shadow_widget.setGeometry(-SHADOW_W, 0, SHADOW_W, 400)
+        self._sb_shadow_widget.hide()
 
         sidebar_layout = QtWidgets.QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(0, 12, 0, 0)
@@ -5175,6 +6002,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self._voice.recording_stopped.connect(self._on_recording_stopped)
         self._voice.transcription_done.connect(self._on_transcription_done)
         self._voice.error_occurred.connect(self._on_voice_error)
+        self._voice.level_updated.connect(self._on_voice_level)
+        self._voice.status_updated.connect(self._on_voice_status)
 
         # Кнопка выбора режима AI (новая)
         self.mode_btn = NoFocusButton(self.ai_mode)
@@ -5537,6 +6366,10 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             is_open = getattr(self, '_sidebar_open', False)
             x = 0 if is_open else -W
             self.sidebar.setGeometry(x, 0, W, h)
+            # Shadow widget — справа от sidebar, та же высота
+            if hasattr(self, '_sb_shadow_widget'):
+                sw = self._sb_shadow_widget
+                sw.setGeometry(x + W, 0, 22, h)
 
         # ✅ Dim overlay — всегда занимает весь main_container
         if hasattr(self, '_dim_overlay') and hasattr(self, 'main_container'):
@@ -6290,159 +7123,169 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     # ГОЛОСОВОЙ ВВОД
     # ══════════════════════════════════════════════════════════════════════
 
+    # ══════════════════════════════════════════════════════════════════════
+    # ГОЛОСОВОЙ ВВОД — UI
+    # ══════════════════════════════════════════════════════════════════════
+
     def _toggle_voice(self):
         """Нажатие кнопки микрофона: старт / стоп записи."""
-        if not _VOICE_AVAILABLE:
-            QtWidgets.QMessageBox.warning(
-                self, "Голосовой ввод недоступен",
-                "Установите зависимости:\n\npip install sounddevice speechrecognition numpy\n\nЗатем перезапустите программу."
-            )
-            return
-
-        if not self._voice_recording:
-            self._start_voice()
-        else:
-            self._stop_voice()
-
-    def _start_voice(self):
-        """Начало записи."""
-        self._voice_recording = True
-        self._voice_level     = 0.0
-        self._voice_anim_phase = 0
-        self.input_field.setPlaceholderText("🔴 Говорите… (нажмите ещё раз для остановки)")
-        self.input_field.setEnabled(False)
-        self.mic_btn.setObjectName("micBtnInline")
-        self.mic_btn.setText("⏹")
-        self.mic_btn.setStyleSheet(
-            "QPushButton { background: rgba(200,40,40,0.75); "
-            "border: none; border-radius: 22px; font-size: 20px; color: white; outline: none; }"
-        )
-        self._voice_anim_timer.start()
-        self._voice_recorder.start()
-
-    def _stop_voice(self):
-        """Остановка записи — запускает транскрипцию."""
-        if not self._voice_recording:
-            return
-        self._voice_recording = False
-        self._voice_anim_timer.stop()
-        self._voice_recorder.stop()
-        self.mic_btn.setText("⏳")
-        self.mic_btn.setObjectName("micBtnInline")
-        self.mic_btn.setStyleSheet(
-            "QPushButton { background: rgba(120,90,200,0.6); "
-            "border: none; border-radius: 22px; font-size: 20px; color: white; outline: none; }"
-        )
-        self.input_field.setPlaceholderText("Распознаю речь…")
-
-    def _on_voice_text(self, text: str):
-        """Транскрипция получена — вставляем в поле ввода."""
-        self.input_field.setEnabled(True)
-        self.input_field.setText(text)
-        self.input_field.setFocus()
-        self.input_field.setPlaceholderText("Введите сообщение...")
-        self._reset_mic_btn()
-        # Курсор в конец
-        self.input_field.setCursorPosition(len(text))
-
-    def _on_voice_error(self, msg: str):
-        """Ошибка голосового ввода."""
-        self.input_field.setEnabled(True)
-        self.input_field.setPlaceholderText("Введите сообщение...")
-        self._voice_recording = False
-        self._voice_anim_timer.stop()
-        self._reset_mic_btn()
-        # Показываем ошибку в статусе если есть
-        if hasattr(self, 'status_label'):
-            self.status_label.setText(f"🎙 {msg}")
-            QtCore.QTimer.singleShot(4000, lambda: self.status_label.setText(""))
-
-    def _on_voice_level(self, level: float):
-        """Обновляем уровень громкости для анимации."""
-        self._voice_level = level
-
-    def _voice_anim_tick(self):
-        """Анимация кнопки микрофона во время записи — пульсация по уровню звука."""
-        self._voice_anim_phase += 1
-        level = self._voice_level
-        # Интенсивность цвета зависит от уровня звука
-        r = int(200 + 55 * level)
-        g = int(30  * (1 - level))
-        b = int(30  * (1 - level))
-        a = 0.7 + 0.3 * level
-        self.mic_btn.setStyleSheet(
-            f"QPushButton {{ background: rgba({r},{g},{b},{a:.2f}); "
-            f"border: none; "
-            f"border-radius: 22px; font-size: 20px; color: white; outline: none; }}"
-        )
-
-    def _reset_mic_btn(self):
-        """Возвращает кнопку микрофона в исходное состояние."""
-        self.mic_btn.setText("🎤")
-        self.mic_btn.setObjectName("micBtnInline")
-        self.mic_btn.setStyleSheet("")  # вернуть к теме
-        self.mic_btn.style().unpolish(self.mic_btn)
-        self.mic_btn.style().polish(self.mic_btn)
-
-    def eventFilter(self, obj, event):
-        """Перехватываем Space в поле ввода чтобы остановить запись."""
-        if (obj is self.input_field
-                and self._voice_recording
-                and event.type() == QtCore.QEvent.Type.KeyPress):
-            if event.key() == QtCore.Qt.Key.Key_Space:
-                self._stop_voice()
-                return True  # поглощаем Space
-        return super().eventFilter(obj, event)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # ГОЛОСОВОЙ ВВОД
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _toggle_voice(self):
-        """Нажатие на микрофон: старт/стоп записи."""
         if self._voice.is_recording:
             self._voice.stop()
         else:
-            self.input_field.setPlaceholderText("🔴 Говорите… (нажмите 🎤 для остановки)")
             self._voice.start()
 
+    # ── Сигналы от VoiceRecorder ──────────────────────────────────────────
+
+    def _on_recording_started(self):
+        """Запись началась."""
+        self._voice_recording = True
+        self._mic_smooth_level = 0.0
+        self._mic_anim_phase   = 0
+
+        self.mic_btn.setText("⏹")
+        self.mic_btn.setChecked(True)
+        self.mic_btn.setToolTip("Остановить запись")
+        self.input_field.setPlaceholderText("🔴 Говорите… (нажмите ⏹ для остановки)")
+        self.input_field.setEnabled(False)
+
+        # Запускаем таймер анимации
+        if not hasattr(self, '_mic_anim_timer'):
+            self._mic_anim_timer = QtCore.QTimer(self)
+            self._mic_anim_timer.setInterval(40)   # 25 fps
+            self._mic_anim_timer.timeout.connect(self._mic_anim_tick)
+        self._mic_anim_timer.start()
+
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("🔴 Запись…")
+
+    def _on_recording_stopped(self):
+        """Запись остановлена, начинается транскрипция."""
+        self._voice_recording = False
+        if hasattr(self, '_mic_anim_timer'):
+            self._mic_anim_timer.stop()
+        self.level_updated_emit(0.0)
+
+        self.mic_btn.setText("⏳")
+        self.mic_btn.setChecked(False)
+        self.mic_btn.setToolTip("Распознавание…")
+        self.input_field.setPlaceholderText("⏳ Распознаю речь…")
+        # Фиолетовый цвет «обработка»
+        self._mic_apply_color(120, 80, 200, 0.65)
+
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("⏳ Распознавание речи…")
+
+    def _on_transcription_done(self, text: str):
+        """Текст готов — вставляем в поле ввода."""
+        self.input_field.setEnabled(True)
+        current = self.input_field.text().strip()
+        self.input_field.setText((current + " " + text).strip() if current else text)
+        self.input_field.setFocus()
+        self.input_field.setCursorPosition(len(self.input_field.text()))
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self._reset_mic_btn()
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("")
+        print(f"[VOICE] Распознано: {text}")
+
+    def _on_voice_error(self, message: str):
+        """Ошибка записи или распознавания."""
+        self._voice_recording = False
+        if hasattr(self, '_mic_anim_timer'):
+            self._mic_anim_timer.stop()
+        self.input_field.setEnabled(True)
+        self.input_field.setPlaceholderText("Введите сообщение...")
+        self._reset_mic_btn()
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(f"⚠️ {message}")
+            QtCore.QTimer.singleShot(5000, lambda: (
+                self.status_label.setText("") if hasattr(self, 'status_label') else None
+            ))
+        print(f"[VOICE] Ошибка: {message}")
+
+    def _on_voice_level(self, level: float):
+        """Обновляем сглаженный уровень громкости (уже сглажен в VoiceRecorder)."""
+        self._mic_smooth_level = level
+
+    def _on_voice_status(self, status: str):
+        """Текстовый статус от VoiceRecorder."""
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(status)
+            if status.startswith("✅"):
+                QtCore.QTimer.singleShot(3000, lambda: (
+                    self.status_label.setText("") if hasattr(self, 'status_label') else None
+                ))
+
+    # ── Анимация кнопки ───────────────────────────────────────────────────
+
+    def _mic_anim_tick(self):
+        """
+        Пульсация кнопки во время записи.
+        Сочетает уровень голоса + медленную синусоиду — без дёрганья.
+        """
+        import math
+        self._mic_anim_phase = (getattr(self, '_mic_anim_phase', 0) + 1) % 360
+        level = getattr(self, '_mic_smooth_level', 0.0)
+
+        # Тихая пульсация базового ритма + всплески от голоса
+        pulse    = 0.5 + 0.5 * math.sin(math.radians(self._mic_anim_phase * 3))
+        combined = level * 0.75 + pulse * 0.25
+
+        r = int(185 + 70  * combined)
+        g = int(15  + 10  * (1 - combined))
+        b = int(15  + 10  * (1 - combined))
+        a = 0.62 + 0.38 * combined
+        self._mic_apply_color(r, g, b, a)
+
+    def _mic_apply_color(self, r: int, g: int, b: int, a: float):
+        """Применяет rgba-цвет к кнопке микрофона."""
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        a = max(0.0, min(1.0, a))
+        self.mic_btn.setStyleSheet(
+            f"QPushButton {{"
+            f" background: rgba({r},{g},{b},{a:.2f});"
+            f" border: none; border-radius: 22px;"
+            f" font-size: 20px; color: white; outline: none;"
+            f"}}"
+        )
+
+    def level_updated_emit(self, _level: float):
+        """Заглушка для совместимости — уровень сбрасывается в 0."""
+        self._mic_smooth_level = 0.0
+
+    def _reset_mic_btn(self):
+        """Возвращает кнопку в исходное состояние (тема)."""
+        self.mic_btn.setText("🎤")
+        self.mic_btn.setChecked(False)
+        self.mic_btn.setToolTip("Голосовой ввод")
+        self.mic_btn.setStyleSheet("")
+        try:
+            self.mic_btn.style().unpolish(self.mic_btn)
+            self.mic_btn.style().polish(self.mic_btn)
+        except Exception:
+            pass
+
     def keyPressEvent(self, event):
-        """Пробел во время записи — останавливает её."""
+        """Пробел во время записи — останавливает запись."""
         if event.key() == QtCore.Qt.Key.Key_Space and self._voice.is_recording:
             self._voice.stop()
             event.accept()
             return
         super().keyPressEvent(event)
 
-    def _on_recording_started(self):
-        self.mic_btn.setChecked(True)
-        self.mic_btn.setText("⏹")
-        self.mic_btn.setToolTip("Остановить запись")
-        self.status_label.setText("🔴 Запись...")
+    def eventFilter(self, obj, event):
+        """Перехватываем Escape в поле ввода для остановки записи."""
+        if (obj is self.input_field
+                and getattr(self, '_voice_recording', False)
+                and event.type() == QtCore.QEvent.Type.KeyPress
+                and event.key() == QtCore.Qt.Key.Key_Escape):
+            self._voice.stop()
+            return True
+        return super().eventFilter(obj, event)
 
-    def _on_recording_stopped(self):
-        self.mic_btn.setChecked(False)
-        self.mic_btn.setText("🎤")
-        self.input_field.setPlaceholderText("Введите сообщение...")
-        self.status_label.setText("⏳ Распознавание речи...")
 
-    def _on_transcription_done(self, text: str):
-        current = self.input_field.text().strip()
-        if current:
-            self.input_field.setText(current + " " + text)
-        else:
-            self.input_field.setText(text)
-        self.input_field.setFocus()
-        self.status_label.setText("")
-        print(f"[VOICE] Распознано: {text}")
-
-    def _on_voice_error(self, message: str):
-        self.mic_btn.setChecked(False)
-        self.mic_btn.setText("🎤")
-        self.input_field.setPlaceholderText("Введите сообщение...")
-        self.status_label.setText(f"⚠️ {message}")
-        QtCore.QTimer.singleShot(4000, lambda: self.status_label.setText(""))
-        print(f"[VOICE] Ошибка: {message}")
 
     def _save_first_launch_flag(self):
         """Сохраняет флаг first_launch_done = True."""
@@ -7037,7 +7880,32 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         sep2.setStyleSheet(f"background: {sep_col}; border: none;")
         cl.addWidget(sep2)
 
-        cl.addSpacing(12)
+        cl.addSpacing(8)
+
+        # ── Кнопка «Дополнительные» ──────────────────────────────────
+        extra_btn = QtWidgets.QPushButton("⬇  Дополнительные")
+        extra_btn.setFixedHeight(36)
+        extra_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        extra_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        extra_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {close_col};
+                border: 1px solid {sep_col};
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 500;
+                padding: 0 18px;
+            }}
+            QPushButton:hover {{
+                color: {close_hover};
+                border: 1px solid rgba(102, 126, 234, 0.40);
+                background: rgba(102, 126, 234, 0.07);
+            }}
+        """)
+        cl.addWidget(extra_btn, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        cl.addSpacing(8)
 
         # ── Кнопка «Закрыть» ─────────────────────────────────────────
         close_btn = QtWidgets.QPushButton("Закрыть")
@@ -7069,34 +7937,50 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dialog.setWindowOpacity(0.0)
         dialog.show()
 
-        # Slide-up карточки через QGraphicsOpacityEffect + смещение
-        card_effect = QtWidgets.QGraphicsOpacityEffect(card)
-        card.setGraphicsEffect(card_effect)
-        card_effect.setOpacity(0.0)
-
-        # Анимация прозрачности оверлея
+        # ── Overlay fade ────────────────────────────────────────────────────
         _fade_overlay = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
-        _fade_overlay.setDuration(220)
+        _fade_overlay.setDuration(240)
         _fade_overlay.setStartValue(0.0)
         _fade_overlay.setEndValue(1.0)
         _fade_overlay.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
-        # Анимация появления карточки
+        # ── Карточка: opacity + slide-up ────────────────────────────────────
+        card_effect = QtWidgets.QGraphicsOpacityEffect(card)
+        card.setGraphicsEffect(card_effect)
+        card_effect.setOpacity(0.0)
+
         _fade_card = QtCore.QPropertyAnimation(card_effect, b"opacity")
-        _fade_card.setDuration(260)
+        _fade_card.setDuration(300)
         _fade_card.setStartValue(0.0)
         _fade_card.setEndValue(1.0)
         _fade_card.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
+        # Slide-up: карточка стартует на 32px ниже
+        _card_start_pos = card.pos()
+        _card_start_low = QtCore.QPoint(_card_start_pos.x(), _card_start_pos.y() + 32)
+        card.move(_card_start_low)
+
+        _slide_card = QtCore.QPropertyAnimation(card, b"pos")
+        _slide_card.setDuration(340)
+        _slide_card.setStartValue(_card_start_low)
+        _slide_card.setEndValue(_card_start_pos)
+        _slide_card.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
         _anim_group_in = QtCore.QParallelAnimationGroup()
         _anim_group_in.addAnimation(_fade_overlay)
         _anim_group_in.addAnimation(_fade_card)
+        _anim_group_in.addAnimation(_slide_card)
 
         def _on_open_done():
-            card.setGraphicsEffect(None)
+            try:
+                card.setGraphicsEffect(None)
+                card.move(_card_start_pos)
+            except RuntimeError:
+                pass
 
         _anim_group_in.finished.connect(_on_open_done)
         dialog._open_anim = _anim_group_in
+        dialog._card_start_pos = _card_start_pos
         _anim_group_in.start()
 
         # ═══════════════════════════════════════════════════════════════
@@ -7112,21 +7996,30 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             card.setGraphicsEffect(close_eff)
             close_eff.setOpacity(1.0)
 
+            cur_pos = card.pos()
             _co = QtCore.QPropertyAnimation(close_eff, b"opacity")
-            _co.setDuration(180)
+            _co.setDuration(200)
             _co.setStartValue(1.0)
             _co.setEndValue(0.0)
             _co.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
 
             _fo = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
-            _fo.setDuration(200)
+            _fo.setDuration(220)
             _fo.setStartValue(dialog.windowOpacity())
             _fo.setEndValue(0.0)
             _fo.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
 
+            # Slide-down при закрытии
+            _sc = QtCore.QPropertyAnimation(card, b"pos")
+            _sc.setDuration(220)
+            _sc.setStartValue(cur_pos)
+            _sc.setEndValue(QtCore.QPoint(cur_pos.x(), cur_pos.y() + 24))
+            _sc.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
             _group = QtCore.QParallelAnimationGroup()
             _group.addAnimation(_co)
             _group.addAnimation(_fo)
+            _group.addAnimation(_sc)
 
             def _on_close_done():
                 card.setGraphicsEffect(None)
@@ -7268,8 +8161,392 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         deepseek_r1_btn.clicked.connect(_select_deepseek_r1)
         mistral_btn.clicked.connect(_select_mistral)
         qwen_btn.clicked.connect(_select_qwen)
+        def _open_extra():
+            # Закрываем текущий диалог без callback-цепочки,
+            # затем открываем новый через QTimer — избегаем двойного exec()
+            _fade_and_close()
+            QtCore.QTimer.singleShot(260, self._show_extra_models_dialog)
+        extra_btn.clicked.connect(_open_extra)
 
         dialog.exec()
+
+    def _show_extra_models_dialog(self):
+        """
+        Диалог «Дополнительные» — скачивание специальных моделей:
+          - LLaMA 3.2 (Vision)  — для распознавания изображений
+          - Whisper (base)       — локальное распознавание голоса
+        Модели нельзя выбрать как активную — они вспомогательные.
+        Whisper скачивается в ~/.cache/whisper и кэшируется между запусками.
+        """
+        import os, pathlib
+
+        is_dark  = self.current_theme == "dark"
+        is_glass = getattr(self, "current_liquid_glass", True)
+
+        # Палитра — берём те же переменные что в show_model_selector
+        if is_dark and is_glass:
+            bg_card   = "rgba(28, 28, 38, 0.88)"
+            card_border = "rgba(90, 90, 130, 0.55)"
+            title_col   = "#e8e8f8"
+            sub_col     = "rgba(160, 160, 195, 0.75)"
+            sep_col     = "rgba(80, 80, 115, 0.35)"
+            close_col   = "rgba(140, 140, 180, 0.65)"
+            close_hover = "#c0c0e0"
+            bg_overlay  = "rgba(0,0,0,0.55)"
+            row_bg      = "rgba(45, 45, 65, 0.70)"
+            row_hover   = "rgba(60, 60, 88, 0.85)"
+        elif is_dark:
+            bg_card     = "rgb(26, 26, 34)"
+            card_border = "rgba(65, 65, 90, 0.90)"
+            title_col   = "#e2e2f2"; sub_col = "#8888aa"
+            sep_col     = "rgba(65, 65, 90, 0.55)"
+            close_col   = "#66668a"; close_hover = "#aaaacc"
+            bg_overlay  = "rgba(0,0,0,0.60)"
+            row_bg      = "rgb(36, 36, 48)"; row_hover = "rgb(48, 48, 64)"
+        elif is_glass:
+            bg_card     = "rgba(255, 255, 255, 0.78)"
+            card_border = "rgba(255, 255, 255, 0.85)"
+            title_col   = "#1a1a3a"; sub_col = "rgba(80, 90, 140, 0.70)"
+            sep_col     = "rgba(180, 185, 220, 0.40)"
+            close_col   = "rgba(100, 110, 170, 0.60)"; close_hover = "#3a3a7a"
+            bg_overlay  = "rgba(30, 30, 60, 0.25)"
+            row_bg      = "rgba(255, 255, 255, 0.55)"; row_hover = "rgba(240, 242, 255, 0.90)"
+        else:
+            bg_card     = "rgb(248, 248, 252)"
+            card_border = "rgba(200, 205, 230, 0.95)"
+            title_col   = "#1a1a3a"; sub_col = "#7788aa"
+            sep_col     = "rgba(195, 200, 225, 0.70)"
+            close_col   = "#8899bb"; close_hover = "#2a2a5a"
+            bg_overlay  = "rgba(30, 30, 60, 0.30)"
+            row_bg      = "rgb(240, 241, 250)"; row_hover = "rgb(228, 230, 248)"
+
+        # Проверяем наличие Whisper-модели в кэше
+        whisper_cache = pathlib.Path.home() / ".cache" / "whisper"
+        whisper_cached = any(whisper_cache.glob("base*")) if whisper_cache.exists() else False
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Дополнительные модели")
+        dialog.setWindowFlags(QtCore.Qt.WindowType.Dialog | QtCore.Qt.WindowType.FramelessWindowHint)
+        if not IS_WINDOWS:
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        geo = self.geometry()
+        dialog.setFixedSize(geo.width(), geo.height())
+        dialog.move(geo.x(), geo.y())
+        dialog.setStyleSheet(f"background: {bg_overlay};")
+
+        root_layout = QtWidgets.QVBoxLayout(dialog)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        card = QtWidgets.QFrame()
+        card.setFixedWidth(440)
+        card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Minimum)
+        card.setStyleSheet(f"""
+            QFrame#extraCard {{
+                background: {bg_card};
+                border: 1px solid {card_border};
+                border-radius: 24px;
+            }}
+        """)
+        card.setObjectName("extraCard")
+        root_layout.addWidget(card)
+
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(22, 20, 22, 18)
+        cl.setSpacing(0)
+
+        # Шапка
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        hi = QtWidgets.QLabel("⬇")
+        hi.setStyleSheet("background:transparent;border:none;font-size:20px;")
+        header_row.addWidget(hi)
+        header_row.addStretch()
+        x_btn = QtWidgets.QPushButton("×")
+        x_btn.setFixedSize(28, 28)
+        x_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        x_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        x_btn.setStyleSheet(f"QPushButton{{background:transparent;border:none;color:{close_col};font-size:20px;font-weight:300;}}QPushButton:hover{{color:{close_hover};}}")
+        header_row.addWidget(x_btn)
+        cl.addLayout(header_row)
+        cl.addSpacing(4)
+
+        title_lbl = QtWidgets.QLabel("Дополнительные модели")
+        title_lbl.setStyleSheet(f"color:{title_col};font-size:19px;font-weight:700;background:transparent;border:none;letter-spacing:-0.3px;")
+        cl.addWidget(title_lbl)
+        cl.addSpacing(4)
+        hint_lbl = QtWidgets.QLabel("Вспомогательные модели · нельзя выбрать как активную")
+        hint_lbl.setStyleSheet(f"color:{sub_col};font-size:12px;background:transparent;border:none;")
+        cl.addWidget(hint_lbl)
+        cl.addSpacing(16)
+
+        sep = QtWidgets.QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{sep_col};border:none;")
+        cl.addWidget(sep)
+        cl.addSpacing(14)
+
+        # ── Вспомогательная функция: строка модели ──────────────────
+        def _make_extra_row(icon, name, desc, size_str, is_cached, on_download, on_delete):
+            row_widget = QtWidgets.QFrame()
+            row_widget.setFixedHeight(72)
+            row_widget.setStyleSheet(f"""
+                QFrame {{
+                    background: {row_bg};
+                    border: 1px solid {sep_col};
+                    border-radius: 14px;
+                }}
+                QFrame:hover {{
+                    background: {row_hover};
+                }}
+            """)
+            hl = QtWidgets.QHBoxLayout(row_widget)
+            hl.setContentsMargins(14, 0, 14, 0)
+            hl.setSpacing(12)
+
+            icon_lbl = QtWidgets.QLabel(icon)
+            icon_lbl.setFixedSize(36, 36)
+            icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setStyleSheet(f"background:{'rgba(255,255,255,0.12)' if is_dark else 'rgba(102,126,234,0.10)'};border-radius:10px;border:none;font-size:18px;")
+            icon_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            hl.addWidget(icon_lbl)
+
+            txt = QtWidgets.QVBoxLayout()
+            txt.setSpacing(2)
+            n_lbl = QtWidgets.QLabel(name)
+            n_lbl.setStyleSheet(f"color:{title_col};font-size:14px;font-weight:700;background:transparent;border:none;")
+            n_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            txt.addWidget(n_lbl)
+            d_lbl = QtWidgets.QLabel(desc)
+            d_lbl.setStyleSheet(f"color:{sub_col};font-size:11px;background:transparent;border:none;")
+            d_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            txt.addWidget(d_lbl)
+            hl.addLayout(txt)
+            hl.addStretch()
+
+            # Правая часть: бейдж + кнопка (скачать ИЛИ удалить)
+            right = QtWidgets.QVBoxLayout()
+            right.setSpacing(4)
+            right.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
+
+            badge = QtWidgets.QLabel("✓ Скачана" if is_cached else size_str)
+            if is_cached:
+                badge.setStyleSheet("background:rgba(50,200,120,0.18);border:1px solid rgba(50,200,120,0.40);border-radius:6px;color:#52c87a;font-size:10px;font-weight:600;padding:2px 7px;")
+            else:
+                badge.setStyleSheet(f"background:rgba(102,126,234,0.12);border:1px solid rgba(102,126,234,0.35);border-radius:6px;color:#667eea;font-size:10px;font-weight:600;padding:2px 7px;")
+            badge.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            right.addWidget(badge, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+
+            if is_cached:
+                # Уже скачана — показываем кнопку удаления
+                action_btn = QtWidgets.QPushButton("🗑  Удалить")
+                action_btn.setFixedHeight(26)
+                action_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+                action_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+                action_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(200,60,60,0.15);
+                        color: #ee5555; border: 1px solid rgba(200,70,70,0.40);
+                        border-radius: 8px; font-size: 11px; font-weight: 600; padding: 0 12px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(200,55,55,0.30);
+                        border: 1px solid rgba(220,80,80,0.65);
+                    }
+                """)
+                action_btn.clicked.connect(on_delete)
+            else:
+                # Не скачана — показываем кнопку скачивания
+                action_btn = QtWidgets.QPushButton("⬇  Скачать")
+                action_btn.setFixedHeight(26)
+                action_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+                action_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+                action_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #667eea,stop:1 #764ba2);
+                        color: white; border: none; border-radius: 8px;
+                        font-size: 11px; font-weight: 600; padding: 0 12px;
+                    }}
+                    QPushButton:hover {{
+                        background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #7b8ff5,stop:1 #8860b8);
+                    }}
+                """)
+                action_btn.clicked.connect(on_download)
+
+            right.addWidget(action_btn, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+            hl.addLayout(right)
+            return row_widget
+
+        # ── LLaMA 3.2 Vision ─────────────────────────────────────────
+        llama32_installed = False
+        try:
+            import requests as _req
+            _r = _req.get("http://localhost:11434/api/tags", timeout=1)
+            _models = [m.get("name","") for m in _r.json().get("models",[])]
+            llama32_installed = any("llama3.2" in m for m in _models)
+        except Exception:
+            pass
+
+        def _dl_llama32():
+            _close2()
+            QtCore.QTimer.singleShot(300, self._download_llama32_vision)
+
+        def _del_llama32():
+            reply = QtWidgets.QMessageBox.question(
+                self, "Удалить LLaMA 3.2 Vision?",
+                "Удалить LLaMA 3.2 Vision с диска? Модель займёт ~2.0 GB при повторной скачке.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                _close2()
+                QtCore.QTimer.singleShot(300, lambda: self._delete_ollama_model("llama3.2-vision"))
+
+        cl.addWidget(_make_extra_row("🦙", "LLaMA 3.2 Vision", "Распознавание изображений · ~2.0 GB",
+                                     "~2.0 GB", llama32_installed, _dl_llama32, _del_llama32))
+        cl.addSpacing(10)
+
+        # ── Whisper base ──────────────────────────────────────────────
+        def _dl_whisper():
+            _close2()
+            QtCore.QTimer.singleShot(300, self._download_whisper_model)
+
+        def _del_whisper():
+            reply = QtWidgets.QMessageBox.question(
+                self, "Удалить Whisper base?",
+                "Удалить модель Whisper base (~150 MB) из кэша? Папка: ~/.cache/whisper",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                _close2()
+                QtCore.QTimer.singleShot(300, self._delete_whisper_model)
+
+        cl.addWidget(_make_extra_row("🎤", "Whisper base", "Локальное распознавание голоса · офлайн · ~150 MB",
+                                     "~150 MB", whisper_cached, _dl_whisper, _del_whisper))
+
+        cl.addSpacing(16)
+        sep2 = QtWidgets.QFrame()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet(f"background:{sep_col};border:none;")
+        cl.addWidget(sep2)
+        cl.addSpacing(10)
+
+        close2_btn = QtWidgets.QPushButton("Закрыть")
+        close2_btn.setFixedHeight(36)
+        close2_btn.setMinimumWidth(110)
+        close2_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        close2_btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        close2_btn.setStyleSheet(f"""
+            QPushButton{{background:transparent;color:{close_col};border:1px solid {sep_col};border-radius:10px;font-size:13px;font-weight:500;padding:0 18px;}}
+            QPushButton:hover{{color:{close_hover};border:1px solid rgba(102,126,234,0.40);background:rgba(102,126,234,0.07);}}
+        """)
+        cl.addWidget(close2_btn, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # Fade-in
+        dialog.setWindowOpacity(0.0)
+        dialog.show()
+        _fo2 = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
+        _fo2.setDuration(220); _fo2.setStartValue(0.0); _fo2.setEndValue(1.0)
+        _fo2.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        dialog._open_anim2 = _fo2
+        _fo2.start()
+
+        def _close2():
+            _fc = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
+            _fc.setDuration(180); _fc.setStartValue(1.0); _fc.setEndValue(0.0)
+            _fc.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            def _do_close():
+                try:
+                    dialog.close()
+                    self._extra_models_dialog = None
+                except Exception:
+                    pass
+            _fc.finished.connect(_do_close)
+            dialog._close_anim2 = _fc
+            _fc.start()
+
+        x_btn.clicked.connect(_close2)
+        close2_btn.clicked.connect(_close2)
+
+        class _OvFilter2(QtCore.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Type.MouseButtonPress and obj is dialog:
+                    cp = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                    if not card.geometry().contains(cp):
+                        _close2()
+                        return True
+                return False
+        _cf2 = _OvFilter2(dialog)
+        dialog.installEventFilter(_cf2)
+        dialog._click_filter2 = _cf2
+        # Используем show() вместо exec() — не блокируем event loop
+        # Храним ссылку чтобы GC не удалил диалог
+        self._extra_models_dialog = dialog
+        dialog.show()
+
+    def _download_llama32_vision(self):
+        """Скачивает LLaMA 3.2 Vision через ollama pull."""
+        import subprocess, threading
+        def _pull():
+            try:
+                subprocess.run(["ollama", "pull", "llama3.2-vision"], check=True)
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_on_llama32_downloaded", QtCore.Qt.ConnectionType.QueuedConnection
+                )
+            except Exception as e:
+                print(f"[LLAMA32] Ошибка: {e}")
+        threading.Thread(target=_pull, daemon=True).start()
+        self.status_label.setText("⏬ Скачиваю LLaMA 3.2 Vision…")
+
+    def _delete_ollama_model(self, model_name: str):
+        """Удаляет модель из Ollama через ollama rm."""
+        import subprocess, threading
+        def _rm():
+            try:
+                subprocess.run(["ollama", "rm", model_name], check=True)
+                QtCore.QMetaObject.invokeMethod(
+                    self.status_label, "setText",
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                    QtCore.Q_ARG(str, f"✅ {model_name} удалена")
+                )
+                QtCore.QTimer.singleShot(3000, lambda: self.status_label.setText(""))
+            except Exception as e:
+                print(f"[DELETE_MODEL] Ошибка: {e}")
+        threading.Thread(target=_rm, daemon=True).start()
+        self.status_label.setText(f"🗑 Удаляю {model_name}…")
+
+    def _delete_whisper_model(self):
+        """Удаляет кэш Whisper base из ~/.cache/whisper."""
+        import pathlib, shutil
+        whisper_cache = pathlib.Path.home() / ".cache" / "whisper"
+        deleted = []
+        if whisper_cache.exists():
+            for f in whisper_cache.glob("base*"):
+                try:
+                    f.unlink()
+                    deleted.append(f.name)
+                except Exception as e:
+                    print(f"[DELETE_WHISPER] {e}")
+        # Сбрасываем кэш модели в памяти
+        # Сбрасываем кэш модели в памяти
+        VoiceRecorder._whisper_model_cache = None
+        VoiceRecorder._whisper_model_cache = None
+        if deleted:
+            self.status_label.setText(f"✅ Whisper удалён: {', '.join(deleted)}")
+        else:
+            self.status_label.setText("⚠️ Файлы Whisper не найдены")
+        QtCore.QTimer.singleShot(3000, lambda: self.status_label.setText(""))
+
+    @QtCore.pyqtSlot()
+    def _on_llama32_downloaded(self):
+        self.status_label.setText("✅ LLaMA 3.2 Vision скачана")
+        QtCore.QTimer.singleShot(4000, lambda: self.status_label.setText(""))
+
+    def _download_whisper_model(self):
+        """Скачивает модель Whisper base с прогрессом."""
+        self._whisper_dl_dialog = WhisperDownloadDialog(self)
+        self._whisper_dl_dialog.show()
 
     def _start_deepseek_download(self):
         """Открывает диалог скачивания DeepSeek и после успеха активирует модель."""
@@ -7694,6 +8971,124 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             card._mb_anims = [_mb_eff, _mb_pulse]
             _mb_pulse.start()
 
+    def _apply_element_visibility(self,
+                                   show_tts: bool = True,
+                                   show_regen: bool = True,
+                                   show_copy: bool = True,
+                                   show_user_copy: bool = True,
+                                   show_user_edit: bool = True):
+        """
+        Применяет видимость кнопок ко всем существующим MessageWidget.
+        Скрывает controls_widget целиком когда все его кнопки скрыты.
+        Системные сообщения (add_controls=False) не трогаем — у них нет кнопок.
+        """
+        try:
+            for i in range(self.messages_layout.count()):
+                item = self.messages_layout.itemAt(i)
+                if not item:
+                    continue
+                w = item.widget()
+                if not w or not hasattr(w, 'speaker') or not hasattr(w, 'controls_widget'):
+                    continue
+
+                cw = w.controls_widget
+                if cw is None:
+                    continue
+
+                # Системные сообщения создаются с add_controls=False —
+                # их controls_widget изначально скрыт, не трогаем его.
+                if w.speaker == "Система":
+                    continue
+
+                is_user      = (w.speaker == "Вы")
+                is_assistant = not is_user
+
+                if is_assistant:
+                    # ИИ: copy(ИИ), tts, regen
+                    if getattr(w, 'copy_btn', None) is not None:
+                        w.copy_btn.setVisible(show_copy)
+                    if getattr(w, 'tts_button', None) is not None:
+                        w.tts_button.setVisible(show_tts)
+                    if getattr(w, 'regenerate_btn', None) is not None:
+                        w.regenerate_btn.setVisible(show_regen)
+                    if getattr(w, 'regenerate_button', None) is not None:
+                        w.regenerate_button.setVisible(show_regen)
+                    any_visible = show_copy or show_tts or show_regen
+
+                else:
+                    # Пользователь: copy(user), edit
+                    if getattr(w, 'copy_btn', None) is not None:
+                        w.copy_btn.setVisible(show_user_copy)
+                    if getattr(w, 'edit_button', None) is not None:
+                        w.edit_button.setVisible(show_user_edit)
+                    any_visible = show_user_copy or show_user_edit
+
+                try:
+                    cw.setVisible(any_visible)
+                except RuntimeError:
+                    pass
+
+        except Exception as _e:
+            print(f"[ELEMENTS] Ошибка применения видимости: {_e}")
+
+    def _restore_mode_btn_animated(self):
+        """Плавно восстанавливает mode_btn после закрытия меню.
+        Хранится как метод — ссылки не теряются при удалении proxy."""
+        try:
+            self.mode_btn.setGraphicsEffect(None)
+        except Exception:
+            pass
+        _eff = QtWidgets.QGraphicsOpacityEffect(self.mode_btn)
+        self.mode_btn.setGraphicsEffect(_eff)
+        _eff.setOpacity(0.0)
+        _anim = QtCore.QPropertyAnimation(_eff, b"opacity")
+        _anim.setDuration(220)
+        _anim.setStartValue(0.0)
+        _anim.setEndValue(1.0)
+        _anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuint)
+        def _done():
+            try:
+                self.mode_btn.setGraphicsEffect(None)
+            except Exception:
+                pass
+        _anim.finished.connect(_done)
+        _anim.start()
+        # Держим ссылку в self
+        self._mode_btn_restore_anim = [_eff, _anim]
+        try:
+            self.mode_btn.clearFocus()
+            self.input_field.setFocus()
+        except Exception:
+            pass
+
+    def _restore_attach_btn_animated(self):
+        """Плавно восстанавливает attach_btn после закрытия меню."""
+        try:
+            self.attach_btn.setGraphicsEffect(None)
+        except Exception:
+            pass
+        _eff = QtWidgets.QGraphicsOpacityEffect(self.attach_btn)
+        self.attach_btn.setGraphicsEffect(_eff)
+        _eff.setOpacity(0.0)
+        _anim = QtCore.QPropertyAnimation(_eff, b"opacity")
+        _anim.setDuration(220)
+        _anim.setStartValue(0.0)
+        _anim.setEndValue(1.0)
+        _anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuint)
+        def _done():
+            try:
+                self.attach_btn.setGraphicsEffect(None)
+            except Exception:
+                pass
+        _anim.finished.connect(_done)
+        _anim.start()
+        self._attach_btn_restore_anim = [_eff, _anim]
+        try:
+            self.attach_btn.clearFocus()
+            self.input_field.setFocus()
+        except Exception:
+            pass
+
     def animate_mode_change(self, new_mode: str):
         """Плавная смена режима: fade-out → смена текста → fade-in."""
         if self.ai_mode == new_mode:
@@ -7726,22 +9121,11 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
 
     def show_mode_menu(self):
         """Показать меню выбора режима работы AI с премиум iOS-like анимацией"""
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ШАГ 1: АНИМАЦИЯ НАЖАТИЯ КНОПКИ (opacity pulse — не конфликтует с layout)
-        # ═══════════════════════════════════════════════════════════════
-        _mode_press_eff = QtWidgets.QGraphicsOpacityEffect(self.mode_btn)
-        self.mode_btn.setGraphicsEffect(_mode_press_eff)
-        _mode_press_eff.setOpacity(1.0)
-        _mode_pulse = QtCore.QPropertyAnimation(_mode_press_eff, b"opacity")
-        _mode_pulse.setDuration(180)
-        _mode_pulse.setKeyValueAt(0.0, 1.0)
-        _mode_pulse.setKeyValueAt(0.4, 0.55)
-        _mode_pulse.setKeyValueAt(1.0, 1.0)
-        _mode_pulse.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-        _mode_pulse.finished.connect(lambda: self.mode_btn.setGraphicsEffect(None))
-        _mode_pulse.start()
-        self._mode_pulse_anim = _mode_pulse  # держим ссылку
+
+        # Guard: не открываем повторно пока идёт анимация открытия
+        if getattr(self, '_mode_menu_animating', False):
+            return
+        self._mode_menu_animating = True
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 2: СОЗДАНИЕ МЕНЮ
@@ -7904,8 +9288,14 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _cl.addLayout(_text_col, 0)
         _cl.addStretch()
 
-        # При клике на карточку — открываем выбор модели
-        _model_card.clicked.connect(lambda: (menu.close(), self.show_model_selector()))
+        # При клике на карточку — восстанавливаем кнопку и открываем выбор модели
+        def _on_model_card_click():
+            menu.close()
+            # Немедленно восстанавливаем кнопку — show_model_selector может
+            # открыть exec() и _on_close_done не успеет отработать
+            QtCore.QTimer.singleShot(50, self._restore_mode_btn_animated)
+            QtCore.QTimer.singleShot(60, self.show_model_selector)
+        _model_card.clicked.connect(_on_model_card_click)
 
         _wrap = QtWidgets.QWidget()
         _wl = QtWidgets.QVBoxLayout(_wrap)
@@ -8024,11 +9414,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         button_rect = self.mode_btn.rect()
         button_global_pos = self.mode_btn.mapToGlobal(button_rect.bottomLeft())
         
-        # Получаем размер меню
+        # Реальный размер меню без показа его на экране
+        menu.ensurePolished()
         menu.adjustSize()
-        menu_size = menu.sizeHint()
-        menu_height = menu_size.height()
-        menu_width = menu_size.width()
+        _sh = menu.sizeHint()
+        menu_width  = _sh.width()  if _sh.width()  > 10 else 220
+        menu_height = _sh.height() if _sh.height() > 10 else 300
         
         # Получаем геометрию окна приложения
         window_geometry = self.geometry()
@@ -8054,94 +9445,98 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             menu_pos = menu_pos_up
             print("[MODE_MENU] Меню открывается вверх")
         
-        # Плавное появление меню через fade + scale
-        # Создаём эффект прозрачности
-        opacity_effect = QtWidgets.QGraphicsOpacityEffect(menu)
-        menu.setGraphicsEffect(opacity_effect)
-        opacity_effect.setOpacity(0.0)
-        
-        # Анимация прозрачности
-        opacity_anim = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
-        opacity_anim.setDuration(280)
-        opacity_anim.setStartValue(0.0)
-        opacity_anim.setEndValue(1.0)
-        opacity_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SCALE АНИМАЦИЯ - меню появляется снизу вверх с пружинным эффектом
-        # ═══════════════════════════════════════════════════════════════
-        # Создаём dummy property для анимации масштаба
-        class ScaleAnimator(QtCore.QObject):
-            valueChanged = QtCore.pyqtSignal(float)
-            
-            def __init__(self):
-                super().__init__()
-                self._value = 0.0
-            
-            def getValue(self):
-                return self._value
-            
-            def setValue(self, val):
-                self._value = val
-                self.valueChanged.emit(val)
-            
-            value = QtCore.pyqtProperty(float, getValue, setValue)
-        
-        scale_animator = ScaleAnimator()
-        scale_anim = QtCore.QPropertyAnimation(scale_animator, b"value")
-        scale_anim.setDuration(350)
-        scale_anim.setStartValue(0.85)
-        scale_anim.setEndValue(1.0)
-        scale_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)  # iOS-like spring
-        
-        # Подключаем обновление геометрии при изменении scale
-        def update_menu_scale(value):
-            try:
-                # Получаем текущую геометрию
-                if not hasattr(menu, '_original_height'):
-                    menu._original_height = menu_height
-                
-                # Вычисляем новую высоту
-                new_height = int(menu._original_height * value)
-                
-                # Обновляем позицию (anchor point - центр кнопки)
-                button_center_y = button_global_pos.y() - self.mode_btn.height() // 2
-                
-                # Позиционируем меню относительно центра
-                if menu_pos.y() < button_center_y:
-                    # Меню вверху - растём вниз
-                    new_y = button_global_pos.y() - self.mode_btn.height() - new_height - 8
-                else:
-                    # Меню внизу - растём вверх
-                    new_y = button_global_pos.y() + 8
-                
-                # Устанавливаем новую геометрию
-                menu.setGeometry(
-                    menu_pos.x(),
-                    new_y,
-                    menu_width,
-                    new_height
+        # ── Общий класс прокси для анимации открытия/закрытия ────────────────
+        class _BurstProxy(QtWidgets.QWidget):
+            """
+            Вырастает из rect кнопки до rect меню.
+            Нижний край зафиксирован (bottom anchor) — прокси растёт вверх.
+            paintEvent рисует скруглённый блок с radius = min(16, w/2, h/2):
+              - маленький  →  кружок (как кнопка)
+              - большой    →  карточка меню
+            """
+            def __init__(self, bg_color, geo):
+                super().__init__(
+                    None,
+                    QtCore.Qt.WindowType.Tool |
+                    QtCore.Qt.WindowType.FramelessWindowHint |
+                    QtCore.Qt.WindowType.WindowStaysOnTopHint,
                 )
-            except RuntimeError:
+                self._bg = bg_color
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+                self.setGeometry(geo)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            def paintEvent(self, event):
+                p = QtGui.QPainter(self)
+                p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+                r = self.rect()
+                radius = min(16, r.width() // 2, r.height() // 2)
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(QtCore.QRectF(r), radius, radius)
+                p.setClipPath(path)
+                p.fillRect(r, self._bg)
+                p.end()
+
+        _btn_tl = self.mode_btn.mapToGlobal(QtCore.QPoint(0, 0))
+        _btn_w  = self.mode_btn.width()
+        _btn_h  = self.mode_btn.height()
+        _btn_bottom = _btn_tl.y() + _btn_h   # нижняя граница кнопки — якорь
+
+        # Меню центрировано по кнопке, нижний край = нижний край кнопки
+        # Edge-clamp по X: не выходим за края окна
+        _win_tl    = self.mapToGlobal(QtCore.QPoint(0, 0))
+        _win_w     = self.width()
+        _ideal_x   = _btn_tl.x() + _btn_w // 2 - menu_width // 2
+        _clamped_x = max(_win_tl.x() + 8, min(_ideal_x, _win_tl.x() + _win_w - menu_width - 8))
+
+        # start = кнопка
+        # end   = меню над кнопкой, bottom = top кнопки, центрировано по X
+        _start_geo     = QtCore.QRect(_btn_tl.x(), _btn_tl.y(), _btn_w, _btn_h)
+        _proxy_end_geo = QtCore.QRect(_clamped_x,
+                                       _btn_tl.y() - menu_height,
+                                       menu_width, menu_height)
+
+        _menu_bg = QtGui.QColor(30, 30, 35, 245) if is_dark else QtGui.QColor(255, 255, 255, 245)
+
+        # Кнопка затемняется (не исчезает) пока прокси анимируется
+        _dim_eff = QtWidgets.QGraphicsOpacityEffect(self.mode_btn)
+        self.mode_btn.setGraphicsEffect(_dim_eff)
+        _dim_anim = QtCore.QPropertyAnimation(_dim_eff, b"opacity")
+        _dim_anim.setDuration(100)
+        _dim_anim.setStartValue(1.0)
+        _dim_anim.setEndValue(0.0)
+        _dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+        _dim_anim.start()
+
+        open_proxy = _BurstProxy(_menu_bg, _start_geo)
+        open_proxy.show()
+        open_proxy.raise_()
+
+        _o_geo = QtCore.QPropertyAnimation(open_proxy, b"geometry")
+        _o_geo.setDuration(300)
+        _o_geo.setStartValue(_start_geo)
+        _o_geo.setEndValue(_proxy_end_geo)
+        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+        _o_geo.start()
+        open_proxy._anims = [_o_geo, _dim_eff, _dim_anim]
+
+        def _on_open_done():
+            self._mode_menu_animating = False
+            try:
+                open_proxy.close()
+            except Exception:
                 pass
-        
-        scale_animator.valueChanged.connect(update_menu_scale)
-        
-        # Группа анимаций
-        anim_group = QtCore.QParallelAnimationGroup()
-        anim_group.addAnimation(opacity_anim)
-        anim_group.addAnimation(scale_anim)
-        
-        # Сохраняем ссылки для предотвращения garbage collection
-        menu._anim_group = anim_group
-        menu._opacity_effect = opacity_effect
-        menu._scale_animator = scale_animator
+            menu.popup(_proxy_end_geo.topLeft())
+
+        _o_geo.finished.connect(_on_open_done)
 
         # ── Режимы управляются через _btn.clicked (см. выше) ────────────────
 
-        # ── Анимация закрытия: screenshot-proxy паттерн ──
-        # menu.grab() рендерит виджет со всеми стилями (скругления, прозрачность).
-        # Qt закрывает оригинальное меню — proxy плавно анимируется на его месте.
+        # ─────────────────────────────────────────────────────────────────
+        # ЗАКРЫТИЕ: proxy схлопывается обратно в кнопку (bottom anchor)
+        # ─────────────────────────────────────────────────────────────────
         _close_started = [False]
 
         def _animate_mode_close():
@@ -8150,21 +9545,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             _close_started[0] = True
 
             cur_geo = menu.geometry()
-
-            # grab() рендерит меню с его CSS (border-radius, прозрачность)
             try:
                 px = menu.grab()
             except Exception:
                 px = None
 
-            # Proxy-виджет с прозрачным фоном поверх всего
-            class _ProxyWidget(QtWidgets.QWidget):
+            class _CloseProxy(QtWidgets.QWidget):
                 def __init__(self, pixmap, geo):
                     super().__init__(
                         None,
                         QtCore.Qt.WindowType.Tool |
                         QtCore.Qt.WindowType.FramelessWindowHint |
-                        QtCore.Qt.WindowType.WindowStaysOnTopHint
+                        QtCore.Qt.WindowType.WindowStaysOnTopHint,
                     )
                     self._px = pixmap
                     self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -8173,62 +9565,59 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     self.setGeometry(geo)
 
                 def paintEvent(self, event):
-                    if self._px:
-                        from PyQt6 import QtGui
-                        p = QtGui.QPainter(self)
-                        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-                        # Рисуем с тем же масштабом что и текущий размер виджета
-                        p.drawPixmap(self.rect(), self._px)
-                        p.end()
+                    if not self._px:
+                        return
+                    p = QtGui.QPainter(self)
+                    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+                    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+                    r = self.rect()
+                    radius = min(16, r.width() // 2, r.height() // 2)
+                    path = QtGui.QPainterPath()
+                    path.addRoundedRect(QtCore.QRectF(r), radius, radius)
+                    p.setClipPath(path)
+                    p.drawPixmap(r, self._px)
+                    p.end()
 
-            proxy = _ProxyWidget(px, cur_geo)
+            proxy = _CloseProxy(px, cur_geo)
             proxy.show()
             proxy.raise_()
 
-            # Fade-out
+            # Кнопка сейчас спрятана — цель: вернуться к её rect
+            _btn_now    = self.mode_btn.mapToGlobal(QtCore.QPoint(0, 0))
+            _close_end  = QtCore.QRect(_btn_now.x(), _btn_now.y(),
+                                        self.mode_btn.width(), self.mode_btn.height())
+
+            _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
+            _c_geo.setDuration(270)
+            _c_geo.setStartValue(cur_geo)
+            _c_geo.setEndValue(_close_end)
+            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
             _c_eff = QtWidgets.QGraphicsOpacityEffect(proxy)
             proxy.setGraphicsEffect(_c_eff)
             _c_eff.setOpacity(1.0)
-
             _c_op = QtCore.QPropertyAnimation(_c_eff, b"opacity")
-            _c_op.setDuration(180)
+            _c_op.setDuration(270)
             _c_op.setStartValue(1.0)
+            _c_op.setKeyValueAt(0.55, 0.95)
+            _c_op.setKeyValueAt(0.85, 0.3)
             _c_op.setEndValue(0.0)
-            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
 
-            # Scale-down вниз (сжатие к кнопке)
-            end_geo = QtCore.QRect(
-                cur_geo.x(),
-                cur_geo.y() + int(cur_geo.height() * 0.12),
-                cur_geo.width(),
-                int(cur_geo.height() * 0.88)
-            )
-            _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
-            _c_geo.setDuration(180)
-            _c_geo.setStartValue(cur_geo)
-            _c_geo.setEndValue(end_geo)
-            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
-
-            def _on_proxy_done():
+            def _on_close_done():
                 try:
                     proxy.close()
                 except Exception:
                     pass
-                self.mode_btn.clearFocus()
-                self.input_field.setFocus()
+                self._restore_mode_btn_animated()
 
-            _c_op.finished.connect(_on_proxy_done)
+            _c_geo.finished.connect(_on_close_done)
             _c_op.start()
             _c_geo.start()
-            proxy._anims = [_c_op, _c_geo, _c_eff]
+            # Храним в self — иначе WA_DeleteOnClose убьёт анимы вместе с proxy
+            self._mode_close_proxy_anims = [proxy, _c_op, _c_geo, _c_eff]
 
         menu.aboutToHide.connect(_animate_mode_close)
-
-        # Запускаем анимацию появления после небольшой задержки
-        QtCore.QTimer.singleShot(120, anim_group.start)
-
-        # popup() — не блокирует event loop
-        menu.popup(menu_pos)
     
     def eventFilter(self, obj, event):
         """
@@ -8246,88 +9635,66 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ═══════════════════════════════════════════════
         # ОБРАБОТКА WHEEL СОБЫТИЙ (прокрутка колесиком)
         # ═══════════════════════════════════════════════
-        # Проверяем что это viewport нашего scroll_area
-        if obj == self.scroll_area.viewport():
-            # Если это wheel событие
-            if event.type() == QtCore.QEvent.Type.Wheel:
-                # ═══════════════════════════════════════════════
-                # НИКОГДА НЕ БЛОКИРУЕМ WHEEL
-                # ═══════════════════════════════════════════════
-                # Layout завершается независимо от действий пользователя
-                # Пользователь может скроллить в любой момент
-                # Обрабатываем wheel событие стандартно
-                result = super().eventFilter(obj, event)
-                
-                # ПОСЛЕ обработки wheel события обновляем кнопку
-                # Используем QMetaObject.invokeMethod для отложенного вызова
-                # чтобы кнопка обновилась ПОСЛЕ полной обработки скролла
-                # (scrollbar.value() уже изменился)
-                # update_scroll_button_visibility сама проверит _layout_in_progress
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_update_button_after_scroll",
-                    QtCore.Qt.ConnectionType.QueuedConnection
-                )
-                
-                return result
-        
+        try:
+            # Проверяем что это viewport нашего scroll_area
+            if hasattr(self, 'scroll_area') and obj == self.scroll_area.viewport():
+                # Если это wheel событие
+                if event.type() == QtCore.QEvent.Type.Wheel:
+                    result = super().eventFilter(obj, event)
+                    QtCore.QMetaObject.invokeMethod(
+                        self,
+                        "_update_button_after_scroll",
+                        QtCore.Qt.ConnectionType.QueuedConnection
+                    )
+                    return result
+        except RuntimeError:
+            # scroll_area или его viewport был удалён — игнорируем
+            pass
+
         # ═══════════════════════════════════════════════
         # ОБРАБОТКА RESIZE SCROLL_AREA (изменение размера)
         # ═══════════════════════════════════════════════
-        if obj == self.scroll_area and event.type() == QtCore.QEvent.Type.Resize:
-            if hasattr(self, 'scroll_to_bottom_btn'):
-                # Обновляем позицию кнопки при resize
-                # Это единственное место где вызывается update_position
-                self.scroll_to_bottom_btn.update_position(
-                    self.scroll_area.width(),
-                    self.scroll_area.height()
-                )
+        try:
+            if (hasattr(self, 'scroll_area')
+                    and obj == self.scroll_area
+                    and event.type() == QtCore.QEvent.Type.Resize):
+                if hasattr(self, 'scroll_to_bottom_btn'):
+                    self.scroll_to_bottom_btn.update_position(
+                        self.scroll_area.width(),
+                        self.scroll_area.height()
+                    )
+        except RuntimeError:
+            pass
         
         # ═══════════════════════════════════════════════
         # АВТОЗАКРЫТИЕ SIDEBAR (клик вне sidebar)
         # ═══════════════════════════════════════════════
-        # АВТОЗАКРЫТИЕ SIDEBAR через dim-overlay
-        # ═══════════════════════════════════════════════
-        # Dim-overlay перехватывает клик и закрывает sidebar.
         if (obj is getattr(self, '_dim_overlay', None)
                 and event.type() == QtCore.QEvent.Type.MouseButtonPress
                 and getattr(self, '_sidebar_open', False)):
             self.toggle_sidebar()
-            return True   # поглощаем событие — клик не проходит сквозь overlay
+            return True
 
         # Для всех остальных случаев - стандартная обработка
         return super().eventFilter(obj, event)
     
     @QtCore.pyqtSlot()
     def _update_button_after_scroll(self):
-        """
-        Обновляет layout и видимость кнопки "вниз" после ручного скролла.
+        """Обновляет layout и видимость кнопки "вниз" после ручного скролла."""
+        try:
+            scrollbar = self.scroll_area.verticalScrollBar()
+            current_value = scrollbar.value()
+            
+            self.messages_layout.invalidate()
+            self.messages_layout.activate()
+            self.messages_widget.updateGeometry()
+            
+            self.scroll_area.viewport().update()
+            
+            scrollbar.setValue(current_value)
+        except RuntimeError:
+            return
         
-        КРИТИЧНО:
-        - Вызывается через QMetaObject.invokeMethod после wheel события
-        - Гарантирует что скролл полностью обработан
-        - При ручном скролле ВСЕГДА обновляет layout (как при переключении чата)
-        - Это гарантирует корректное отображение всех накопленных сообщений и кнопки
-        """
-        # ═══════════════════════════════════════════════════════════════
-        # ОБНОВЛЕНИЕ LAYOUT ПРИ РУЧНОМ СКРОЛЛЕ
-        # ═══════════════════════════════════════════════════════════════
-        # Сохраняем текущую позицию скролла
-        scrollbar = self.scroll_area.verticalScrollBar()
-        current_value = scrollbar.value()
-        
-        # Полное обновление layout (как при переключении чата)
-        self.messages_layout.invalidate()
-        self.messages_layout.activate()
-        self.messages_widget.updateGeometry()
-        
-        # ✅ ИСПРАВЛЕНИЕ ДЁРГАНЬЯ: update() вместо repaint() + processEvents()
-        self.scroll_area.viewport().update()
-        
-        # Восстанавливаем позицию скролла
-        scrollbar.setValue(current_value)
-        
-        # Теперь обновляем кнопку после завершения layout
         if hasattr(self, 'scroll_to_bottom_btn'):
             self.update_scroll_button_visibility()
     
@@ -8352,25 +9719,195 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             return
         
         self.use_search = (state == QtCore.Qt.CheckState.Checked.value)
-    
+
+    def _show_search_toast(self, enabled: bool):
+        """
+        Toast-уведомление при переключении умного поиска.
+        Аналогично _show_model_switch_toast — вылетает снизу, висит, улетает вверх.
+        """
+        is_dark  = self.current_theme == "dark"
+        is_glass = getattr(self, "current_liquid_glass", True)
+
+        if is_dark and is_glass:
+            bg     = "rgba(28, 28, 40, 0.93)"
+            border = "rgba(100, 100, 160, 0.55)"
+            name_c = "#e8e8ff"
+            sub_c  = "rgba(160, 160, 200, 0.80)"
+            dot_c  = "#6ee89a" if enabled else "#e87a6e"
+            icon_bg = "rgba(255,255,255,0.12)"
+        elif is_dark:
+            bg     = "rgb(26, 26, 36)"
+            border = "rgba(70, 70, 100, 0.90)"
+            name_c = "#e2e2f2"
+            sub_c  = "#8888aa"
+            dot_c  = "#52c87a" if enabled else "#e07070"
+            icon_bg = "rgba(255,255,255,0.08)"
+        elif is_glass:
+            bg     = "rgba(255, 255, 255, 0.82)"
+            border = "rgba(200, 210, 240, 0.85)"
+            name_c = "#1a1a3a"
+            sub_c  = "rgba(80, 90, 150, 0.75)"
+            dot_c  = "#22aa66" if enabled else "#cc4444"
+            icon_bg = "rgba(102,126,234,0.10)"
+        else:
+            bg     = "rgb(248, 248, 252)"
+            border = "rgba(200, 205, 230, 0.95)"
+            name_c = "#1a1a3a"
+            sub_c  = "#7788aa"
+            dot_c  = "#1aaa60" if enabled else "#cc4444"
+            icon_bg = "rgba(102,126,234,0.08)"
+
+        # ── Overlay ───────────────────────────────────────────────────
+        overlay = QtWidgets.QWidget(self)
+        overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.setGeometry(self.rect())
+        overlay.show()
+        overlay.raise_()
+
+        # ── Карточка ─────────────────────────────────────────────────
+        card = QtWidgets.QFrame(overlay)
+        card.setFixedWidth(300)
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {bg};
+                border: 1.5px solid {border};
+                border-radius: 22px;
+            }}
+        """)
+
+        cl = QtWidgets.QHBoxLayout(card)
+        cl.setContentsMargins(16, 14, 20, 14)
+        cl.setSpacing(14)
+
+        # Иконка поиска
+        icon_lbl = QtWidgets.QLabel("🔍")
+        icon_lbl.setFixedSize(44, 44)
+        icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet(
+            f"background: {icon_bg}; border-radius: 12px; border: none; font-size: 20px;"
+        )
+        cl.addWidget(icon_lbl)
+
+        # Текст
+        txt = QtWidgets.QVBoxLayout()
+        txt.setSpacing(2)
+        txt.setContentsMargins(0, 0, 0, 0)
+
+        name_lbl = QtWidgets.QLabel("Умный поиск")
+        name_lbl.setFont(_apple_font(15, weight=QtGui.QFont.Weight.Bold))
+        name_lbl.setStyleSheet(f"color: {name_c}; background: transparent; border: none;")
+        txt.addWidget(name_lbl)
+
+        status_text = "Включён" if enabled else "Отключён"
+        sub_lbl = QtWidgets.QLabel(status_text)
+        sub_lbl.setFont(_apple_font(11))
+        sub_lbl.setStyleSheet(f"color: {sub_c}; background: transparent; border: none;")
+        txt.addWidget(sub_lbl)
+
+        cl.addLayout(txt)
+        cl.addStretch()
+
+        # Пульсирующая точка
+        dot = QtWidgets.QLabel("●")
+        dot.setStyleSheet(
+            f"color: {dot_c}; background: transparent; border: none; font-size: 13px;"
+        )
+        cl.addWidget(dot, alignment=QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+        card.adjustSize()
+
+        # ── Позиционирование ─────────────────────────────────────────
+        ow, oh = overlay.width(), overlay.height()
+        cx = (ow - 300) // 2
+        final_y = int(oh * 0.42)
+        start_y = final_y + 40
+        card.move(cx, start_y)
+        card.show()
+
+        # ── Появление ────────────────────────────────────────────────
+        eff_in = QtWidgets.QGraphicsOpacityEffect(card)
+        card.setGraphicsEffect(eff_in)
+        eff_in.setOpacity(0.0)
+
+        a_pos_in = QtCore.QPropertyAnimation(card, b"pos")
+        a_pos_in.setDuration(340)
+        a_pos_in.setStartValue(QtCore.QPoint(cx, start_y))
+        a_pos_in.setEndValue(QtCore.QPoint(cx, final_y))
+        a_pos_in.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
+
+        a_op_in = QtCore.QPropertyAnimation(eff_in, b"opacity")
+        a_op_in.setDuration(280)
+        a_op_in.setStartValue(0.0)
+        a_op_in.setEndValue(1.0)
+        a_op_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+        grp_in = QtCore.QParallelAnimationGroup()
+        grp_in.addAnimation(a_pos_in)
+        grp_in.addAnimation(a_op_in)
+
+        # ── Исчезновение ─────────────────────────────────────────────
+        def _start_hide():
+            card.setGraphicsEffect(None)
+            eff_out = QtWidgets.QGraphicsOpacityEffect(card)
+            card.setGraphicsEffect(eff_out)
+
+            a_pos_out = QtCore.QPropertyAnimation(card, b"pos")
+            a_pos_out.setDuration(280)
+            a_pos_out.setStartValue(QtCore.QPoint(cx, final_y))
+            a_pos_out.setEndValue(QtCore.QPoint(cx, final_y - 28))
+            a_pos_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+            a_op_out = QtCore.QPropertyAnimation(eff_out, b"opacity")
+            a_op_out.setDuration(260)
+            a_op_out.setStartValue(1.0)
+            a_op_out.setEndValue(0.0)
+            a_op_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+            grp_out = QtCore.QParallelAnimationGroup()
+            grp_out.addAnimation(a_pos_out)
+            grp_out.addAnimation(a_op_out)
+
+            def _cleanup():
+                try:
+                    overlay.hide()
+                    overlay.deleteLater()
+                except RuntimeError:
+                    pass
+
+            grp_out.finished.connect(_cleanup)
+            card._out_anims = [eff_out, a_pos_out, a_op_out, grp_out]
+            grp_out.start()
+
+        def _on_in_done():
+            card.setGraphicsEffect(None)
+            QtCore.QTimer.singleShot(1200, _start_hide)
+
+        grp_in.finished.connect(_on_in_done)
+        card._in_anims = [eff_in, a_pos_in, a_op_in, grp_in]
+        grp_in.start()
+
+        # Пульс точки
+        _dot_eff = QtWidgets.QGraphicsOpacityEffect(dot)
+        dot.setGraphicsEffect(_dot_eff)
+        _dot_pulse = QtCore.QPropertyAnimation(_dot_eff, b"opacity")
+        _dot_pulse.setDuration(700)
+        _dot_pulse.setStartValue(1.0)
+        _dot_pulse.setKeyValueAt(0.5, 0.25)
+        _dot_pulse.setEndValue(1.0)
+        _dot_pulse.setLoopCount(3)
+        _dot_pulse.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
+        card._dot_anims = [_dot_eff, _dot_pulse]
+        _dot_pulse.start()
+
+
+
     def show_attach_menu(self):
         """Показать меню с опциями Search и Attach file с премиум iOS-like анимацией + blur эффект"""
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ШАГ 1: АНИМАЦИЯ НАЖАТИЯ КНОПКИ «+» (opacity pulse — не конфликтует с layout)
-        # ═══════════════════════════════════════════════════════════════
-        _attach_press_eff = QtWidgets.QGraphicsOpacityEffect(self.attach_btn)
-        self.attach_btn.setGraphicsEffect(_attach_press_eff)
-        _attach_press_eff.setOpacity(1.0)
-        _attach_pulse = QtCore.QPropertyAnimation(_attach_press_eff, b"opacity")
-        _attach_pulse.setDuration(180)
-        _attach_pulse.setKeyValueAt(0.0, 1.0)
-        _attach_pulse.setKeyValueAt(0.4, 0.55)
-        _attach_pulse.setKeyValueAt(1.0, 1.0)
-        _attach_pulse.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-        _attach_pulse.finished.connect(lambda: self.attach_btn.setGraphicsEffect(None))
-        _attach_pulse.start()
-        self._attach_pulse_anim = _attach_pulse  # держим ссылку
+
+        # Guard: не открываем повторно пока идёт анимация открытия
+        if getattr(self, '_attach_menu_animating', False):
+            return
+        self._attach_menu_animating = True
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 2: СОЗДАНИЕ МЕНЮ
@@ -8449,8 +9986,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 }
             """)
         
-        # FORCED SEARCH - явное указание режима принудительного поиска
-        search_label = "🔴 Принудительный поиск" if self.use_search else "🔍 Умный поиск"
+        # ПОИСК — название фиксированное, состояние отражается галочкой
+        search_label = "🔍 Умный поиск"
         search_action = menu.addAction(search_label)
         search_action.setCheckable(True)
         search_action.setChecked(self.use_search)
@@ -8479,12 +10016,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         button_global_pos = self.attach_btn.mapToGlobal(button_rect.topLeft())
         button_center = self.attach_btn.mapToGlobal(button_rect.center())
         
-        # Размеры меню
-        menu_height = 150
-        # Рассчитываем правильную ширину меню:
-        # Item: 190px (content) + 90px (padding 45px*2) + 8px (margin 4px*2) = 288px
-        # Menu: 288px + 24px (padding 12px*2) = 312px
-        menu_width = 320  # С небольшим запасом
+        # Реальный размер меню без показа его на экране
+        menu.ensurePolished()
+        menu.adjustSize()
+        _sh = menu.sizeHint()
+        menu_width  = _sh.width()  if _sh.width()  > 10 else 320
+        menu_height = _sh.height() if _sh.height() > 10 else 160
         
         # ═══════════════════════════════════════════════════════════════
         # EDGE AVOIDANCE - гарантируем что меню не выходит за границы окна
@@ -8526,81 +10063,97 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         print(f"  Финальная позиция: x={clamped_menu_x}")
         print(f"  Сдвиг от идеала: {clamped_menu_x - ideal_menu_x}px")
         
-        # ═══════════════════════════════════════════════════════════════
-        # ШАГ 3: ПРЕМИУМ АНИМАЦИЯ ПОЯВЛЕНИЯ МЕНЮ (iOS-like spring)
-        # ═══════════════════════════════════════════════════════════════
-        
-        # Группа анимаций для одновременного воспроизведения
-        anim_group = QtCore.QParallelAnimationGroup(menu)
-        
-        # 1. Анимация прозрачности (fade in)
-        opacity_effect = QtWidgets.QGraphicsOpacityEffect(menu)
-        menu.setGraphicsEffect(opacity_effect)
-        opacity_effect.setOpacity(0.0)
-        
-        opacity_anim = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
-        opacity_anim.setDuration(380)  # 380ms - плавно и премиум
-        opacity_anim.setStartValue(0.0)
-        opacity_anim.setEndValue(1.0)
-        opacity_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutExpo)  # Плавное замедление
-        
-        # 2. Анимация масштаба по вертикали (scaleY: 0.85 → 1)
-        # Используем динамическое свойство для вертикального scale
-        menu.setProperty("scale_y", 0.85)
-        
-        scale_anim = QtCore.QPropertyAnimation(menu, b"scale_y")
-        scale_anim.setDuration(380)  # Синхронизировано
-        scale_anim.setStartValue(0.85)
-        scale_anim.setEndValue(1.0)
-        scale_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)  # iOS-like spring
-        
-        # Подключаем обновление геометрии при изменении scale
-        def update_menu_scale(value):
-            try:
-                # Получаем текущую геометрию
-                if not hasattr(menu, '_original_height'):
-                    menu._original_height = menu_height
-                
-                # Вычисляем новую высоту
-                new_height = int(menu._original_height * value)
-                
-                # Обновляем позицию (anchor point внизу - в центре кнопки)
-                new_y = button_global_pos.y() - new_height - 8
-                
-                # Устанавливаем новую геометрию
-                menu.setGeometry(
-                    menu_pos.x(),
-                    new_y,
-                    menu_width,
-                    new_height
+        class _BurstProxy(QtWidgets.QWidget):
+            def __init__(self, bg_color, geo):
+                super().__init__(
+                    None,
+                    QtCore.Qt.WindowType.Tool |
+                    QtCore.Qt.WindowType.FramelessWindowHint |
+                    QtCore.Qt.WindowType.WindowStaysOnTopHint,
                 )
-            except RuntimeError:
-                pass
-        
-        scale_anim.valueChanged.connect(update_menu_scale)
-        
-        # Добавляем анимации в группу
-        anim_group.addAnimation(opacity_anim)
-        anim_group.addAnimation(scale_anim)
-        
-        # Сохраняем ссылки для предотвращения garbage collection
-        menu._anim_group = anim_group
-        menu._opacity_effect = opacity_effect
+                self._bg = bg_color
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+                self.setGeometry(geo)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # ── Обработка действий через сигналы (нужно для popup()) ──
+            def paintEvent(self, event):
+                p = QtGui.QPainter(self)
+                p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+                r = self.rect()
+                radius = min(20, r.width() // 2, r.height() // 2)
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(QtCore.QRectF(r), radius, radius)
+                p.setClipPath(path)
+                p.fillRect(r, self._bg)
+                p.end()
+
+        _btn_tl    = self.attach_btn.mapToGlobal(QtCore.QPoint(0, 0))
+        _btn_w     = self.attach_btn.width()
+        _btn_h     = self.attach_btn.height()
+        _btn_bottom = _btn_tl.y() + _btn_h
+
+        # Центрировано по кнопке, нижний край = нижний край кнопки
+        _win_tl    = self.mapToGlobal(QtCore.QPoint(0, 0))
+        _win_w     = self.width()
+        _ideal_x   = _btn_tl.x() + _btn_w // 2 - menu_width // 2
+        _clamped_x = max(_win_tl.x() + 8, min(_ideal_x, _win_tl.x() + _win_w - menu_width - 8))
+
+        _start_geo     = QtCore.QRect(_btn_tl.x(), _btn_tl.y(), _btn_w, _btn_h)
+        _proxy_end_geo = QtCore.QRect(_clamped_x,
+                                       _btn_tl.y() - menu_height,
+                                       menu_width, menu_height)
+
+        _menu_bg = QtGui.QColor(30, 30, 35, 245) if is_dark else QtGui.QColor(255, 255, 255, 245)
+
+        # Кнопка затемняется пока прокси анимируется
+        _dim_eff = QtWidgets.QGraphicsOpacityEffect(self.attach_btn)
+        self.attach_btn.setGraphicsEffect(_dim_eff)
+        _dim_anim = QtCore.QPropertyAnimation(_dim_eff, b"opacity")
+        _dim_anim.setDuration(100)
+        _dim_anim.setStartValue(1.0)
+        _dim_anim.setEndValue(0.0)
+        _dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+        _dim_anim.start()
+
+        open_proxy = _BurstProxy(_menu_bg, _start_geo)
+        open_proxy.show()
+        open_proxy.raise_()
+
+        _o_geo = QtCore.QPropertyAnimation(open_proxy, b"geometry")
+        _o_geo.setDuration(300)
+        _o_geo.setStartValue(_start_geo)
+        _o_geo.setEndValue(_proxy_end_geo)
+        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+        _o_geo.start()
+        open_proxy._anims = [_o_geo, _dim_eff, _dim_anim]
+
+        def _on_open_done():
+            self._attach_menu_animating = False
+            try:
+                open_proxy.close()
+            except Exception:
+                pass
+            menu.popup(_proxy_end_geo.topLeft())
+            self._apply_menu_blur_effect()
+
+        _o_geo.finished.connect(_on_open_done)
+
+        # ── Обработка действий через сигналы ──
         def _do_search():
             self.use_search = not self.use_search
-            if self.use_search:
-                print("[MENU] ⚠️ FORCED SEARCH MODE активирован")
-            else:
-                print("[MENU] Режим 'Умный поиск'")
+            print(f"[MENU] Умный поиск {'ВКЛ' if self.use_search else 'ВЫКЛ'}")
+            QtCore.QTimer.singleShot(80, lambda: self._show_search_toast(self.use_search))
 
         search_action.triggered.connect(_do_search)
         file_action.triggered.connect(self.attach_file)
         if clear_action:
             clear_action.triggered.connect(self.clear_attached_file)
 
-        # ── Анимация закрытия: screenshot-proxy паттерн ──
+        # ─────────────────────────────────────────────────────────────────
+        # ЗАКРЫТИЕ: proxy схлопывается обратно в кнопку «+»
+        # ─────────────────────────────────────────────────────────────────
         _close_started = [False]
 
         def _animate_close():
@@ -8609,21 +10162,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             _close_started[0] = True
 
             cur_geo = menu.geometry()
-
-            # grab() рендерит меню с его CSS (border-radius, прозрачность)
             try:
                 px = menu.grab()
             except Exception:
                 px = None
 
-            # Proxy-виджет с прозрачным фоном поверх всего
-            class _ProxyWidget(QtWidgets.QWidget):
+            class _CloseProxy(QtWidgets.QWidget):
                 def __init__(self, pixmap, geo):
                     super().__init__(
                         None,
                         QtCore.Qt.WindowType.Tool |
                         QtCore.Qt.WindowType.FramelessWindowHint |
-                        QtCore.Qt.WindowType.WindowStaysOnTopHint
+                        QtCore.Qt.WindowType.WindowStaysOnTopHint,
                     )
                     self._px = pixmap
                     self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -8632,65 +10182,59 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     self.setGeometry(geo)
 
                 def paintEvent(self, event):
-                    if self._px:
-                        from PyQt6 import QtGui
-                        p = QtGui.QPainter(self)
-                        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-                        p.drawPixmap(self.rect(), self._px)
-                        p.end()
+                    if not self._px:
+                        return
+                    p = QtGui.QPainter(self)
+                    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+                    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+                    r = self.rect()
+                    radius = min(20, r.width() // 2, r.height() // 2)
+                    path = QtGui.QPainterPath()
+                    path.addRoundedRect(QtCore.QRectF(r), radius, radius)
+                    p.setClipPath(path)
+                    p.drawPixmap(r, self._px)
+                    p.end()
 
-            proxy = _ProxyWidget(px, cur_geo)
+            proxy = _CloseProxy(px, cur_geo)
             proxy.show()
             proxy.raise_()
 
-            # Fade-out
+            _btn_now   = self.attach_btn.mapToGlobal(QtCore.QPoint(0, 0))
+            _close_end = QtCore.QRect(_btn_now.x(), _btn_now.y(),
+                                       self.attach_btn.width(), self.attach_btn.height())
+
+            _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
+            _c_geo.setDuration(270)
+            _c_geo.setStartValue(cur_geo)
+            _c_geo.setEndValue(_close_end)
+            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
             _c_eff = QtWidgets.QGraphicsOpacityEffect(proxy)
             proxy.setGraphicsEffect(_c_eff)
             _c_eff.setOpacity(1.0)
-
             _c_op = QtCore.QPropertyAnimation(_c_eff, b"opacity")
-            _c_op.setDuration(180)
+            _c_op.setDuration(270)
             _c_op.setStartValue(1.0)
+            _c_op.setKeyValueAt(0.55, 0.95)
+            _c_op.setKeyValueAt(0.85, 0.3)
             _c_op.setEndValue(0.0)
-            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
 
-            # Scale-down вниз
-            end_geo = QtCore.QRect(
-                cur_geo.x(),
-                cur_geo.y() + int(cur_geo.height() * 0.12),
-                cur_geo.width(),
-                int(cur_geo.height() * 0.88)
-            )
-            _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
-            _c_geo.setDuration(180)
-            _c_geo.setStartValue(cur_geo)
-            _c_geo.setEndValue(end_geo)
-            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
-
-            def _on_proxy_done():
+            def _on_close_done():
                 try:
                     proxy.close()
                 except Exception:
                     pass
-                self.attach_btn.clearFocus()
-                self.input_field.setFocus()
+                self._restore_attach_btn_animated()
 
-            _c_op.finished.connect(_on_proxy_done)
-            # Начинаем убирать blur ОДНОВРЕМЕННО с proxy-анимацией (не после неё)
-            # чтобы overlay и proxy исчезали плавно вместе
+
+            _c_geo.finished.connect(_on_close_done)
             self._remove_menu_blur_effect()
             _c_op.start()
             _c_geo.start()
-            proxy._anims = [_c_op, _c_geo, _c_eff]
+            self._attach_close_proxy_anims = [proxy, _c_op, _c_geo, _c_eff]
 
         menu.aboutToHide.connect(_animate_close)
-
-        # Запускаем анимацию появления и blur после небольшой задержки
-        QtCore.QTimer.singleShot(120, anim_group.start)
-        QtCore.QTimer.singleShot(120, self._apply_menu_blur_effect)
-
-        # popup() — не блокирует event loop
-        menu.popup(menu_pos)
     
     def _apply_menu_blur_effect(self):
         """Применить реальный blur эффект через снимок экрана"""
@@ -8782,22 +10326,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self._overlay_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         self._overlay_anim.start()
         
-        # ═══════════════════════════════════════════════════════════════
-        # 2. FADE OUT КНОПКИ "+"
-        # ═══════════════════════════════════════════════════════════════
-        # Создаём opacity эффект для кнопки (всегда свежий — старый мог быть удалён Qt)
-        _btn_eff = QtWidgets.QGraphicsOpacityEffect(self.attach_btn)
-        self.attach_btn.setGraphicsEffect(_btn_eff)
-        self.attach_btn._opacity_effect = _btn_eff
-        _btn_eff.setOpacity(1.0)
-        
-        # Анимируем opacity от 1.0 до 0.0
-        self._button_fade_anim = QtCore.QPropertyAnimation(_btn_eff, b"opacity")
-        self._button_fade_anim.setDuration(250)
-        self._button_fade_anim.setStartValue(1.0)
-        self._button_fade_anim.setEndValue(0.0)
-        self._button_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self._button_fade_anim.start()
+        # Кнопка «+» управляется через _dim_anim в show_attach_menu — не трогаем
         
         # ═══════════════════════════════════════════════════════════════
         # 3. FADE OUT КНОПКИ "ВНИЗ" (используем её существующий opacity effect)
@@ -9042,37 +10571,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self._overlay_anim.finished.connect(cleanup_overlay)
             self._overlay_anim.start()
         
-        # ═══════════════════════════════════════════════════════════════
-        # 2. FADE IN КНОПКИ "+"
-        # ═══════════════════════════════════════════════════════════════
-        # ═══════════════════════════════════════════════════════════════
-        # 2. FADE IN КНОПКИ «+» (восстанавливаем видимость)
-        # ═══════════════════════════════════════════════════════════════
-        try:
-            eff = getattr(self.attach_btn, '_opacity_effect', None)
-            if eff is not None:
-                # Проверяем что C++ объект жив — вызов opacity() бросит RuntimeError если нет
-                cur_op = eff.opacity()
-                self._button_fade_anim.stop()
-                self._button_fade_anim.setDuration(300)
-                self._button_fade_anim.setStartValue(cur_op)
-                self._button_fade_anim.setEndValue(1.0)
-                self._button_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-                def _clear_btn_effect():
-                    try:
-                        self.attach_btn.setGraphicsEffect(None)
-                    except Exception:
-                        pass
-                self._button_fade_anim.finished.connect(_clear_btn_effect)
-                self._button_fade_anim.start()
-            else:
-                self.attach_btn.setGraphicsEffect(None)
-        except (RuntimeError, Exception):
-            # C++ объект удалён — просто сбрасываем эффект
-            try:
-                self.attach_btn.setGraphicsEffect(None)
-            except Exception:
-                pass
+        # Кнопка «+» восстанавливается через _restore_attach_btn_animated — не трогаем
         
         # ═══════════════════════════════════════════════════════════════
         # 3. FADE IN КНОПКИ "ВНИЗ" (восстанавливаем если была видна до blur)
@@ -9103,48 +10602,235 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
     # ═══════════════════════════════════════════════════════════════
     
     def start_status_animation(self):
-        """Запуск анимации точек в статусе"""
-        self.status_dots_count = 0
-        self.status_timer = QtCore.QTimer(self)
-        self.status_timer.timeout.connect(self.update_status_dots)
-        self.status_timer.start(350)  # Интервал 350ms
-    
-    def update_status_dots(self):
-        """Обновление точек в статусе"""
-        # ✅ КРИТИЧНО: Проверка наличия status_base_text
-        if not hasattr(self, 'status_base_text'):
-            self.status_base_text = ""
-        
-        # ✅ КРИТИЧНО: Очищаем перед обновлением
-        self.status_label.clear()
-        
-        dots = "." * self.status_dots_count
-        self.status_label.setText(f"{self.status_base_text}{dots}")
-        self.status_dots_count = (self.status_dots_count + 1) % 4  # 0, 1, 2, 3
-    
+        """Показывает виджет-заглушку пузыря ИИ пока модель думает."""
+        # Убираем старый виджет если вдруг остался
+        self.stop_status_animation()
+
+        # Читаем настройки темы
+        try:
+            _theme = getattr(self, 'current_theme', 'light')
+            _glass = getattr(self, 'current_liquid_glass', True)
+        except Exception:
+            _theme = 'light'
+            _glass = True
+
+        # Имя текущей модели
+        try:
+            _model_name = get_current_display_name()
+        except Exception:
+            _model_name = "ИИ"
+
+        self._thinking_bubble = ThinkingBubbleWidget(
+            model_name=_model_name,
+            theme=_theme,
+            liquid_glass=_glass,
+            parent=self.messages_widget,
+        )
+        self.messages_layout.addWidget(self._thinking_bubble)
+        self._thinking_bubble.show()
+
+        # Всегда скроллим вниз — пользователь только что отправил сообщение.
+        # Задержка 360ms: больше чем анимация автоскролла (260ms + 20ms старт + запас),
+        # чтобы она не перезаписала позицию назад к старому максимуму.
+        def _scroll():
+            try:
+                self.messages_layout.activate()
+                sb = self.scroll_area.verticalScrollBar()
+                sb.setValue(sb.maximum())
+            except Exception:
+                pass
+        QtCore.QTimer.singleShot(360, _scroll)
+
     def stop_status_animation(self):
-        """Остановка анимации точек"""
-        if hasattr(self, 'status_timer') and self.status_timer.isActive():
-            self.status_timer.stop()
-        # ✅ КРИТИЧНО: Очищаем перед установкой пустой строки
+        """Убирает виджет-заглушку пузыря ИИ (плавное исчезновение)."""
         self.status_label.clear()
         self.status_label.setText("")
+
+        # Останавливаем стрим если он шёл
+        if hasattr(self, '_stream_flush_timer'):
+            self._stream_flush_timer.stop()
+        self._stream_active = False
+        self._stream_buf    = ""
+
+        bubble = getattr(self, '_thinking_bubble', None)
+        if bubble is None:
+            return
+        self._thinking_bubble = None
+
+        def _remove():
+            try:
+                self.messages_layout.removeWidget(bubble)
+                bubble.setParent(None)
+                bubble.deleteLater()
+            except Exception:
+                pass
+
+        try:
+            bubble.fade_out_and_remove(on_done=_remove)
+        except Exception:
+            _remove()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # СТРИМИНГ: побуквенный вывод токенов от Ollama
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _on_stream_chunk(self, token: str):
+        """
+        Слот — вызывается из AIWorker для каждого токена.
+        Работает в GUI-потоке благодаря Qt::AutoConnection.
+
+        Логика:
+        1. Первый токен → убираем кружок, создаём пустой пузырь ИИ.
+        2. Каждый следующий токен → дописываем в буфер.
+        3. Flush-таймер каждые 40 мс → переносит буфер в message_label.
+        """
+        if not getattr(self, '_stream_active', False):
+            # ─── Первый токен: инициализируем стрим ───────────────────────
+            self._stream_raw       = ""   # весь накопленный текст
+            self._stream_buf       = ""   # буфер между flush-тиками
+            self._char_queue       = []   # очередь символов для побуквенного вывода
+            self._displayed_text   = ""   # уже отображённый текст
+
+            # Убираем пульсирующий кружок (внутри сбрасывает _stream_active в False)
+            self.stop_status_animation()
+            # Ставим флаг ПОСЛЕ stop_status_animation — иначе он сбросит его
+            self._stream_active    = True
+
+            # Узнаём имя спикера (та же логика что в handle_response)
+            try:
+                _mk = (self.current_worker.model_key
+                       if hasattr(self, 'current_worker') and self.current_worker
+                       else llama_handler.CURRENT_AI_MODEL_KEY)
+                _spk = llama_handler.SUPPORTED_MODELS.get(
+                    _mk,
+                    llama_handler.SUPPORTED_MODELS.get(llama_handler.CURRENT_AI_MODEL_KEY)
+                )[1]
+            except Exception:
+                _spk = llama_handler.ASSISTANT_NAME
+            self._stream_speaker = _spk
+
+            # Создаём пустой пузырь ИИ (кнопки создаются, но скрыты — покажем при финализации)
+            _regen_target = getattr(self, '_regen_target_widget', None)
+            if _regen_target is None:
+                # Обычный ответ — новый виджет
+                self._stream_widget = MessageWidget(
+                    _spk, "",
+                    add_controls=True,   # кнопки создаются в layout (controls_widget.setVisible будет False по умолчанию)
+                    language=self.current_language,
+                    main_window=self,
+                    parent=self.messages_widget,
+                )
+                # Скрываем кнопки до финализации
+                if hasattr(self._stream_widget, 'controls_widget'):
+                    self._stream_widget.controls_widget.setVisible(False)
+                # Блокируем пересчёт высоты при первых символах — предотвращаем резкий прыжок
+                if hasattr(self._stream_widget, 'message_container'):
+                    self._stream_widget.message_container.setMinimumHeight(64)
+                self.messages_layout.addWidget(self._stream_widget)
+                self._stream_widget.show()
+                # Анимация появления
+                if not IS_WINDOWS and hasattr(self._stream_widget, '_start_appear_animation'):
+                    QtCore.QTimer.singleShot(20, self._stream_widget._start_appear_animation)
+                # Скролл вниз
+                def _sc_first():
+                    try:
+                        self.messages_layout.activate()
+                        self.scroll_area.verticalScrollBar().setValue(
+                            self.scroll_area.verticalScrollBar().maximum()
+                        )
+                    except Exception:
+                        pass
+                QtCore.QTimer.singleShot(40, _sc_first)
+            else:
+                # Перегенерация — не создаём виджет, handle_response сам обновит
+                self._stream_widget = None
+
+            # Запускаем flush-таймер
+            if not hasattr(self, '_stream_flush_timer'):
+                self._stream_flush_timer = QtCore.QTimer(self)
+                self._stream_flush_timer.setInterval(16)
+                self._stream_flush_timer.timeout.connect(self._stream_flush)
+            self._stream_flush_timer.start()
+
+        # Добавляем токен в буфер и очередь символов
+        self._stream_raw += token
+        self._stream_buf += token
+        self._char_queue.extend(list(token))
+
+    def _stream_flush(self):
+        """Вызывается каждые 16 мс — побуквенно выводит символы из очереди."""
+        char_queue = getattr(self, '_char_queue', None)
+        if not char_queue:
+            return
+        mw = getattr(self, '_stream_widget', None)
+        if mw is None:
+            if char_queue is not None:
+                char_queue.clear()
+            return
+        try:
+            # Адаптивная скорость: если очередь накопилась — выводим быстрее
+            q_len = len(char_queue)
+            if q_len > 80:
+                chars_per_tick = 6
+            elif q_len > 30:
+                chars_per_tick = 4
+            else:
+                chars_per_tick = 2
+
+            batch = char_queue[:chars_per_tick]
+            del char_queue[:chars_per_tick]
+            self._displayed_text += "".join(batch)
+            self._stream_buf = ""
+
+            # Быстрый plain-вывод без markdown (markdown применяется в финале)
+            safe = (self._displayed_text
+                    .replace('&', '&amp;')
+                    .replace('<', '&lt;')
+                    .replace('>', '&gt;')
+                    .replace('\n', '<br>'))
+
+            # Блокируем лишние repaint во время setText
+            mw.message_label.setUpdatesEnabled(False)
+            mw.message_label.setText(
+                f"<b style='color:{mw._speaker_color};'>{mw.speaker}:</b><br>{safe}"
+            )
+            mw.message_label.setUpdatesEnabled(True)
+
+            # Плавный рост пузыря: фиксируем минимальную высоту, не даём сжиматься
+            if hasattr(mw, 'message_container'):
+                new_h = mw.message_container.sizeHint().height()
+                cur_min = mw.message_container.minimumHeight()
+                if new_h > cur_min:
+                    mw.message_container.setMinimumHeight(new_h)
+
+            mw.message_label.update()
+
+            # Автоскролл если пользователь внизу
+            sb = self.scroll_area.verticalScrollBar()
+            if sb.value() >= sb.maximum() - 80:
+                sb.setValue(sb.maximum())
+        except Exception:
+            if char_queue is not None:
+                char_queue.clear()
 
     def toggle_sidebar(self):
         """
         Drawer-анимация боковой панели.
 
-        Sidebar — overlay поверх контента (не в layout). 
-        Анимируется pos.x: от -SIDEBAR_W (скрыт) до 0 (открыт).
-        Контент не сдвигается вообще.
+        Sidebar — overlay поверх контента (pos.x: -SIDEBAR_W → 0).
+        Shadow — отдельный виджет-градиент (pos.x синхронен с sidebar).
+        Fade контента через QGraphicsOpacityEffect — НЕ конфликтует с тенью.
 
-        Открытие  : OutCubic 320ms + fade-in контента 200ms + dim overlay
-        Закрытие  : InCubic  240ms + fade-out контента 120ms + убираем dim
+        Открытие : OutBack 360ms (лёгкая пружина) + fade-in 220ms с задержкой 60ms
+        Закрытие : InCubic 250ms + fade-out 130ms мгновенно
         """
         is_opening = not self._sidebar_open
         self._sidebar_open = is_opening
 
-        W = self._SIDEBAR_W
+        W  = self._SIDEBAR_W
+        SW = 22   # ширина shadow-виджета
+        h  = self.main_container.height()
+
         cur_x = self.sidebar.x()
         target_x = 0 if is_opening else -W
 
@@ -9153,8 +10839,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.hide_delete_panel()
 
         # ── Останавливаем предыдущие анимации ────────────────────────────────
-        for attr in ('_sb_pos_anim', '_sb_fade_anim',
-                     '_sb_rotate_anim', 'animation', 'animation2'):
+        for attr in ('_sb_pos_anim', '_sb_shadow_anim', '_sb_fade_anim',
+                     '_sb_dim_anim', 'animation', 'animation2'):
             a = getattr(self, attr, None)
             if a:
                 try:
@@ -9163,150 +10849,105 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                     pass
 
         # ════════════════════════════════════════════════════════════════════
-        # 1. SLIDE — pos.x sidebar
+        # 1. SLIDE sidebar + shadow — оригинальная анимация OutCubic
         # ════════════════════════════════════════════════════════════════════
         if is_opening:
-            dur_slide = 320
-            easing    = QtCore.QEasingCurve.Type.OutCubic
+            dur  = 300
+            ease = QtCore.QEasingCurve.Type.OutCubic
         else:
-            dur_slide = 240
-            easing    = QtCore.QEasingCurve.Type.InCubic
+            dur  = 220
+            ease = QtCore.QEasingCurve.Type.InOutCubic
 
+        # Sidebar pos animation
         self._sb_pos_anim = QtCore.QPropertyAnimation(self.sidebar, b"pos")
-        self._sb_pos_anim.setDuration(dur_slide)
+        self._sb_pos_anim.setDuration(dur)
         self._sb_pos_anim.setStartValue(QtCore.QPoint(cur_x, 0))
         self._sb_pos_anim.setEndValue(QtCore.QPoint(target_x, 0))
-        self._sb_pos_anim.setEasingCurve(easing)
+        self._sb_pos_anim.setEasingCurve(ease)
 
-        # Обратная совместимость: open_settings ищет self.animation
+        # Shadow widget pos animation (прямо справа от sidebar)
+        cur_shadow_x = cur_x + W
+        target_shadow_x = target_x + W
+        self._sb_shadow_widget.setGeometry(cur_shadow_x, 0, SW, h)
+
+        self._sb_shadow_anim = QtCore.QPropertyAnimation(self._sb_shadow_widget, b"pos")
+        self._sb_shadow_anim.setDuration(dur)
+        self._sb_shadow_anim.setStartValue(QtCore.QPoint(cur_shadow_x, 0))
+        self._sb_shadow_anim.setEndValue(QtCore.QPoint(target_shadow_x, 0))
+        self._sb_shadow_anim.setEasingCurve(ease)
+
+        # Обратная совместимость для open_settings
         self.animation  = self._sb_pos_anim
         self.animation2 = self._sb_pos_anim
 
         # ════════════════════════════════════════════════════════════════════
-        # 2. FADE — прозрачность содержимого sidebar
+        # 2. Без fade контента — чистый слайд как в оригинале
         # ════════════════════════════════════════════════════════════════════
-        if (not hasattr(self, '_sb_opacity_effect')
-                or self._sb_opacity_effect is None):
-            self._sb_opacity_effect = QtWidgets.QGraphicsOpacityEffect(self.sidebar)
-            self.sidebar.setGraphicsEffect(self._sb_opacity_effect)
-
-        eff = self._sb_opacity_effect
-
-        if is_opening:
-            eff.setOpacity(0.0)
-            self._sb_fade_anim = QtCore.QPropertyAnimation(eff, b"opacity")
-            self._sb_fade_anim.setDuration(200)
-            self._sb_fade_anim.setStartValue(0.0)
-            self._sb_fade_anim.setEndValue(1.0)
-            self._sb_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
-            QtCore.QTimer.singleShot(80, self._sb_fade_anim.start)
-        else:
-            self._sb_fade_anim = QtCore.QPropertyAnimation(eff, b"opacity")
-            self._sb_fade_anim.setDuration(120)
-            self._sb_fade_anim.setStartValue(eff.opacity())
-            self._sb_fade_anim.setEndValue(0.0)
-            self._sb_fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
-            self._sb_fade_anim.start()
+        self._sb_fade_anim = None  # не используется
 
         # ════════════════════════════════════════════════════════════════════
-        # 3. DIM OVERLAY — полупрозрачное затемнение контента
+        # 3. DIM overlay
         # ════════════════════════════════════════════════════════════════════
         is_dark = getattr(self, 'current_theme', 'light') == 'dark'
         dim_color = "rgba(0,0,0,18)" if is_dark else "rgba(0,0,0,12)"
-        self._dim_overlay.setStyleSheet(
-            f"background:{dim_color}; border:none;"
-        )
+        self._dim_overlay.setStyleSheet(f"background:{dim_color}; border:none;")
 
         if not hasattr(self, '_dim_opacity_eff') or self._dim_opacity_eff is None:
             self._dim_opacity_eff = QtWidgets.QGraphicsOpacityEffect(self._dim_overlay)
             self._dim_overlay.setGraphicsEffect(self._dim_opacity_eff)
 
-        dim_eff = self._dim_opacity_eff
-
-        # Останавливаем предыдущую dim-анимацию
-        old_dim = getattr(self, '_dim_anim', None)
+        old_dim = getattr(self, '_sb_dim_anim', None)
         if old_dim:
-            try:
-                old_dim.stop()
-            except RuntimeError:
-                pass
+            try: old_dim.stop()
+            except RuntimeError: pass
 
         if is_opening:
-            # Dim появляется вместе со слайдом
-            self._dim_overlay.setGeometry(
-                self.main_container.rect()
-            )
+            self._dim_overlay.setGeometry(self.main_container.rect())
+            # Поднимаем sidebar ПЕРЕД stackUnder, иначе при первом открытии
+            # sidebar окажется ниже central (central добавляется в layout позже всех),
+            # и stackUnder поместит overlay ниже central — клики проваливаются сквозь.
+            self.sidebar.raise_()
             self._dim_overlay.stackUnder(self.sidebar)
             self._dim_overlay.show()
-            self._dim_overlay.raise_()
             self.sidebar.raise_()
+            self._sb_shadow_widget.raise_()
 
-            dim_eff.setOpacity(0.0)
-            self._dim_anim = QtCore.QPropertyAnimation(dim_eff, b"opacity")
-            self._dim_anim.setDuration(320)
-            self._dim_anim.setStartValue(0.0)
-            self._dim_anim.setEndValue(1.0)
-            self._dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
-            self._dim_anim.start()
+            self._dim_opacity_eff.setOpacity(0.0)
+            self._sb_dim_anim = QtCore.QPropertyAnimation(self._dim_opacity_eff, b"opacity")
+            self._sb_dim_anim.setDuration(360)
+            self._sb_dim_anim.setStartValue(0.0)
+            self._sb_dim_anim.setEndValue(1.0)
+            self._sb_dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+            self._sb_dim_anim.start()
         else:
-            # Dim исчезает вместе со слайдом
-            self._dim_anim = QtCore.QPropertyAnimation(dim_eff, b"opacity")
-            self._dim_anim.setDuration(240)
-            self._dim_anim.setStartValue(dim_eff.opacity())
-            self._dim_anim.setEndValue(0.0)
-            self._dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
-
-            def _hide_dim():
-                try:
-                    self._dim_overlay.hide()
-                except RuntimeError:
-                    pass
-
-            self._dim_anim.finished.connect(_hide_dim)
-            self._dim_anim.start()
+            self._sb_dim_anim = QtCore.QPropertyAnimation(self._dim_opacity_eff, b"opacity")
+            self._sb_dim_anim.setDuration(250)
+            self._sb_dim_anim.setStartValue(self._dim_opacity_eff.opacity())
+            self._sb_dim_anim.setEndValue(0.0)
+            self._sb_dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            self._sb_dim_anim.finished.connect(lambda: self._dim_overlay.hide())
+            self._sb_dim_anim.start()
 
         # ════════════════════════════════════════════════════════════════════
-        # 4. CLEANUP — после закрытия сбрасываем opacity effect
+        # 4. CLEANUP по завершении
         # ════════════════════════════════════════════════════════════════════
-        if not is_opening:
-            def _cleanup_effects():
-                try:
-                    self.sidebar.setGraphicsEffect(None)
-                    self._sb_opacity_effect = None
-                    # Восстанавливаем тень (убрана из-за opacity effect)
-                    if hasattr(self, '_sb_shadow_effect'):
-                        # Создаём новый объект — старый мог удалиться
-                        _sh = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
-                        _sh.setBlurRadius(28)
-                        _sh.setOffset(6, 0)
-                        _sh.setColor(QtGui.QColor(0, 0, 0, 55))
-                        self.sidebar.setGraphicsEffect(_sh)
-                        self._sb_shadow_effect = _sh
-                except RuntimeError:
-                    pass
-
-            self._sb_pos_anim.finished.connect(_cleanup_effects)
+        if is_opening:
+            self._sb_shadow_widget.show()
         else:
-            def _cleanup_open():
+            def _on_close_done():
                 try:
-                    self.sidebar.setGraphicsEffect(None)
-                    self._sb_opacity_effect = None
-                    # Восстанавливаем тень
-                    _sh = QtWidgets.QGraphicsDropShadowEffect(self.sidebar)
-                    _sh.setBlurRadius(28)
-                    _sh.setOffset(6, 0)
-                    _sh.setColor(QtGui.QColor(0, 0, 0, 55))
-                    self.sidebar.setGraphicsEffect(_sh)
-                    self._sb_shadow_effect = _sh
+                    self._sb_shadow_widget.hide()
+                    self._sb_shadow_widget.move(-22, 0)
                 except RuntimeError:
                     pass
-
-            self._sb_fade_anim.finished.connect(_cleanup_open) if hasattr(self, '_sb_fade_anim') else None
+            self._sb_pos_anim.finished.connect(_on_close_done)
 
         # ── Запуск ───────────────────────────────────────────────────────────
         self._sb_pos_anim.start()
+        self._sb_shadow_anim.start()
 
-        print(f"[SIDEBAR] {'▶ Открываю' if is_opening else '◀ Закрываю'} drawer (pos.x overlay)")
+        print(f"[SIDEBAR] {'▶ Открываю' if is_opening else '◀ Закрываю'} drawer")
+
 
 
     def manual_scroll_to_bottom(self):
@@ -9434,20 +11075,14 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             return False
 
     def open_settings(self):
-        """Открыть экран настроек"""
-        print("[SETTINGS] Открытие настроек")
+        """Открыть настройки — плавный crossfade + мягкий slide-up."""
+        if getattr(self, '_settings_transitioning', False):
+            return
+        self._settings_transitioning = True
 
-        # Скрываем кнопку скролла
         if hasattr(self, 'scroll_to_bottom_btn'):
             self.scroll_to_bottom_btn.smooth_hide()
 
-        # Скрываем элементы чата
-        for attr in ('scroll_area', 'title_label', 'clear_btn', 'input_container'):
-            w = getattr(self, attr, None)
-            if w:
-                w.hide()
-
-        # Меняем кнопку меню: toggle → close_settings
         if hasattr(self, 'menu_btn'):
             try:
                 self.menu_btn.clicked.disconnect()
@@ -9455,184 +11090,188 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 pass
             self.menu_btn.clicked.connect(self.close_settings)
 
-        # Обновляем стили настроек заранее
         if hasattr(self, 'settings_view'):
             self.settings_view.apply_settings_styles()
             self.settings_view.update_delete_all_btn_state(
                 self.check_has_chats_with_messages()
             )
-            self.settings_view.hide()
 
-        def _show_settings():
-            if not hasattr(self, 'settings_view'):
+        def _run():
+            sv = getattr(self, 'settings_view', None)
+            cs = getattr(self, 'content_stack', None)
+            if sv is None or cs is None:
+                self._settings_transitioning = False
                 return
-            self.content_stack.setCurrentIndex(1)
-            self.settings_view.show()
-            eff = QtWidgets.QGraphicsOpacityEffect(self.settings_view)
-            self.settings_view.setGraphicsEffect(eff)
-            eff.setOpacity(0.0)
-            anim = QtCore.QPropertyAnimation(eff, b"opacity")
-            anim.setDuration(280)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            anim.finished.connect(lambda: self.settings_view.setGraphicsEffect(None))
-            anim.start()
-            self._settings_open_anim = anim   # держим ссылку
 
-        # Если sidebar открыт — сначала закрываем его, потом показываем настройки
+            chat_w = cs.widget(0)
+            h = cs.height()
+
+            # ── Fade-out чата (мягко) ────────────────────────────────────────
+            eff_chat = QtWidgets.QGraphicsOpacityEffect(chat_w)
+            chat_w.setGraphicsEffect(eff_chat)
+
+            ao_op = QtCore.QPropertyAnimation(eff_chat, b"opacity")
+            ao_op.setDuration(180)
+            ao_op.setStartValue(1.0)
+            ao_op.setEndValue(0.0)
+            ao_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+            def _show_settings():
+                try:
+                    chat_w.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+                for attr in ('scroll_area', 'title_label', 'clear_btn', 'input_container'):
+                    w = getattr(self, attr, None)
+                    if w: w.hide()
+
+                cs.setCurrentIndex(1)
+                sv.scroll_to_top()   # всегда открываем с самого верха
+                OFFSET = max(24, h // 14)   # небольшое смещение — не резкое
+                sv.move(0, OFFSET)
+                sv.show()
+
+                # ── Slide-up (маленький) + fade-in настроек ──────────────
+                eff_sv = QtWidgets.QGraphicsOpacityEffect(sv)
+                sv.setGraphicsEffect(eff_sv)
+                eff_sv.setOpacity(0.0)
+
+                a_op = QtCore.QPropertyAnimation(eff_sv, b"opacity")
+                a_op.setDuration(380)
+                a_op.setStartValue(0.0)
+                a_op.setEndValue(1.0)
+                a_op.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+                a_pos = QtCore.QPropertyAnimation(sv, b"pos")
+                a_pos.setDuration(400)
+                a_pos.setStartValue(QtCore.QPoint(0, OFFSET))
+                a_pos.setEndValue(QtCore.QPoint(0, 0))
+                a_pos.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+                grp = QtCore.QParallelAnimationGroup(self)
+                grp.addAnimation(a_op)
+                grp.addAnimation(a_pos)
+
+                def _done():
+                    try:
+                        sv.setGraphicsEffect(None)
+                        sv.move(0, 0)
+                    except RuntimeError:
+                        pass
+                    self._settings_transitioning = False
+
+                grp.finished.connect(_done)
+                self._settings_open_grp = grp
+                grp.start()
+
+            ao_op.finished.connect(_show_settings)
+            self._settings_chat_out_anim = ao_op
+            ao_op.start()
+
         if getattr(self, '_sidebar_open', False):
             self.toggle_sidebar()
-            QtCore.QTimer.singleShot(280, _show_settings)
+            QtCore.QTimer.singleShot(240, _run)
         else:
-            QtCore.QTimer.singleShot(20, _show_settings)
-
+            QtCore.QTimer.singleShot(10, _run)
 
     def close_settings(self):
-        """Закрыть настройки и вернуться к чату — с плавным fade-переходом"""
-        print("[SETTINGS] Возврат к чату")
-        self._animate_stack_transition(from_index=1, to_index=0, callback=self._after_close_settings)
+        """Закрыть настройки — мягкий fade-out вниз, чат плавно появляется."""
+        if getattr(self, '_settings_transitioning', False):
+            return
+        self._settings_transitioning = True
 
-    def _after_close_settings(self):
-        """Вызывается после завершения анимации закрытия настроек"""
-        print("[SETTINGS] Анимация завершена, показываю элементы интерфейса...")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ИСПРАВЛЕНИЕ: Плавное появление элементов БЕЗ нарушения layout
-        # ═══════════════════════════════════════════════════════════════
-        
-        # Восстанавливаем обработчик кнопки меню СРАЗУ
+        sv = getattr(self, 'settings_view', None)
+        cs = getattr(self, 'content_stack', None)
+        if sv is None or cs is None:
+            self._settings_transitioning = False
+            return
+
         if hasattr(self, 'menu_btn'):
             try:
                 self.menu_btn.clicked.disconnect()
             except (RuntimeError, TypeError):
                 pass
             self.menu_btn.clicked.connect(self.toggle_sidebar)
-        
-        # Показываем все элементы БЕЗ анимации (чтобы layout правильно работал)
-        if hasattr(self, 'scroll_area'):
-            self.scroll_area.show()
-        if hasattr(self, 'title_label'):
-            self.title_label.show()
-        if hasattr(self, 'clear_btn'):
-            self.clear_btn.show()
-        if hasattr(self, 'input_container'):
-            self.input_container.show()
-        
-        # Обновляем layout ПЕРЕД анимацией
-        QtWidgets.QApplication.processEvents()
-        
-        # Теперь применяем fade-in только к ВЕРХНЕМУ уровню виджетов
-        widgets_to_animate = []
-        
-        if hasattr(self, 'scroll_area'):
-            widgets_to_animate.append(self.scroll_area)
-        if hasattr(self, 'title_label'):
-            widgets_to_animate.append(self.title_label)
-        if hasattr(self, 'clear_btn'):
-            widgets_to_animate.append(self.clear_btn)
-        # НЕ анимируем input_container - там сложный layout с кнопками
-        # Вместо этого анимируем только внешний контейнер если он есть
-        
-        # Применяем эффект opacity ТОЛЬКО если это простые виджеты
-        for widget in widgets_to_animate:
-            # Проверяем что виджет видим
-            if not widget.isVisible():
-                continue
-                
-            effect = QtWidgets.QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(effect)
-            effect.setOpacity(0.0)
-            
-            # Анимация появления
-            anim = QtCore.QPropertyAnimation(effect, b"opacity")
-            anim.setDuration(300)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
-            
-            # ВАЖНО: Убираем эффект после завершения анимации
-            def remove_effect(w=widget):
-                w.setGraphicsEffect(None)
-                print(f"[SETTINGS] Убрал эффект с {w.objectName()}")
-            
-            anim.finished.connect(remove_effect)
-            anim.start()
-            
-            # Сохраняем ссылку
-            if not hasattr(self, '_fade_in_animations'):
-                self._fade_in_animations = []
-            self._fade_in_animations.append(anim)
-        
-        # input_container появляется БЕЗ анимации (чтобы не сломать layout)
-        if hasattr(self, 'input_container'):
-            self.input_container.show()
-            print("[SETTINGS] input_container показан БЕЗ анимации (сохранён layout)")
-        
-        # Обновляем видимость кнопки скролла с задержкой
-        QtCore.QTimer.singleShot(350, lambda: QtCore.QMetaObject.invokeMethod(
-            self,
-            "_update_button_after_scroll",
-            QtCore.Qt.ConnectionType.QueuedConnection
-        ))
-        
-        print("[SETTINGS] ✓ Элементы интерфейса плавно появляются")
 
-    def _animate_stack_transition(self, from_index: int, to_index: int, callback=None):
-        """
-        Плавный fade-переход между страницами QStackedWidget.
-        Делает скриншот текущей страницы, переключает, плавно убирает скриншот.
-        """
-        # Останавливаем предыдущую анимацию если идёт
-        if hasattr(self, '_stack_anim') and self._stack_anim:
+        h = cs.height()
+        OFFSET = max(24, h // 14)
+
+        # ── Fade-out + мягкий slide-down настроек ───────────────────────────
+        eff_sv = QtWidgets.QGraphicsOpacityEffect(sv)
+        sv.setGraphicsEffect(eff_sv)
+
+        a_op = QtCore.QPropertyAnimation(eff_sv, b"opacity")
+        a_op.setDuration(220)
+        a_op.setStartValue(1.0)
+        a_op.setEndValue(0.0)
+        a_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+        a_pos = QtCore.QPropertyAnimation(sv, b"pos")
+        a_pos.setDuration(240)
+        a_pos.setStartValue(QtCore.QPoint(0, 0))
+        a_pos.setEndValue(QtCore.QPoint(0, OFFSET))
+        a_pos.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+        grp_out = QtCore.QParallelAnimationGroup(self)
+        grp_out.addAnimation(a_op)
+        grp_out.addAnimation(a_pos)
+
+        def _switch():
             try:
-                self._stack_anim.stop()
-                if hasattr(self, '_stack_overlay') and self._stack_overlay:
-                    self._stack_overlay.deleteLater()
-                    self._stack_overlay = None
+                sv.setGraphicsEffect(None)
+                sv.move(0, 0)
             except RuntimeError:
                 pass
 
-        # Снимок текущего состояния (страницы from_index)
-        snapshot = self.content_stack.grab()
+            cs.setCurrentIndex(0)
+            for attr in ('scroll_area', 'title_label', 'clear_btn', 'input_container'):
+                w = getattr(self, attr, None)
+                if w: w.show()
 
-        # Мгновенно переключаем страницу
-        self.content_stack.setCurrentIndex(to_index)
-        QtWidgets.QApplication.processEvents()
+            # ── Fade-in чата ─────────────────────────────────────────────
+            chat_w = cs.widget(0)
+            eff_in = QtWidgets.QGraphicsOpacityEffect(chat_w)
+            chat_w.setGraphicsEffect(eff_in)
+            eff_in.setOpacity(0.0)
 
-        # Накладываем снимок поверх нового содержимого
-        overlay = QtWidgets.QLabel(self.content_stack)
-        overlay.setPixmap(snapshot)
-        overlay.setGeometry(0, 0, self.content_stack.width(), self.content_stack.height())
-        overlay.setScaledContents(True)
-        overlay.show()
-        overlay.raise_()
+            a_in_op = QtCore.QPropertyAnimation(eff_in, b"opacity")
+            a_in_op.setDuration(320)
+            a_in_op.setStartValue(0.0)
+            a_in_op.setEndValue(1.0)
+            a_in_op.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
-        # Эффект прозрачности
-        effect = QtWidgets.QGraphicsOpacityEffect(overlay)
-        overlay.setGraphicsEffect(effect)
-        effect.setOpacity(1.0)
+            def _done():
+                try:
+                    chat_w.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+                self._settings_transitioning = False
+                QtCore.QTimer.singleShot(80, lambda: QtCore.QMetaObject.invokeMethod(
+                    self, "_update_button_after_scroll",
+                    QtCore.Qt.ConnectionType.QueuedConnection
+                ))
 
-        # Анимация: снимок плавно исчезает → видна новая страница
-        anim = QtCore.QPropertyAnimation(effect, b"opacity")
-        anim.setDuration(280)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+            a_in_op.finished.connect(_done)
+            self._settings_close_in_anim = a_in_op
+            a_in_op.start()
 
-        def on_finished():
-            overlay.deleteLater()
-            self._stack_overlay = None
-            self._stack_anim = None
-            if callback:
-                callback()
+        grp_out.finished.connect(_switch)
+        self._settings_close_grp = grp_out
+        grp_out.start()
 
-        anim.finished.connect(on_finished)
-        anim.start()
+    def _after_close_settings(self):
+        """Устарело — совместимость."""
+        pass
 
-        self._stack_overlay = overlay
-        self._stack_anim = anim
-    
+    def _animate_stack_transition(self, from_index: int, to_index: int, callback=None):
+        """Устарело — совместимость."""
+        if hasattr(self, 'content_stack'):
+            self.content_stack.setCurrentIndex(to_index)
+        if callback:
+            callback()
+
+
+
     def on_settings_applied(self, settings: dict):
         """Обработка применения настроек с плавной crossfade анимацией смены темы"""
         print(f"[SETTINGS] Применены настройки: {settings}")
@@ -9642,6 +11281,22 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         liquid_glass = settings.get("liquid_glass", True)
         self.auto_scroll_enabled = settings.get("auto_scroll", False)
         print(f"[SETTINGS] Автоскролл: {'включён' if self.auto_scroll_enabled else 'выключен'}")
+
+        # Применяем видимость элементов управления сообщений
+        show_tts       = settings.get("show_tts",       True)
+        show_regen     = settings.get("show_regen",     True)
+        show_copy      = settings.get("show_copy",      True)
+        show_user_copy = settings.get("show_user_copy", True)
+        show_user_edit = settings.get("show_user_edit", True)
+        # Обновляем существующие сообщения
+        self._apply_element_visibility(show_tts, show_regen, show_copy, show_user_copy, show_user_edit)
+        # Сохраняем для новых сообщений
+        self._ui_show_tts       = show_tts
+        self._ui_show_regen     = show_regen
+        self._ui_show_copy      = show_copy
+        self._ui_show_user_copy = show_user_copy
+        self._ui_show_user_edit = show_user_edit
+
         
         # Проверяем, изменилась ли тема
         theme_changed = (self.current_theme != theme)
@@ -9927,13 +11582,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         anim1.setDuration(200)
         anim1.setStartValue(self.delete_panel.width())
         anim1.setEndValue(0)
-        anim1.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+        anim1.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
         
         anim2 = QtCore.QPropertyAnimation(self.delete_panel, b"maximumWidth")
         anim2.setDuration(200)
         anim2.setStartValue(self.delete_panel.width())
         anim2.setEndValue(0)
-        anim2.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+        anim2.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
         
         anim1.start()
         anim2.start()
@@ -10409,21 +12064,18 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             print("[NEW_CHAT] ✨ Запущена анимация кнопки нового чата")
         
         # ═══════════════════════════════════════════════════════════════
-        # ЛОГИКА ОЧИСТКИ ПУСТЫХ ЧАТОВ
+        # GUARD: не создаём новый чат если текущий уже пустой
         # ═══════════════════════════════════════════════════════════════
-        # Проверяем текущий чат - если он пустой, удаляем его перед созданием нового
         if self.current_chat_id:
             messages = self.chat_manager.get_chat_messages(self.current_chat_id, limit=10)
             user_messages = [msg for msg in messages if msg[0] == "user"]
             
-            # Если в текущем чате нет сообщений пользователя - удаляем его
             if len(user_messages) == 0:
-                print(f"[NEW_CHAT] Удаляем пустой чат {self.current_chat_id} перед созданием нового")
-                clear_chat_all_memories(self.current_chat_id)
-                try:
-                    self.chat_manager.delete_chat(self.current_chat_id)
-                except Exception as e:
-                    print(f"[NEW_CHAT] Ошибка удаления пустого чата: {e}")
+                # Уже в пустом чате — просто закрываем sidebar, новый не создаём
+                print("[NEW_CHAT] Уже в пустом чате — создание нового заблокировано")
+                if getattr(self, '_sidebar_open', False):
+                    self.toggle_sidebar()
+                return
         
         # Создаём новый чат
         chat_id = self.chat_manager.create_chat("Новый чат")
@@ -10656,6 +12308,17 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ═══════════════════════════════════════════════════════════════
         self.messages_layout.addWidget(message_widget)
         message_widget.show()
+
+        # Применяем текущие настройки видимости к новому сообщению
+        if add_controls:
+            self._apply_element_visibility(
+                getattr(self, '_ui_show_tts',       True),
+                getattr(self, '_ui_show_regen',     True),
+                getattr(self, '_ui_show_copy',      True),
+                getattr(self, '_ui_show_user_copy', True),
+                getattr(self, '_ui_show_user_edit', True),
+            )
+
         
         # ═══════════════════════════════════════════════════════════════
         # ШАГ 3: ОБНОВЛЕНИЕ LAYOUT (ЗАВИСИТ ОТ ПОЗИЦИИ ПОЛЬЗОВАТЕЛЯ)
@@ -11314,18 +12977,12 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _set_stop_icon(self.send_btn)
         self.send_btn.setEnabled(True)
         self.is_generating = True
-        # Плавно затемняем поле ввода и кнопку голоса
-        self._dim_input_for_generation()
 
-        # ═══════════════════════════════════════════════════════════
-        # ДВУХФАЗНЫЙ РЕЖИМ ОТВЕТА
-        # ═══════════════════════════════════════════════════════════
-        
-        # ФАЗА 1: Быстрый предварительный ответ (если НЕ используется поиск)
-        if not actual_use_search and not self.deep_thinking:
-            print("[SEND] 📝 ФАЗА 1: Предоставляем быстрый ответ без поиска")
-        # Запускаем анимацию точек
-        self.start_status_animation()
+        # ── Разносим анимации по времени чтобы Qt не задыхался от одновременных операций ──
+        # Затемнение поля — сразу (не конкурирует с add_message_widget)
+        self._dim_input_for_generation()
+        # Анимация точек — через 60ms, после того как layout сообщения завершится
+        QtCore.QTimer.singleShot(60, self.start_status_animation)
         
         # Запускаем таймер обдумывания
         self.thinking_start_time = time.time()
@@ -11334,6 +12991,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _locked_model_key = llama_handler.CURRENT_AI_MODEL_KEY
         print(f"[SEND] Модель зафиксирована: {_locked_model_key}")
         worker = AIWorker(user_text, self.current_language, actual_deep_thinking, actual_use_search, False, self.chat_manager, self.current_chat_id, self.attached_files, self.ai_mode, model_key_override=_locked_model_key)
+        worker.signals.chunk.connect(self._on_stream_chunk)
         worker.signals.finished.connect(self.handle_response)
         self.current_worker = worker  # Сохраняем ссылку на текущего воркера
         self._current_request_id = worker.request_id  # Запоминаем ID запроса
@@ -11594,16 +13252,73 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 finally:
                     self._regen_target_widget = None  # сбрасываем цель
             else:
-                # Обычный ответ: создаём новый виджет
-                try:
-                    self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [], generated_files=_gen_files)
-                except Exception as e:
-                    print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
+                # Обычный ответ: завершаем стрим или создаём виджет
+                # Останавливаем flush-таймер
+                if hasattr(self, '_stream_flush_timer'):
+                    self._stream_flush_timer.stop()
+
+                _sw = getattr(self, '_stream_widget', None)
+                _stream_was_active = getattr(self, '_stream_active', False)
+                # Сбрасываем флаги стрима
+                self._stream_active = False
+                self._stream_widget = None
+                self._stream_buf    = ""
+                self._stream_raw    = ""
+                # Дренируем оставшуюся очередь символов (если ответ короткий)
+                _char_queue = getattr(self, '_char_queue', None)
+                if _char_queue:
+                    _char_queue.clear()
+                self._displayed_text = ""
+
+                if _stream_was_active and _sw is not None:
+                    # ── Стрим завершён: финализируем виджет на месте ──────────────
                     try:
-                        # Пробуем без thinking_time
-                        self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [], generated_files=_gen_files)
-                    except Exception as e2:
-                        print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
+                        # 1. Сбрасываем зафиксированную высоту — теперь Qt сам определит нужный размер
+                        if hasattr(_sw, 'message_container'):
+                            _sw.message_container.setMinimumHeight(0)
+                        # 2. Применяем markdown к финальному тексту
+                        _sw.text = response
+                        _formatted = format_text_with_markdown_and_math(response)
+                        _sw.message_label.setText(
+                            f"<b style='color:{_sw._speaker_color};'>{_sw.speaker}:</b><br>{_formatted}"
+                        )
+                        # 2. Показываем панель кнопок (она уже в layout, просто hidden)
+                        if hasattr(_sw, 'controls_widget'):
+                            _sw.controls_widget.setVisible(True)
+                        if hasattr(_sw, 'copy_button') and _sw.copy_button:
+                            _sw.copy_button.setVisible(True)
+                        if hasattr(_sw, 'regenerate_button') and _sw.regenerate_button:
+                            _sw.regenerate_button.setVisible(True)
+                        # 3. Обновляем manage_buttons (скрываем кнопку regen у предыдущих)
+                        def _manage():
+                            try:
+                                for i in range(self.messages_layout.count()):
+                                    item = self.messages_layout.itemAt(i)
+                                    if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                                        w = item.widget()
+                                        if w.speaker not in ("Вы", "Система") and w != _sw:
+                                            if hasattr(w, 'regenerate_button') and w.regenerate_button:
+                                                w.regenerate_button.setVisible(False)
+                            except Exception:
+                                pass
+                        QtCore.QTimer.singleShot(50, _manage)
+                        print("[HANDLE_RESPONSE] ✓ Stream-виджет финализирован на месте")
+                    except Exception as e:
+                        print(f"[HANDLE_RESPONSE] ✗ Ошибка финализации стрима: {e}")
+                        try:
+                            self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [], generated_files=_gen_files)
+                        except Exception:
+                            pass
+                else:
+                    # Стрима не было (поиск в интернете, перегенерация и т.п.)
+                    try:
+                        self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=thinking_time_to_show, action_history=action_history, sources=sources or [], generated_files=_gen_files)
+                    except Exception as e:
+                        print(f"[HANDLE_RESPONSE] ✗ Ошибка add_message_widget: {e}")
+                        try:
+                            self.add_message_widget(_response_speaker, response, add_controls=True, thinking_time=0, action_history=action_history, sources=sources or [], generated_files=_gen_files)
+                        except Exception as e2:
+                            print(f"[HANDLE_RESPONSE] ✗ Критическая ошибка виджета: {e2}")
             
             # Сохраняем в БД с защитой
             # При перегенерации — сразу передаём полную историю вариантов,
@@ -11921,6 +13636,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                          actual_use_search, False, self.chat_manager, self.current_chat_id,
                          None, self.ai_mode,
                          model_key_override=force_model_key)
+        worker.signals.chunk.connect(self._on_stream_chunk)
         worker.signals.finished.connect(self.handle_response)
         self._current_request_id = worker.request_id
         self.current_worker = worker
@@ -12346,109 +14062,92 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             print("[CLEAR_CHAT] Пользователь отменил очистку")
     
     def perform_clear_chat(self):
-        """Выполнить очистку чата с плавной iOS-style анимацией"""
+        """Очистка чата — каскадный slide-fade снизу вверх."""
         print("[PERFORM_CLEAR] Начинаем плавную очистку...")
-        
-        # Собираем все виджеты сообщений для удаления
+
         widgets = []
         for i in range(self.messages_layout.count()):
             item = self.messages_layout.itemAt(i)
             if item and item.widget():
-                widget = item.widget()
-                # Удаляем все виджеты сообщений
-                if hasattr(widget, 'speaker'):
-                    widgets.append(widget)
-        
+                w = item.widget()
+                if hasattr(w, 'speaker'):
+                    widgets.append(w)
+
         print(f"[PERFORM_CLEAR] Виджетов для удаления: {len(widgets)}")
-        
-        if len(widgets) == 0:
-            print("[PERFORM_CLEAR] Нет виджетов для удаления")
+
+        if not widgets:
             self.finalize_clear()
             return
-        
-        # Блокируем UI во время анимации
+
         self.input_field.setEnabled(False)
         self.send_btn.setEnabled(False)
-        
-        # ПЛАВНАЯ iOS-style анимация для ВСЕХ платформ
-        # Удаляем сообщения снизу вверх с небольшой задержкой
-        total_duration = 0
-        for idx, widget in enumerate(reversed(widgets)):  # Снизу вверх
-            delay = idx * 40  # Меньше задержка = быстрее
-            total_duration = delay + 300  # 300ms на саму анимацию
+
+        # Каскад снизу вверх: интервал 25ms, анимация 280ms
+        STAGGER = 25
+        ANIM_DUR = 280
+        for idx, widget in enumerate(reversed(widgets)):
+            delay = idx * STAGGER
             QtCore.QTimer.singleShot(delay, lambda w=widget: self.smooth_fade_and_remove(w))
-        
-        # После завершения всех анимаций - финализируем
-        QtCore.QTimer.singleShot(total_duration + 100, self.finalize_clear)
-    
+
+        total = (len(widgets) - 1) * STAGGER + ANIM_DUR + 80
+        QtCore.QTimer.singleShot(total, self.finalize_clear)
+
     def smooth_fade_and_remove(self, widget):
         """
-        Плавное удаление виджета через fade-out анимацию.
-        
-        ВАЖНО: Только fade-out прозрачности, БЕЗ изменения размеров.
-        После удаления виджета layout автоматически пересчитывается.
+        Плавное удаление: slide влево + fade-out одновременно.
+        Виджет уезжает вправо и исчезает.
         """
         try:
             if not widget or not widget.isVisible():
                 return
-            
-            # Создаём эффект прозрачности если его нет
-            if not widget.graphicsEffect():
-                opacity_effect = QtWidgets.QGraphicsOpacityEffect(widget)
-                widget.setGraphicsEffect(opacity_effect)
-            else:
-                opacity_effect = widget.graphicsEffect()
-            
-            # Fade-out анимация
-            fade_anim = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
-            fade_anim.setDuration(300)
-            fade_anim.setStartValue(1.0)
-            fade_anim.setEndValue(0.0)
-            fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            
-            # Удаляем виджет после завершения анимации
-            def cleanup():
+
+            DUR = 280
+
+            # ── Fade-out ─────────────────────────────────────────────────────
+            eff = QtWidgets.QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(eff)
+            eff.setOpacity(1.0)
+
+            fade = QtCore.QPropertyAnimation(eff, b"opacity")
+            fade.setDuration(DUR)
+            fade.setStartValue(1.0)
+            fade.setEndValue(0.0)
+            fade.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+
+            # ── Slide вправо ─────────────────────────────────────────────────
+            orig_pos = widget.pos()
+            slide = QtCore.QPropertyAnimation(widget, b"pos")
+            slide.setDuration(DUR)
+            slide.setStartValue(orig_pos)
+            slide.setEndValue(QtCore.QPoint(orig_pos.x() + 40, orig_pos.y()))
+            slide.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+            grp = QtCore.QParallelAnimationGroup()
+            grp.addAnimation(fade)
+            grp.addAnimation(slide)
+
+            def _remove():
                 try:
-                    # КРИТИЧНО: Сначала останавливаем анимацию
-                    if hasattr(widget, '_cleanup_anim'):
-                        widget._cleanup_anim.stop()
-                        widget._cleanup_anim = None
-                    
-                    # Затем удаляем эффект
-                    if widget.graphicsEffect():
-                        widget.setGraphicsEffect(None)
-                    
-                    # Удаляем ссылку на эффект
-                    if hasattr(widget, '_opacity_effect'):
-                        widget._opacity_effect = None
-                    
-                    # И только после этого удаляем виджет
+                    widget.setGraphicsEffect(None)
+                    widget.move(orig_pos)
                     self.messages_layout.removeWidget(widget)
                     widget.deleteLater()
-                    # Layout обновится автоматически
-                except RuntimeError:
-                    # Объект уже удалён - игнорируем
+                except (RuntimeError, Exception):
                     pass
-                except Exception as e:
-                    print(f"[CLEANUP] Ошибка при удалении виджета: {e}")
-            
-            fade_anim.finished.connect(cleanup)
-            fade_anim.start()
-            
-            # Сохраняем ссылку на анимацию И на эффект прозрачности
-            widget._cleanup_anim = fade_anim
-            widget._opacity_effect = opacity_effect
-            
+
+            grp.finished.connect(_remove)
+            grp.start()
+            widget._clear_anim_grp = grp  # защита от GC
+
         except Exception as e:
             print(f"[SMOOTH_FADE] Ошибка: {e}")
-            # В случае ошибки - просто удаляем виджет
             try:
-                if widget.graphicsEffect():
-                    widget.setGraphicsEffect(None)
+                widget.setGraphicsEffect(None)
                 self.messages_layout.removeWidget(widget)
                 widget.deleteLater()
-                # Layout обновится автоматически
             except RuntimeError:
+                pass
+
                 pass
     
     

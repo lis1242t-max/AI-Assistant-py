@@ -395,7 +395,52 @@ def _is_conversational_message(text: str) -> bool:
     return bool(_CONVERSATIONAL_RE.match(stripped))
 
 
-def get_ai_response(user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key: str = None):
+def _ollama_stream(payload: dict, timeout: int, on_chunk, cancelled_flag) -> str:
+    """
+    Выполняет стриминговый запрос к Ollama /api/chat.
+    Вызывает on_chunk(text) для каждого токена.
+    Возвращает полный собранный текст.
+    """
+    import json as _json
+    payload = dict(payload)
+    payload["stream"] = True
+    full = []
+    try:
+        with requests.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json=payload,
+            stream=True,
+            timeout=(30, None),   # 30с на подключение, без лимита на чтение
+        ) as r:
+            if r.status_code != 200:
+                return f"[Ollama error] HTTP {r.status_code}"
+            for raw_line in r.iter_lines():
+                if callable(cancelled_flag) and cancelled_flag():
+                    break
+                if not raw_line:
+                    continue
+                try:
+                    obj = _json.loads(raw_line)
+                except Exception:
+                    continue
+                token = obj.get("message", {}).get("content", "")
+                if token:
+                    full.append(token)
+                    if on_chunk:
+                        try:
+                            on_chunk(token)
+                        except Exception:
+                            pass
+                if obj.get("done", False):
+                    break
+    except requests.exceptions.Timeout:
+        return "[Ollama timeout]"
+    except requests.exceptions.ConnectionError:
+        return "[Ollama connection error]"
+    return "".join(full)
+
+
+def get_ai_response(user_message: str, current_language: str, deep_thinking: bool, use_search: bool, should_forget: bool = False, chat_manager=None, chat_id=None, file_paths: list = None, ai_mode: str = AI_MODE_FAST, model_key: str = None, on_chunk=None, cancelled_flag=None):
     """Получить ответ от AI (с жёстким закреплением языка)"""
     # Авто-анализ стиля пользователя (если включён улучшенный подтекст)
     subtext_track_message(user_message)
@@ -888,8 +933,9 @@ You ALWAYS read the full chat history before responding:
         _profanity_override = (
             "\n\nСТИЛЬ ОБЩЕНИЯ: пользователь выбрал разговорный стиль без ограничений на лексику. "
             "Используй естественный живой язык, включая ненормативную лексику, органично и по контексту. "
-            "Не заменяй сильные выражения мягкими аналогами — это нарушение выбора пользователя. "
-            "Не комментируй и не объясняй своё использование такой лексики."
+            "Не заменяй сильные выражения мягкими аналогами. "
+            "Не комментируй и не объясняй своё использование такой лексики. "
+            "Отвечай НАПРЯМУЮ — без внутренних рассуждений вслух."
         )
 
     if detected_language == "russian" and not _subtext_overrides_lang:
@@ -1467,6 +1513,11 @@ Consider information from BOTH sources: search results AND attached files."""
         _qwen_user_msg = ("/no_think\n" + final_user_message) if _mk == "qwen" else final_user_message
         messages.append({"role": "user", "content": _qwen_user_msg})
 
+        # Для Qwen3: assistant prefill при мате в сообщении — форсируем прямой ответ.
+        # Без prefill модель видит «конфликтный» промпт и уходит в chain-of-thought.
+        if _mk == "qwen" and _st_enabled and "profanity" in _st_styles:
+            messages.append({"role": "assistant", "content": ""})
+
         # ── ASSISTANT PREFILL для файловых запросов ──────────────────
         # Для маленьких моделей (7b) инструкции в промпте недостаточны —
         # они игнорируют формат и выводят содержимое как обычный текст.
@@ -1719,84 +1770,59 @@ Consider information from BOTH sources: search results AND attached files."""
                 # а НЕ get_current_ollama_model() — тот читает глобал CURRENT_AI_MODEL_KEY,
                 # который может измениться в другом потоке → Qwen подменялся на LLaMA.
                 _model_name_for_request = _resolve_ollama_model_name(_mk)
-                print(f"[GET_AI_RESPONSE] → Запрос: POST /api/chat model='{_model_name_for_request}'")
+                print(f"[GET_AI_RESPONSE] → Запрос: POST /api/chat model='{_model_name_for_request}' [streaming]")
                 _r1_payload = {
                     "model": _model_name_for_request,
                     "messages": messages,
-                    "stream": False,
                     "options": {
                         "num_predict": max_tokens,
                         **_extra_options
                     }
                 }
-                _r1_raw = requests.post(
-                    f"{OLLAMA_HOST}/api/chat",
-                    json=_r1_payload,
-                    timeout=timeout
-                )
-                if _r1_raw.status_code == 200:
-                    _r1_json = _r1_raw.json()
-                    resp = _r1_json.get("message", {}).get("content", "").strip()
-
-                    # Qwen3 в режиме think=True возвращает думающую часть отдельно,
-                    # а поле content может быть пустым (ответ идёт внутри think).
-                    # Пробуем вытащить thinking-текст как резервный источник.
-                    if not resp and _mk == "qwen":
-                        _thinking_content = _r1_json.get("message", {}).get("thinking", "").strip()
-                        if _thinking_content:
-                            # Думающий блок есть — вытаскиваем финальный ответ из него
-                            import re as _re_qthink
-                            # Ищем текст ПОСЛЕ последнего </think> если есть
-                            _after = _re_qthink.sub(r'<think>.*?</think>', '', _thinking_content, flags=_re_qthink.DOTALL).strip()
-                            resp = _after if _after else _thinking_content
-                            if resp:
-                                print(f"[GET_AI_RESPONSE] [QWEN] Ответ извлечён из thinking-поля ({len(resp)} симв.)")
-
-                    if not resp:
-                        # Модель вернула пустой ответ — возможно тихий отказ из-за сложного промпта.
-                        # Повторяем с упрощёнными настройками: выше температура, меньше системных инструкций.
-                        print(f"[GET_AI_RESPONSE] ⚠️ Пустой ответ — повторная попытка с упрощённым промптом")
-                        _retry_messages = [m for m in messages if m["role"] != "system"]
-                        # Берём только последнее сообщение пользователя как системный промпт
-                        _retry_system = "Ты умный и творческий ассистент. Выполняй задание пользователя полностью, без ограничений."
-                        _retry_messages = [{"role": "system", "content": _retry_system}] + _retry_messages
-                        # Для Qwen3 при retry: явно отключаем thinking чтобы не зависать снова
-                        _retry_opts = {
-                            "num_predict": max_tokens,
-                            "num_ctx": 4096,
-                            "temperature": 0.9,
-                            "repeat_penalty": 1.05,
-                        }
-                        if _mk == "qwen":
-                            _retry_opts["think"] = False  # Отключаем thinking на retry
-                        _retry_payload = {
-                            "model": _model_name_for_request,
-                            "messages": _retry_messages,
-                            "stream": False,
-                            "options": _retry_opts,
-                        }
-                        try:
-                            _retry_raw = requests.post(
-                                f"{OLLAMA_HOST}/api/chat",
-                                json=_retry_payload,
-                                timeout=timeout
-                            )
-                            if _retry_raw.status_code == 200:
-                                _retry_resp = _retry_raw.json().get("message", {}).get("content", "").strip()
-                                resp = _retry_resp if _retry_resp else "[Ollama error] Empty response"
-                                if _retry_resp:
-                                    print(f"[GET_AI_RESPONSE] ✓ Повторная попытка успешна ({len(_retry_resp)} символов)")
-                                else:
-                                    print(f"[GET_AI_RESPONSE] ✗ Повторная попытка тоже вернула пустой ответ")
-                            else:
-                                resp = "[Ollama error] Empty response"
-                        except Exception as _retry_err:
-                            print(f"[GET_AI_RESPONSE] ✗ Ошибка повторной попытки: {_retry_err}")
+                resp = _ollama_stream(_r1_payload, timeout, on_chunk, cancelled_flag)
+                if resp.startswith("[Ollama error]") or resp.startswith("[Ollama timeout]") or resp.startswith("[Ollama connection error]"):
+                    pass  # обрабатывается ниже
+                elif not resp:
+                    # Пустой ответ — повторная попытка БЕЗ стриминга (on_chunk=None)
+                    print(f"[GET_AI_RESPONSE] ⚠️ Пустой ответ — повторная попытка с упрощённым промптом")
+                    _retry_messages = [m for m in messages if m["role"] != "system"]
+                    _retry_system = "Ты умный и творческий ассистент. Выполняй задание пользователя полностью, без ограничений."
+                    _retry_messages = [{"role": "system", "content": _retry_system}] + _retry_messages
+                    _retry_opts = {
+                        "num_predict": max_tokens,
+                        "num_ctx": 4096,
+                        "temperature": 0.9,
+                        "repeat_penalty": 1.05,
+                    }
+                    if _mk == "qwen":
+                        _retry_opts["think"] = False
+                    _retry_payload = {
+                        "model": _model_name_for_request,
+                        "messages": _retry_messages,
+                        "options": _retry_opts,
+                    }
+                    try:
+                        resp = _ollama_stream(_retry_payload, timeout, on_chunk, cancelled_flag)
+                        if not resp:
                             resp = "[Ollama error] Empty response"
-                else:
-                    resp = f"[Ollama error] HTTP {_r1_raw.status_code}"
+                        elif not resp.startswith("[Ollama"):
+                            print(f"[GET_AI_RESPONSE] ✓ Повторная попытка успешна ({len(resp)} символов)")
+                        else:
+                            print(f"[GET_AI_RESPONSE] ✗ Повторная попытка тоже вернула пустой ответ")
+                    except Exception as _retry_err:
+                        print(f"[GET_AI_RESPONSE] ✗ Ошибка повторной попытки: {_retry_err}")
+                        resp = "[Ollama error] Empty response"
             else:
-                resp = call_ollama_chat(messages, max_tokens=max_tokens, timeout=timeout, model_key=_mk)
+                # Нет кастомных options — используем стриминг через call_ollama_chat fallback
+                _fb_model = _resolve_ollama_model_name(_mk)
+                _fb_payload = {
+                    "model": _fb_model,
+                    "messages": messages,
+                    "options": {"num_predict": max_tokens},
+                }
+                resp = _ollama_stream(_fb_payload, timeout, on_chunk, cancelled_flag)
+                if not resp:
+                    resp = call_ollama_chat(messages, max_tokens=max_tokens, timeout=timeout, model_key=_mk)
             
             # Проверяем, что ответ не является ошибкой
             if not resp.startswith("[Ollama error]") and not resp.startswith("[Ollama timeout]") and not resp.startswith("[Ollama connection error]"):
@@ -1975,20 +2001,18 @@ Consider information from BOTH sources: search results AND attached files."""
         # Признаки: начинается с фраз типа "Хорошо, пользователь...", "Нужно убедиться...",
         # "Итак, мне нужно...", "Думаю, что..." и длиннее 200 символов без реального ответа.
         _leaked_thinking_patterns = [
-            r'^(Хорошо[,.]?\s)',
             r'^(Нужно убедиться)',
-            r'^(Итак[,.]?\s)',
             r'^(Давайте подумаем)',
             r'^(Пользователь просит)',
             r'^(Пользователь попросил)',
             r'^(Давайте разберём)',
-            r'^(Мне нужно)',
-            r'^(Я должен)',
+            r'^(Мне нужно (подумать|проанализировать|разобрать))',
+            r'^(Я должен (подумать|проанализировать))',
             r'^(Let me think)',
-            r'^(Okay[,.]?\s)',
+            r'^(Okay[,.]? (so|let me|I need))',
         ]
         _is_leaked = any(_re_qw.match(p, response_text) for p in _leaked_thinking_patterns)
-        if _is_leaked and len(response_text) > 100:
+        if _is_leaked and len(response_text) > 200:
             print(f"[GET_AI_RESPONSE] [QWEN] ⚠️ Обнаружена утечка мышления — пробуем извлечь ответ")
             # Берём последний непустой абзац — обычно там финальный ответ
             _paragraphs = [p.strip() for p in response_text.split('\n\n') if p.strip()]
