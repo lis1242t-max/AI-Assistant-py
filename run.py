@@ -691,17 +691,21 @@ class GlassTooltip(QtWidgets.QLabel):
     
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
-        self.setWindowFlags(QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint)
-        # Прозрачность работает плохо на Windows
-        if not IS_WINDOWS:
-            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # Стиль стеклянной подсказки
+        # Tool + FramelessWindowHint + StaysOnTop — работает на Win/Mac/Linux без мигания
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Tool |
+            QtCore.Qt.WindowType.FramelessWindowHint |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        # WA_TranslucentBackground нужен на всех платформах для прозрачного фона
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+
+        # Стиль стеклянной подсказки — фон рисуется через paintEvent, не CSS
         self.setStyleSheet("""
             QLabel {
-                background: rgba(255, 255, 255, 0.75);
-                border: 1px solid rgba(255, 255, 255, 0.85);
-                border-radius: 12px;
+                background: transparent;
+                border: none;
                 padding: 8px 14px;
                 color: #2d3748;
                 font-family: Inter;
@@ -729,7 +733,22 @@ class GlassTooltip(QtWidgets.QLabel):
         self.fade_out.setEndValue(0.0)
         self.fade_out.setEasingCurve(QtCore.QEasingCurve.Type.InExpo)  # Симметричная кривая для исчезновения
         self.fade_out.finished.connect(self.hide)
-    
+
+    def paintEvent(self, event):
+        """Рисуем стеклянный фон через QPainter — правильные скруглённые углы на всех платформах."""
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 12, 12)
+        p.setClipPath(path)
+        p.fillPath(path, QtGui.QColor(255, 255, 255, 210))
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 220))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.drawPath(path)
+        p.end()
+        super().paintEvent(event)
+
     def show_at(self, global_pos):
         """Показать подсказку в указанной позиции"""
         self.adjustSize()
@@ -824,8 +843,8 @@ class RoundedPopup(QtWidgets.QFrame):
             QtCore.Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        if not IS_WINDOWS:
-            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         # Прозрачный фон у самого виджета — рисуем сами
         self.setStyleSheet("background: transparent; border: none;")
     
@@ -1254,7 +1273,7 @@ class MessageWidget(QtWidgets.QWidget):
         message_label.setStyleSheet(f"""
             QLabel {{
                 color: {self.text_color};
-                padding: 8px;
+                padding: 6px;
                 line-height: 1.6;
                 word-wrap: break-word;
             }}
@@ -1840,41 +1859,37 @@ class MessageWidget(QtWidgets.QWidget):
             main_layout.addStretch()
         
         # ✅ ПЛАВНАЯ АНИМАЦИЯ: opacity + slide через _SlideOpacityEffect
-        if not IS_WINDOWS:
-            # Начальный сдвиг по X: пользователь — справа, ИИ — слева
-            if speaker == "Вы":
-                _start_offset = 40.0
-            elif speaker == "Система":
-                _start_offset = 0.0
-            else:
-                _start_offset = -40.0
-            self._slide_eff._offset_x = _start_offset
-            self._slide_eff._opacity = 0.0
-            self._anim_start_offset = _start_offset   # сохраняем для animate_remove
-
-            # Анимация прозрачности 0 → 1
-            self._anim_opacity = QtCore.QPropertyAnimation(self._slide_eff, b"opacity_val")
-            self._anim_opacity.setDuration(380)
-            self._anim_opacity.setStartValue(0.0)
-            self._anim_opacity.setEndValue(1.0)
-            self._anim_opacity.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
-
-            # Анимация сдвига _start_offset → 0
-            self._anim_slide = QtCore.QPropertyAnimation(self._slide_eff, b"offset_x_val")
-            self._anim_slide.setDuration(380)
-            self._anim_slide.setStartValue(_start_offset)
-            self._anim_slide.setEndValue(0.0)
-            self._anim_slide.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
-
-            # Группа — оба эффекта идут параллельно
-            self._appear_group = QtCore.QParallelAnimationGroup(self)
-            self._appear_group.addAnimation(self._anim_opacity)
-            self._appear_group.addAnimation(self._anim_slide)
-            # Запуск — из add_message_widget через QTimer
+        # Полный Mac-стиль на всех платформах
+        if speaker == "Вы":
+            _start_offset = 40.0
+        elif speaker == "Система":
+            _start_offset = 0.0
         else:
-            # Windows: без анимации
-            self._slide_eff._opacity = 1.0
-            self._slide_eff._offset_x = 0.0
+            _start_offset = -40.0
+
+        self._slide_eff._offset_x = _start_offset
+        self._slide_eff._opacity = 0.0
+        self._anim_start_offset = _start_offset   # сохраняем для animate_remove
+
+        # Анимация прозрачности 0 → 1
+        self._anim_opacity = QtCore.QPropertyAnimation(self._slide_eff, b"opacity_val")
+        self._anim_opacity.setDuration(380)
+        self._anim_opacity.setStartValue(0.0)
+        self._anim_opacity.setEndValue(1.0)
+        self._anim_opacity.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+
+        # Анимация сдвига _start_offset → 0
+        self._anim_slide = QtCore.QPropertyAnimation(self._slide_eff, b"offset_x_val")
+        self._anim_slide.setDuration(380)
+        self._anim_slide.setStartValue(_start_offset)
+        self._anim_slide.setEndValue(0.0)
+        self._anim_slide.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
+
+        # Группа — оба эффекта идут параллельно
+        self._appear_group = QtCore.QParallelAnimationGroup(self)
+        self._appear_group.addAnimation(self._anim_opacity)
+        self._appear_group.addAnimation(self._anim_slide)
+        # Запуск — из add_message_widget через QTimer
 
     @QtCore.pyqtSlot()
     def _start_appear_animation(self):
@@ -1909,12 +1924,6 @@ class MessageWidget(QtWidgets.QWidget):
         затем вызывает on_done_callback (там должны быть removeWidget + deleteLater).
         Если эффект уже снят (анимация давно завершилась) — создаём новый.
         """
-        if IS_WINDOWS:
-            # Windows — без анимации
-            if on_done_callback:
-                on_done_callback()
-            return
-
         # Останавливаем appear-анимацию если она ещё идёт
         if hasattr(self, '_appear_group'):
             self._appear_group.stop()
@@ -1922,7 +1931,6 @@ class MessageWidget(QtWidgets.QWidget):
         # Направление исхода: туда откуда пришло (или по speaker)
         start_offset = getattr(self, '_anim_start_offset', None)
         if start_offset is None:
-            # Определяем направление по speaker если метаданных нет
             start_offset = 40.0 if getattr(self, 'speaker', '') == "Вы" else -40.0
 
         # Пересоздаём эффект (мог быть снят после appear)
@@ -2275,12 +2283,6 @@ class MessageWidget(QtWidgets.QWidget):
         """
         # Останавливаем TTS при удалении виджета
         self._stop_tts()
-        if IS_WINDOWS:
-            try:
-                self.deleteLater()
-            except Exception as e:
-                print(f"[FADE_OUT] Ошибка удаления на Windows: {e}")
-            return
 
         # Останавливаем appear-анимацию если ещё идёт
         if hasattr(self, '_appear_group'):
@@ -2478,8 +2480,9 @@ class MessageWidget(QtWidgets.QWidget):
         menu.setWindowFlags(
             QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint
         )
-        if not IS_WINDOWS:
-            menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=12))
 
         is_dark = getattr(parent_window, 'current_theme', 'dark') == 'dark'
 
@@ -2541,8 +2544,9 @@ class MessageWidget(QtWidgets.QWidget):
         submenu.setWindowFlags(
             QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint
         )
-        if not IS_WINDOWS:
-            submenu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        submenu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        submenu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        submenu.aboutToShow.connect(lambda: _apply_windows_rounded(submenu, radius=12))
         submenu.setStyleSheet(_shared_style)
 
         _alt_actions = {}
@@ -4112,7 +4116,7 @@ class SettingsView(QtWidgets.QWidget):
         main_page_layout.addWidget(back_btn)
 
         # Версия — правый нижний угол
-        _ver_lbl = QtWidgets.QLabel("v3.0.0")
+        _ver_lbl = QtWidgets.QLabel("v3.0.1")
         _ver_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignBottom)
         _ver_lbl.setFont(_apple_font(11))
         _ver_lbl.setStyleSheet("color: #94a3b8;")
@@ -7358,8 +7362,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # ПАЛИТРА — адаптируется под все 4 комбинации тема × стекло
         # ═══════════════════════════════════════════════════════════════
         if is_dark and is_glass:
-            bg_overlay      = "rgba(0, 0, 0, 0.55)"            # затемнение за окном
-            bg_card         = "rgba(28, 28, 38, 0.82)"
+            bg_overlay      = "rgba(0, 0, 0, 0.55)"
+            bg_card         = "rgba(24, 24, 28, 242)"         # = bg dark+glass
             card_border     = "rgba(90, 90, 130, 0.55)"
             title_col       = "#e8e8f8"
             sub_col         = "rgba(160, 160, 195, 0.75)"
@@ -7377,7 +7381,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             close_hover     = "#c0c0e0"
         elif is_dark and not is_glass:
             bg_overlay      = "rgba(0, 0, 0, 0.60)"
-            bg_card         = "rgb(26, 26, 34)"
+            bg_card         = "rgb(28, 28, 31)"               # = bg dark solid
             card_border     = "rgba(65, 65, 90, 0.90)"
             title_col       = "#e2e2f2"
             sub_col         = "#8888aa"
@@ -7395,7 +7399,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             close_hover     = "#aaaacc"
         elif not is_dark and is_glass:
             bg_overlay      = "rgba(30, 30, 60, 0.25)"
-            bg_card         = "rgba(255, 255, 255, 0.72)"
+            bg_card         = "rgba(240, 240, 245, 235)"      # = bg light+glass
             card_border     = "rgba(255, 255, 255, 0.85)"
             title_col       = "#1a1a3a"
             sub_col         = "rgba(80, 90, 140, 0.70)"
@@ -7413,7 +7417,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             close_hover     = "#3a3a7a"
         else:  # light + matte
             bg_overlay      = "rgba(30, 30, 60, 0.30)"
-            bg_card         = "rgb(248, 248, 252)"
+            bg_card         = "rgb(246, 246, 248)"            # = bg light solid
             card_border     = "rgba(200, 205, 230, 0.95)"
             title_col       = "#1a1a3a"
             sub_col         = "#7788aa"
@@ -7441,8 +7445,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             QtCore.Qt.WindowType.Dialog |
             QtCore.Qt.WindowType.FramelessWindowHint
         )
-        if not IS_WINDOWS:
-            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
 
         # Диалог покрывает всё главное окно (backdrop overlay)
         geo = self.geometry()
@@ -8227,8 +8231,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Дополнительные модели")
         dialog.setWindowFlags(QtCore.Qt.WindowType.Dialog | QtCore.Qt.WindowType.FramelessWindowHint)
-        if not IS_WINDOWS:
-            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         geo = self.geometry()
         dialog.setFixedSize(geo.width(), geo.height())
         dialog.move(geo.x(), geo.y())
@@ -8879,7 +8883,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         eff_in.setOpacity(0.0)
 
         a_pos_in = QtCore.QPropertyAnimation(card, b"pos")
-        a_pos_in.setDuration(340)
+        a_pos_in.setDuration(300)
         a_pos_in.setStartValue(QtCore.QPoint(cx, start_y))
         a_pos_in.setEndValue(QtCore.QPoint(cx, final_y))
         a_pos_in.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
@@ -9138,71 +9142,69 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Прозрачное меню (работает на Windows и macOS/Linux)
         menu.setWindowFlags(QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
         menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        menu.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
-        _fix_popup_on_windows(menu)  # Win10/11: убираем TranslucentBackground, включаем DWM-скруглённые
-        menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=16))
+        _fix_popup_on_windows(menu)
+        menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=18))
         
-        # Адаптивные стили в зависимости от темы
-        if is_dark:
-            # Тёмная тема
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(30, 30, 35, 245);
-                    border: 1px solid rgba(60, 60, 70, 200);
-                    border-radius: 16px;
-                    padding: 6px;
-                }
-                QMenu::item {
-                    padding: 14px 30px;
-                    border-radius: 12px;
-                    color: #e0e0e0;
-                    font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
-                    font-size: 15px;
-                    font-weight: 600;
-                    margin: 2px;
-                    background: transparent;
-                }
-                QMenu::item:selected {
-                    background: rgba(60, 60, 70, 210);
-                    color: #ffffff;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(80, 80, 100, 100);
-                    margin: 4px 12px;
-                }
-                QMenu::indicator { width: 0px; height: 0px; }
-            """)
+        # Стеклянные стили — как settingGroup в настройках
+        is_glass = getattr(self, "current_liquid_glass", True)
+        # Фон меню = цвет bg страницы настроек (за settingGroup блоками)
+        if is_dark and is_glass:
+            _menu_bg     = "rgba(24, 24, 28, 242)"     # bg dark+glass
+            _menu_border = "rgba(50, 50, 55, 128)"
+            _item_color  = "#e6e6e6"
+            _sel_bg      = "rgba(60, 60, 80, 200)"
+            _sel_color   = "#ffffff"
+            _sep_color   = "rgba(50, 50, 55, 90)"
+        elif is_dark:
+            _menu_bg     = "rgb(28, 28, 31)"           # bg dark solid
+            _menu_border = "rgba(55, 55, 60, 230)"
+            _item_color  = "#f0f0f0"
+            _sel_bg      = "rgba(48, 48, 62, 240)"
+            _sel_color   = "#ffffff"
+            _sep_color   = "rgba(55, 55, 60, 140)"
+        elif is_glass:
+            _menu_bg     = "rgba(240, 240, 245, 235)"  # bg light+glass
+            _menu_border = "rgba(210, 212, 222, 200)"
+            _item_color  = "#222222"
+            _sel_bg      = "rgba(228, 230, 252, 230)"
+            _sel_color   = "#1a1a3a"
+            _sep_color   = "rgba(200, 202, 218, 120)"
         else:
-            # Светлая тема
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(255, 255, 255, 245);
-                    border: 1px solid rgba(220, 220, 230, 200);
-                    border-radius: 16px;
-                    padding: 6px;
-                }
-                QMenu::item {
-                    padding: 14px 30px;
-                    border-radius: 12px;
-                    color: #1a202c;
-                    font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
-                    font-size: 15px;
-                    font-weight: 600;
-                    margin: 2px;
-                    background: transparent;
-                }
-                QMenu::item:selected {
-                    background: rgba(235, 235, 245, 210);
-                    color: #0f172a;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(180, 185, 200, 130);
-                    margin: 4px 12px;
-                }
-                QMenu::indicator { width: 0px; height: 0px; }
-            """)
+            _menu_bg     = "rgb(246, 246, 248)"        # bg light solid
+            _menu_border = "rgba(210, 210, 215, 242)"
+            _item_color  = "#1a1a1a"
+            _sel_bg      = "rgba(228, 230, 252, 242)"
+            _sel_color   = "#1a1a3a"
+            _sep_color   = "rgba(210, 210, 215, 178)"
+
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {_menu_bg};
+                border: 1px solid {_menu_border};
+                border-radius: 18px;
+                padding: 8px;
+            }}
+            QMenu::item {{
+                padding: 12px 24px;
+                border-radius: 12px;
+                color: {_item_color};
+                font-family: "Segoe UI Variable", "Segoe UI", Inter, -apple-system, sans-serif;
+                font-size: 14px;
+                font-weight: 600;
+                margin: 2px 4px;
+                background: transparent;
+            }}
+            QMenu::item:selected {{
+                background: {_sel_bg};
+                color: {_sel_color};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {_sep_color};
+                margin: 4px 12px;
+            }}
+            QMenu::indicator {{ width: 0px; height: 0px; }}
+        """)
         
         # ── Карточка модели через QWidgetAction (кликабельная!) ──
         _model_widget_action = QtWidgets.QWidgetAction(menu)
@@ -9316,17 +9318,39 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             (AI_MODE_PRO,      "🚀", "Про",        AI_MODE_PRO),
         ]
 
-        if is_dark:
-            _row_bg_active  = "rgba(80, 82, 110, 0.55)"
-            _row_border_act = "rgba(110, 120, 210, 0.40)"
-            _row_hover      = "rgba(58, 58, 75, 0.70)"
+        if is_dark and is_glass:
+            _row_bg_normal  = "rgba(45, 45, 50, 0.50)"  # = btn_bg dark+glass
+            _row_bg_active  = "rgba(80, 82, 120, 0.65)"
+            _row_border_act = "rgba(110, 120, 210, 0.50)"
+            _row_border_n   = "rgba(55, 55, 75, 0.35)"
+            _row_hover      = "rgba(65, 65, 85, 0.65)"
             _txt_active     = "#ffffff"
             _txt_normal     = "#c8c8de"
             _chk_col        = "#8899ff"
+        elif is_dark:
+            _row_bg_normal  = "rgb(48, 48, 52)"  # = btn_bg dark solid
+            _row_bg_active  = "rgba(70, 72, 100, 0.95)"
+            _row_border_act = "rgba(100, 110, 200, 0.60)"
+            _row_border_n   = "rgba(55, 55, 65, 0.60)"
+            _row_hover      = "rgba(55, 55, 72, 0.95)"
+            _txt_active     = "#ffffff"
+            _txt_normal     = "#c8c8de"
+            _chk_col        = "#8899ff"
+        elif is_glass:
+            _row_bg_normal  = "rgba(255, 255, 255, 0.82)"  # = btn_bg light+glass
+            _row_bg_active  = "rgba(225, 228, 255, 0.90)"
+            _row_border_act = "rgba(140, 155, 230, 0.55)"
+            _row_border_n   = "rgba(215, 218, 235, 0.70)"
+            _row_hover      = "rgba(238, 240, 255, 0.90)"
+            _txt_active     = "#1a1a3a"
+            _txt_normal     = "#3a3a5a"
+            _chk_col        = "#5566cc"
         else:
-            _row_bg_active  = "rgba(225, 228, 252, 0.80)"
-            _row_border_act = "rgba(140, 155, 230, 0.45)"
-            _row_hover      = "rgba(238, 240, 252, 0.90)"
+            _row_bg_normal  = "rgb(242, 242, 245)"  # = btn_bg light solid
+            _row_bg_active  = "rgba(225, 228, 252, 0.95)"
+            _row_border_act = "rgba(140, 155, 230, 0.65)"
+            _row_border_n   = "rgba(210, 212, 225, 0.80)"
+            _row_hover      = "rgb(235, 237, 252)"
             _txt_active     = "#1a1a3a"
             _txt_normal     = "#3a3a5a"
             _chk_col        = "#5566cc"
@@ -9339,19 +9363,26 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             _row = QtWidgets.QWidget()
             _row.setFixedSize(_MENU_W, 36)
 
-            # Фон активного пункта — скруглённый pill
+            # Каждая строка — как блок из настроек: явный фон и граница
             if _active:
                 _row.setStyleSheet(f"""
                     QWidget {{
                         background: {_row_bg_active};
                         border: 1px solid {_row_border_act};
-                        border-radius: 10px;
+                        border-radius: 12px;
                     }}
                 """)
             else:
-                _row.setStyleSheet("""
-                    QWidget { background: transparent; border: none; border-radius: 10px; }
-                    QWidget:hover { background: """ + _row_hover + """; }
+                _row.setStyleSheet(f"""
+                    QWidget {{
+                        background: {_row_bg_normal};
+                        border: 1px solid {_row_border_n};
+                        border-radius: 12px;
+                    }}
+                    QWidget:hover {{
+                        background: {_row_hover};
+                        border: 1px solid {_row_border_act};
+                    }}
                 """)
 
             _rl = QtWidgets.QHBoxLayout(_row)
@@ -9398,9 +9429,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             _btn.setStyleSheet("QPushButton { background: transparent; border: none; }")
             _mode_btns.append((_btn, _target))
 
-        # Подключаем обработчики
+        # Подключаем обработчики — guard от двойного срабатывания
+        _mode_handled = [False]
         for _btn, _target in _mode_btns:
             def _h(checked=False, k=_target):
+                if _mode_handled[0]:
+                    return
+                _mode_handled[0] = True
                 menu.close()
                 self.animate_mode_change(k)
             _btn.clicked.connect(_h)
@@ -9504,7 +9539,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _dim_eff = QtWidgets.QGraphicsOpacityEffect(self.mode_btn)
         self.mode_btn.setGraphicsEffect(_dim_eff)
         _dim_anim = QtCore.QPropertyAnimation(_dim_eff, b"opacity")
-        _dim_anim.setDuration(100)
+        _dim_anim.setDuration(80)
         _dim_anim.setStartValue(1.0)
         _dim_anim.setEndValue(0.0)
         _dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
@@ -9513,12 +9548,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         open_proxy = _BurstProxy(_menu_bg, _start_geo)
         open_proxy.show()
         open_proxy.raise_()
+        _apply_windows_rounded(open_proxy, radius=16)
 
         _o_geo = QtCore.QPropertyAnimation(open_proxy, b"geometry")
-        _o_geo.setDuration(300)
+        _o_geo.setDuration(320)
         _o_geo.setStartValue(_start_geo)
         _o_geo.setEndValue(_proxy_end_geo)
-        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
         _o_geo.start()
         open_proxy._anims = [_o_geo, _dim_eff, _dim_anim]
 
@@ -9581,6 +9617,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             proxy = _CloseProxy(px, cur_geo)
             proxy.show()
             proxy.raise_()
+            _apply_windows_rounded(proxy, radius=16)
 
             # Кнопка сейчас спрятана — цель: вернуться к её rect
             _btn_now    = self.mode_btn.mapToGlobal(QtCore.QPoint(0, 0))
@@ -9588,21 +9625,21 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                                         self.mode_btn.width(), self.mode_btn.height())
 
             _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
-            _c_geo.setDuration(270)
+            _c_geo.setDuration(260)
             _c_geo.setStartValue(cur_geo)
             _c_geo.setEndValue(_close_end)
-            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InBack)
 
             _c_eff = QtWidgets.QGraphicsOpacityEffect(proxy)
             proxy.setGraphicsEffect(_c_eff)
             _c_eff.setOpacity(1.0)
             _c_op = QtCore.QPropertyAnimation(_c_eff, b"opacity")
-            _c_op.setDuration(270)
+            _c_op.setDuration(260)
             _c_op.setStartValue(1.0)
             _c_op.setKeyValueAt(0.55, 0.95)
             _c_op.setKeyValueAt(0.85, 0.3)
             _c_op.setEndValue(0.0)
-            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
 
             def _on_close_done():
                 try:
@@ -9830,7 +9867,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         eff_in.setOpacity(0.0)
 
         a_pos_in = QtCore.QPropertyAnimation(card, b"pos")
-        a_pos_in.setDuration(340)
+        a_pos_in.setDuration(300)
         a_pos_in.setStartValue(QtCore.QPoint(cx, start_y))
         a_pos_in.setEndValue(QtCore.QPoint(cx, final_y))
         a_pos_in.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
@@ -9925,66 +9962,51 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         menu.aboutToShow.connect(lambda: _apply_windows_rounded(menu, radius=20))
         
         # Адаптивные стили в зависимости от темы
-        if is_dark:
-            # Тёмная тема - стеклянный эффект
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(30, 30, 35, 245);
-                    border: 1px solid rgba(60, 60, 70, 200);
-                    border-radius: 20px;
-                    padding: 12px;
-                }
-                QMenu::item {
-                    padding: 14px 45px;
-                    border-radius: 12px;
-                    color: #e0e0e0;
-                    font-size: 15px;
-                    font-weight: 600;
-                    margin: 4px;
-                    background: transparent;
-                    min-width: 190px;
-                    max-width: 190px;
-                }
-                QMenu::item:selected {
-                    background: rgba(60, 60, 70, 210);
-                    color: #ffffff;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(80, 80, 90, 128);
-                    margin: 8px 20px;
-                }
-            """)
-        else:
-            # Светлая тема - стеклянный эффект
-            menu.setStyleSheet("""
-                QMenu {
-                    background: rgba(255, 255, 255, 245);
-                    border: 1px solid rgba(220, 220, 230, 200);
-                    border-radius: 20px;
-                    padding: 12px;
-                }
-                QMenu::item {
-                    padding: 14px 45px;
-                    border-radius: 12px;
-                    color: #1a202c;
-                    font-size: 15px;
-                    font-weight: 600;
-                    margin: 4px;
-                    background: transparent;
-                    min-width: 190px;
-                    max-width: 190px;
-                }
-                QMenu::item:selected {
-                    background: rgba(235, 235, 245, 210);
-                    color: #0f172a;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background: rgba(200, 200, 210, 153);
-                    margin: 8px 20px;
-                }
-            """)
+        is_glass = getattr(self, "current_liquid_glass", True)
+        if is_dark and is_glass:
+            _abg = "rgba(24, 24, 28, 242)"; _ab = "rgba(50, 50, 55, 128)"
+            _aic = "#e6e6e6"; _asel = "rgba(60, 60, 80, 200)"; _asc = "#ffffff"
+            _asep = "rgba(50, 50, 55, 90)"
+        elif is_dark:
+            _abg = "rgb(28, 28, 31)"; _ab = "rgba(55, 55, 60, 230)"
+            _aic = "#f0f0f0"; _asel = "rgba(48, 48, 62, 240)"; _asc = "#ffffff"
+            _asep = "rgba(55, 55, 60, 140)"
+        elif is_glass:
+            _abg = "rgba(240, 240, 245, 235)"; _ab = "rgba(210, 212, 222, 200)"
+            _aic = "#222222"; _asel = "rgba(228, 230, 252, 230)"; _asc = "#1a1a3a"
+            _asep = "rgba(200, 202, 218, 120)"
+            _abg = "rgb(246, 246, 248)"; _ab = "rgba(210, 210, 215, 242)"
+            _aic = "#1a1a1a"; _asel = "rgba(228, 230, 252, 242)"; _asc = "#1a1a3a"
+            _asep = "rgba(210, 210, 215, 178)"
+            _asep = "rgba(210, 210, 215, 0.70)"
+
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {_abg};
+                border: 1px solid {_ab};
+                border-radius: 18px;
+                padding: 8px;
+            }}
+            QMenu::item {{
+                padding: 12px 40px;
+                border-radius: 12px;
+                color: {_aic};
+                font-size: 14px;
+                font-weight: 600;
+                margin: 3px 4px;
+                background: transparent;
+                min-width: 190px;
+            }}
+            QMenu::item:selected {{
+                background: {_asel};
+                color: {_asc};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {_asep};
+                margin: 6px 16px;
+            }}
+        """)
         
         # ПОИСК — название фиксированное, состояние отражается галочкой
         search_label = "🔍 Умный поиск"
@@ -10111,7 +10133,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         _dim_eff = QtWidgets.QGraphicsOpacityEffect(self.attach_btn)
         self.attach_btn.setGraphicsEffect(_dim_eff)
         _dim_anim = QtCore.QPropertyAnimation(_dim_eff, b"opacity")
-        _dim_anim.setDuration(100)
+        _dim_anim.setDuration(80)
         _dim_anim.setStartValue(1.0)
         _dim_anim.setEndValue(0.0)
         _dim_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutQuart)
@@ -10120,12 +10142,13 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         open_proxy = _BurstProxy(_menu_bg, _start_geo)
         open_proxy.show()
         open_proxy.raise_()
+        _apply_windows_rounded(open_proxy, radius=16)
 
         _o_geo = QtCore.QPropertyAnimation(open_proxy, b"geometry")
-        _o_geo.setDuration(300)
+        _o_geo.setDuration(320)
         _o_geo.setStartValue(_start_geo)
         _o_geo.setEndValue(_proxy_end_geo)
-        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
+        _o_geo.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
         _o_geo.start()
         open_proxy._anims = [_o_geo, _dim_eff, _dim_anim]
 
@@ -10198,27 +10221,28 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             proxy = _CloseProxy(px, cur_geo)
             proxy.show()
             proxy.raise_()
+            _apply_windows_rounded(proxy, radius=16)
 
             _btn_now   = self.attach_btn.mapToGlobal(QtCore.QPoint(0, 0))
             _close_end = QtCore.QRect(_btn_now.x(), _btn_now.y(),
                                        self.attach_btn.width(), self.attach_btn.height())
 
             _c_geo = QtCore.QPropertyAnimation(proxy, b"geometry")
-            _c_geo.setDuration(270)
+            _c_geo.setDuration(260)
             _c_geo.setStartValue(cur_geo)
             _c_geo.setEndValue(_close_end)
-            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            _c_geo.setEasingCurve(QtCore.QEasingCurve.Type.InBack)
 
             _c_eff = QtWidgets.QGraphicsOpacityEffect(proxy)
             proxy.setGraphicsEffect(_c_eff)
             _c_eff.setOpacity(1.0)
             _c_op = QtCore.QPropertyAnimation(_c_eff, b"opacity")
-            _c_op.setDuration(270)
+            _c_op.setDuration(260)
             _c_op.setStartValue(1.0)
             _c_op.setKeyValueAt(0.55, 0.95)
             _c_op.setKeyValueAt(0.85, 0.3)
             _c_op.setEndValue(0.0)
-            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            _c_op.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
 
             def _on_close_done():
                 try:
@@ -10729,7 +10753,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
                 self.messages_layout.addWidget(self._stream_widget)
                 self._stream_widget.show()
                 # Анимация появления
-                if not IS_WINDOWS and hasattr(self._stream_widget, '_start_appear_animation'):
+                if hasattr(self._stream_widget, '_start_appear_animation'):
                     QtCore.QTimer.singleShot(20, self._stream_widget._start_appear_animation)
                 # Скролл вниз
                 def _sc_first():
@@ -11868,9 +11892,7 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             self.messages_layout.addWidget(message_widget)
             
             # Запускаем анимацию для последних 2 сообщений (оптимизировано)
-            if is_recent and not IS_WINDOWS and hasattr(message_widget, '_start_appear_animation'):
-                # Запускаем с плавной задержкой для красивого каскадного эффекта (150ms между сообщениями)
-                # Увеличена задержка под новую 800ms анимацию
+            if is_recent and hasattr(message_widget, '_start_appear_animation'):
                 QtCore.QTimer.singleShot(60 + idx * 150, message_widget._start_appear_animation)
         
         # ═══════════════════════════════════════════════════════════════
@@ -12403,8 +12425,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         # Анимация появления — запускаем ПОСЛЕ скролла.
         # Если автоскролл включён: ждём окончания скролла (260ms) + запас 80ms = 340ms.
         # Если автоскролл выключен: запускаем сразу через 20ms как раньше.
-        if not IS_WINDOWS and hasattr(message_widget, '_start_appear_animation'):
-            _mw_ref = message_widget  # локальная ссылка чтобы не потерять в closure
+        if hasattr(message_widget, '_start_appear_animation'):
+            _mw_ref = message_widget
             _appear_delay = 340 if getattr(self, "auto_scroll_enabled", False) else 20
             QtCore.QTimer.singleShot(_appear_delay, _mw_ref._start_appear_animation)
         
@@ -13851,9 +13873,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         
         # Убираем рамку окна
         dialog.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
-        # Прозрачность работает плохо на Windows
-        if not IS_WINDOWS:
-            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         
         # Центрируем по ЭКРАНУ (не по родителю)
         screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
@@ -14082,72 +14103,219 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
         self.input_field.setEnabled(False)
         self.send_btn.setEnabled(False)
 
-        # Каскад снизу вверх: интервал 25ms, анимация 280ms
-        STAGGER = 25
-        ANIM_DUR = 280
+        # Каскад снизу вверх: интервал 55ms, анимация 650ms (пиксели)
+        STAGGER = 55
+        ANIM_DUR = 650
         for idx, widget in enumerate(reversed(widgets)):
             delay = idx * STAGGER
-            QtCore.QTimer.singleShot(delay, lambda w=widget: self.smooth_fade_and_remove(w))
+            QtCore.QTimer.singleShot(delay, lambda w=widget: self.pixel_dissolve_and_remove(w))
 
-        total = (len(widgets) - 1) * STAGGER + ANIM_DUR + 80
+        total = (len(widgets) - 1) * STAGGER + ANIM_DUR + 200
         QtCore.QTimer.singleShot(total, self.finalize_clear)
 
-    def smooth_fade_and_remove(self, widget):
+    def pixel_dissolve_and_remove(self, widget):
         """
-        Плавное удаление: slide влево + fade-out одновременно.
-        Виджет уезжает вправо и исчезает.
+        Эффект рассыпания в пыль.
+
+        Механика:
+          1. grab() снимок виджета
+          2. Виджет НЕ скрывается и НЕ удаляется — занимает место в layout
+             Поверх него (в (0,0) виджета) показывается _PixelProxy
+          3. Сам виджет скрывается через QGraphicsOpacityEffect → opacity=0
+             (layout сохраняет его размер, места нет чёрных прямоугольников)
+          4. _PixelProxy рисует снимок с эффектом рассыпания
+          5. По завершении: прокси закрывается, виджет удаляется из layout
         """
         try:
             if not widget or not widget.isVisible():
                 return
 
-            DUR = 280
+            # Снимок виджета до скрытия
+            try:
+                px = widget.grab()
+            except Exception:
+                px = None
 
-            # ── Fade-out ─────────────────────────────────────────────────────
-            eff = QtWidgets.QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(eff)
-            eff.setOpacity(1.0)
+            if not px or px.isNull():
+                # Fallback: простой fade
+                eff = QtWidgets.QGraphicsOpacityEffect(widget)
+                widget.setGraphicsEffect(eff)
+                a = QtCore.QPropertyAnimation(eff, b"opacity")
+                a.setDuration(400)
+                a.setStartValue(1.0); a.setEndValue(0.0)
+                def _fb():
+                    try:
+                        widget.setGraphicsEffect(None)
+                        self.messages_layout.removeWidget(widget)
+                        widget.deleteLater()
+                    except Exception:
+                        pass
+                a.finished.connect(_fb)
+                a.start()
+                widget._clear_fb = [eff, a]
+                return
 
-            fade = QtCore.QPropertyAnimation(eff, b"opacity")
-            fade.setDuration(DUR)
-            fade.setStartValue(1.0)
-            fade.setEndValue(0.0)
-            fade.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+            # DPR: на Retina grab() даёт пиксмап в 2× физических пикселях
+            # Работаем в логических пикселях (размер виджета),
+            # а рисуем с масштабом 1/dpr чтобы снимок не был в 2 раза больше
+            _dpr  = px.devicePixelRatio() if px.devicePixelRatio() > 0 else 1.0
+            _ww   = widget.width()    # логический размер виджета
+            _wh   = widget.height()
 
-            # ── Slide вправо ─────────────────────────────────────────────────
-            orig_pos = widget.pos()
-            slide = QtCore.QPropertyAnimation(widget, b"pos")
-            slide.setDuration(DUR)
-            slide.setStartValue(orig_pos)
-            slide.setEndValue(QtCore.QPoint(orig_pos.x() + 40, orig_pos.y()))
-            slide.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            # Блоки в логических пикселях
+            import random as _rand
+            _rng  = _rand.Random(99)
+            BLOCK = 8
+            _cols = (_ww + BLOCK - 1) // BLOCK
+            _rows = (_wh + BLOCK - 1) // BLOCK
+            _bd   = [
+                (_rng.random(),
+                 _rng.uniform(-16, 16),
+                 _rng.uniform(6, 24))
+                for _ in range(_cols * _rows)
+            ]
 
-            grp = QtCore.QParallelAnimationGroup()
-            grp.addAnimation(fade)
-            grp.addAnimation(slide)
+            class _PixelProxy(QtWidgets.QWidget):
+                """
+                Рисует снимок виджета с эффектом рассыпания.
+                Координаты блоков — логические пиксели.
+                Снимок масштабируется через drawPixmap target-rect.
+                """
+                def __init__(self, pixmap, block_data, cols, rows, bsize,
+                             ww, wh, dpr, parent_w):
+                    super().__init__(parent_w)
+                    self._px   = pixmap
+                    self._bd   = block_data
+                    self._cols = cols
+                    self._rows = rows
+                    self._bs   = bsize
+                    self._ww   = ww     # логическая ширина
+                    self._wh   = wh     # логическая высота
+                    self._dpr  = dpr
+                    self._progress = 0.0
+                    self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-            def _remove():
+                def setProgress(self, v):
+                    self._progress = v
+                    self.update()
+
+                def getProgress(self):
+                    return self._progress
+
+                progress = QtCore.pyqtProperty(float, getProgress, setProgress)
+
+                def paintEvent(self, event):
+                    if not self._px:
+                        return
+                    p = QtGui.QPainter(self)
+                    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+                    prog = self._progress
+                    bs   = self._bs
+                    dpr  = self._dpr
+                    # физические пиксели снимка
+                    phys_w = self._px.width()
+                    phys_h = self._px.height()
+
+                    if prog < 0.005:
+                        # Рисуем снимок в логических размерах виджета
+                        p.drawPixmap(
+                            QtCore.QRect(0, 0, self._ww, self._wh),
+                            self._px,
+                            QtCore.QRect(0, 0, phys_w, phys_h)
+                        )
+                        p.end()
+                        return
+
+                    idx = 0
+                    for row in range(self._rows):
+                        for col in range(self._cols):
+                            thresh, dx_max, dy_max = self._bd[idx]
+                            idx += 1
+
+                            # Логические координаты блока
+                            bx = col * bs
+                            by = row * bs
+                            bw = min(bs, self._ww - bx)
+                            bh = min(bs, self._wh - by)
+                            if bw <= 0 or bh <= 0:
+                                continue
+
+                            # Физические координаты в снимке
+                            sbx = int(bx * dpr)
+                            sby = int(by * dpr)
+                            sbw = int(bw * dpr)
+                            sbh = int(bh * dpr)
+
+                            t0    = thresh * 0.65
+                            local = (prog - t0) / 0.35
+                            local = max(0.0, min(1.0, local))
+
+                            if local <= 0.0:
+                                p.setOpacity(1.0)
+                                p.drawPixmap(
+                                    QtCore.QRect(bx, by, bw, bh),
+                                    self._px,
+                                    QtCore.QRect(sbx, sby, sbw, sbh)
+                                )
+                            elif local < 1.0:
+                                ease  = local * local
+                                ox    = int(dx_max * ease)
+                                oy    = int(dy_max * ease)
+                                alpha = max(0.0, 1.0 - ease * 1.4)
+                                p.setOpacity(alpha)
+                                p.drawPixmap(
+                                    QtCore.QRect(bx + ox, by + oy, bw, bh),
+                                    self._px,
+                                    QtCore.QRect(sbx, sby, sbw, sbh)
+                                )
+                    p.end()
+
+            _parent = widget.parent()
+            proxy = _PixelProxy(px, _bd, _cols, _rows, BLOCK,
+                                _ww, _wh, _dpr, _parent)
+            proxy.setGeometry(widget.geometry())
+            proxy.show()
+            proxy.raise_()
+
+            # Скрываем виджет сразу — прокси показывает его снимок
+            # Используем setVisible(False) вместо opacity=0 чтобы не трогать дочерних
+            # Но чтобы layout не схлопнулся — минимальная высота = текущая
+            _saved_min_h = widget.minimumHeight()
+            _saved_h     = widget.height()
+            widget.setMinimumHeight(_saved_h)
+            widget.setMaximumHeight(_saved_h)
+            widget.setVisible(False)
+
+            # Анимируем рассыпание
+            anim = QtCore.QPropertyAnimation(proxy, b"progress")
+            anim.setDuration(700)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QtCore.QEasingCurve.Type.Linear)
+
+            def _cleanup():
                 try:
-                    widget.setGraphicsEffect(None)
-                    widget.move(orig_pos)
+                    proxy.close()
+                except Exception:
+                    pass
+                try:
+                    widget.setMinimumHeight(_saved_min_h)
+                    widget.setMaximumHeight(16777215)
                     self.messages_layout.removeWidget(widget)
                     widget.deleteLater()
-                except (RuntimeError, Exception):
+                except Exception:
                     pass
 
-            grp.finished.connect(_remove)
-            grp.start()
-            widget._clear_anim_grp = grp  # защита от GC
+            anim.finished.connect(_cleanup)
+            anim.start()
+            widget._dissolve_refs = [proxy, anim, _parent]  # защита от GC
 
         except Exception as e:
-            print(f"[SMOOTH_FADE] Ошибка: {e}")
+            print(f"[PIXEL_DISSOLVE] Ошибка: {e}")
             try:
-                widget.setGraphicsEffect(None)
                 self.messages_layout.removeWidget(widget)
                 widget.deleteLater()
-            except RuntimeError:
-                pass
-
+            except Exception:
                 pass
     
     
@@ -14211,8 +14379,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             QtCore.Qt.WindowType.Dialog |
             QtCore.Qt.WindowType.WindowStaysOnTopHint
         )
-        if not IS_WINDOWS:
-            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
 
         screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
         dialog.move(screen_geo.center().x() - 225, screen_geo.center().y() - 115)
@@ -14394,8 +14562,8 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             QtCore.Qt.WindowType.Dialog |
             QtCore.Qt.WindowType.WindowStaysOnTopHint
         )
-        if not IS_WINDOWS:
-            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         
         # Центрируем по экрану
         screen_geo = QtWidgets.QApplication.primaryScreen().geometry()
@@ -14586,92 +14754,303 @@ class MainWindow(AttachmentMixin, QtWidgets.QMainWindow):
             print("[DELETE_ALL_CHATS] Пользователь отменил удаление")
     
     def perform_delete_all_chats(self):
-        """Удалить все чаты и создать новый — напрямую через SQL"""
+        """Удалить все чаты — очищает чат, обновляет сайдбар, показывает popup."""
         print("[DELETE_ALL_CHATS] ▶ Начинаю полное удаление...")
-        
-        try:
-            import sqlite3 as _sqlite3
-            
-            # ШАГ 0: Очищаем ВСЮ память всех моделей ПЕРЕД удалением чатов
-            clear_all_memories_global()
 
-            # ШАГ 1: Напрямую чистим БД — гарантированно удаляем всё
-            # Берём путь из модуля chat_manager
-            import chat_manager as _cm_module
-            db_path = _cm_module.CHATS_DB
-            conn = _sqlite3.connect(db_path)
-            cur = conn.cursor()
-            
-            cur.execute("DELETE FROM chat_messages")
-            cur.execute("DELETE FROM chats")
-            
-            # ИСПРАВЛЕНО: НЕ сбрасываем sqlite_sequence.
-            # Сброс опасен: новые чаты получали бы те же ID (1, 2, 3...) что и
-            # удалённые, и если память в памяти-БД не очистилась по любой причине,
-            # данные старого чата привязывались бы к новому с тем же ID.
-            # Монотонный рост ID полностью исключает такие коллизии.
-            
-            # Создаём один чистый чат
-            from datetime import datetime as _dt
-            now = _dt.utcnow().isoformat()
-            cur.execute(
-                "INSERT INTO chats (title, created_at, updated_at, is_active) VALUES (?, ?, ?, ?)",
-                ("Новый чат", now, now, 1)
-            )
-            new_chat_id = cur.lastrowid
-            conn.commit()
-            conn.close()
-            
-            print(f"[DELETE_ALL_CHATS] ✓ БД очищена. Новый чат ID={new_chat_id}")
-            
-            # ШАГ 2: Обновляем все внутренние ID
-            self.current_chat_id = new_chat_id
-            self.startup_chat_id = new_chat_id
-            on_chat_switched_all_memories(new_chat_id)
-            
-            # ШАГ 3: Если в настройках — возвращаемся к чату плавно
-            if self.content_stack.currentIndex() == 1:
-                self._animate_stack_transition(from_index=1, to_index=0,
-                                               callback=self._after_close_settings)
-                QtWidgets.QApplication.processEvents()
-            
-            # ШАГ 4: Очищаем виджеты сообщений
-            to_remove = []
-            for i in range(self.messages_layout.count()):
-                item = self.messages_layout.itemAt(i)
-                if item and item.widget() and hasattr(item.widget(), 'speaker'):
-                    to_remove.append(item.widget())
-            for w in to_remove:
-                self.messages_layout.removeWidget(w)
-                w.deleteLater()
-            print(f"[DELETE_ALL_CHATS] ✓ Удалено виджетов: {len(to_remove)}")
-            
-            # ШАГ 5: Обновляем список чатов в сайдбаре
-            self.chats_list.clear()
-            chats = self.chat_manager.get_all_chats()
-            print(f"[DELETE_ALL_CHATS] Чатов в БД после удаления: {len(chats)}")
-            for chat in chats:
-                item = QtWidgets.QListWidgetItem(chat['title'])
-                item.setData(QtCore.Qt.ItemDataRole.UserRole, chat['id'])
-                self.chats_list.addItem(item)
-                if chat['is_active']:
-                    self.chats_list.setCurrentItem(item)
-            self.chats_list.repaint()
-            
-            # ШАГ 6: Показываем приветствие
-            self.add_message_widget("Система", "Привет! Готов к работе.", add_controls=False)
-            
-            # ШАГ 7: Скроллим вниз
-            QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(
-                self.scroll_area.verticalScrollBar().maximum()
-            ))
-            
-            print("[DELETE_ALL_CHATS] ✓ Всё готово!")
-            
-        except Exception as e:
-            print(f"[DELETE_ALL_CHATS] ✗ Ошибка: {e}")
-            import traceback
-            traceback.print_exc()
+        def _run_delete():
+            try:
+                import sqlite3 as _sq, chat_manager as _cm
+                from datetime import datetime as _dt
+
+                # Считаем количество чатов ДО удаления
+                _conn = _sq.connect(_cm.CHATS_DB)
+                _chat_count = _conn.execute("SELECT COUNT(*) FROM chats").fetchone()[0]
+                _conn.close()
+
+                clear_all_memories_global()
+
+                # Очищаем БД и создаём новый чат
+                conn = _sq.connect(_cm.CHATS_DB)
+                cur  = conn.cursor()
+                cur.execute("DELETE FROM chat_messages")
+                cur.execute("DELETE FROM chats")
+                now = _dt.utcnow().isoformat()
+                cur.execute(
+                    "INSERT INTO chats (title, created_at, updated_at, is_active) VALUES (?,?,?,?)",
+                    ("Новый чат", now, now, 1)
+                )
+                new_chat_id = cur.lastrowid
+                conn.commit()
+                conn.close()
+
+                self.current_chat_id = new_chat_id
+                self.startup_chat_id = new_chat_id
+                on_chat_switched_all_memories(new_chat_id)
+
+                # Удаляем все виджеты сообщений
+                to_remove = []
+                for i in range(self.messages_layout.count()):
+                    item = self.messages_layout.itemAt(i)
+                    if item and item.widget() and hasattr(item.widget(), 'speaker'):
+                        to_remove.append(item.widget())
+                for ww in to_remove:
+                    self.messages_layout.removeWidget(ww)
+                    ww.deleteLater()
+
+                # Обновляем сайдбар
+                self.chats_list.clear()
+                for chat in self.chat_manager.get_all_chats():
+                    it = QtWidgets.QListWidgetItem(chat['title'])
+                    it.setData(QtCore.Qt.ItemDataRole.UserRole, chat['id'])
+                    self.chats_list.addItem(it)
+                    if chat['is_active']:
+                        self.chats_list.setCurrentItem(it)
+                self.chats_list.repaint()
+
+                # Приветствие в чате
+                self.add_message_widget("Система", "Привет! Готов к работе.", add_controls=False)
+
+                self.input_field.setEnabled(True)
+                self.send_btn.setEnabled(True)
+
+                QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(
+                    self.scroll_area.verticalScrollBar().maximum()
+                ))
+
+                # Показываем popup-окно с результатом
+                QtCore.QTimer.singleShot(300, lambda: self._show_deleted_chats_popup(_chat_count))
+                print(f"[DELETE_ALL_CHATS] ✓ Удалено чатов: {_chat_count}")
+
+            except Exception as e:
+                print(f"[DELETE_ALL_CHATS] ✗ Ошибка: {e}")
+                import traceback; traceback.print_exc()
+                self.input_field.setEnabled(True)
+                self.send_btn.setEnabled(True)
+
+        if self.content_stack.currentIndex() == 1:
+            self.close_settings()
+            QtCore.QTimer.singleShot(620, _run_delete)
+        else:
+            _run_delete()
+
+    def _show_deleted_chats_popup(self, chat_count: int):
+        """Красивое popup-окно с результатом удаления чатов. Исчезает через 4 сек."""
+        is_dark  = self.current_theme == "dark"
+        is_glass = getattr(self, "current_liquid_glass", True)
+
+        if is_dark and is_glass:
+            bg_frame = "rgba(30, 30, 38, 0.95)"; border = "rgba(60, 60, 90, 0.60)"
+            tc = "#e8e8f8"; sc = "rgba(160, 160, 200, 0.80)"
+        elif is_dark:
+            bg_frame = "rgb(30, 30, 36)"; border = "rgba(60, 60, 70, 0.90)"
+            tc = "#e8e8f8"; sc = "#9090aa"
+        elif is_glass:
+            bg_frame = "rgba(255, 255, 255, 0.92)"; border = "rgba(255, 255, 255, 0.95)"
+            tc = "#1a1a3a"; sc = "rgba(80, 90, 140, 0.75)"
+        else:
+            bg_frame = "rgb(252, 252, 254)"; border = "rgba(210, 210, 218, 0.95)"
+            tc = "#1a1a3a"; sc = "#6677aa"
+
+        noun = "чат" if chat_count == 1 else "чата" if 2 <= chat_count <= 4 else "чатов"
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("")
+        dialog.setModal(False)
+        dialog.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint |
+            QtCore.Qt.WindowType.Dialog |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        dialog.setFixedSize(360, 180)
+
+        screen = QtWidgets.QApplication.primaryScreen().geometry()
+        gp = self.mapToGlobal(QtCore.QPoint(0, 0))
+        gw = self.geometry()
+        dx = gp.x() + (gw.width()  - 360) // 2
+        dy = gp.y() + (gw.height() - 180) // 2
+        dialog.move(dx, dy)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        frame = QtWidgets.QFrame()
+        frame.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {bg_frame};
+                border: 1px solid {border};
+                border-radius: 22px;
+            }}
+        """)
+        root.addWidget(frame)
+
+        fl = QtWidgets.QVBoxLayout(frame)
+        fl.setContentsMargins(32, 28, 32, 28)
+        fl.setSpacing(10)
+
+        icon_lbl = QtWidgets.QLabel("✅")
+        icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet("font-size: 36px; background: transparent; border: none;")
+        fl.addWidget(icon_lbl)
+
+        title_lbl = QtWidgets.QLabel(f"Удалено {chat_count} {noun}")
+        title_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setFont(_apple_font(18, weight=QtGui.QFont.Weight.Bold))
+        title_lbl.setStyleSheet(f"color: {tc}; background: transparent; border: none;")
+        fl.addWidget(title_lbl)
+
+        sub_lbl = QtWidgets.QLabel("Все чаты успешно удалены")
+        sub_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        sub_lbl.setFont(_apple_font(13))
+        sub_lbl.setStyleSheet(f"color: {sc}; background: transparent; border: none;")
+        fl.addWidget(sub_lbl)
+
+        # Появление
+        dialog.setWindowOpacity(0.0)
+        dialog.show()
+        _anim_in = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
+        _anim_in.setDuration(220)
+        _anim_in.setStartValue(0.0)
+        _anim_in.setEndValue(1.0)
+        _anim_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        _anim_in.start()
+        dialog._anim_in = _anim_in
+
+        # Закрытие через 4 сек
+        def _close_popup():
+            _anim_out = QtCore.QPropertyAnimation(dialog, b"windowOpacity")
+            _anim_out.setDuration(260)
+            _anim_out.setStartValue(1.0)
+            _anim_out.setEndValue(0.0)
+            _anim_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _anim_out.finished.connect(dialog.close)
+            dialog._anim_out = _anim_out
+            _anim_out.start()
+
+        QtCore.QTimer.singleShot(4000, _close_popup)
+        self._deleted_popup = dialog  # защита от GC
+
+    def _show_delete_all_toast(self, chat_count: int):
+        """Toast-уведомление после удаления всех чатов."""
+        is_dark  = self.current_theme == "dark"
+        is_glass = getattr(self, "current_liquid_glass", True)
+
+        if is_dark and is_glass:
+            bg    = "rgba(28, 28, 38, 0.92)"
+            bord  = "rgba(90, 90, 130, 0.50)"
+            tc    = "#e0e0f0"
+            subc  = "rgba(150,150,185,0.75)"
+        elif is_dark:
+            bg    = "rgb(26, 26, 34)"
+            bord  = "rgba(65, 65, 90, 0.90)"
+            tc    = "#e0e0f0"
+            subc  = "#8888aa"
+        elif is_glass:
+            bg    = "rgba(255,255,255,0.82)"
+            bord  = "rgba(255,255,255,0.90)"
+            tc    = "#1a1a3a"
+            subc  = "rgba(80,90,140,0.70)"
+        else:
+            bg    = "rgb(248,248,252)"
+            bord  = "rgba(200,205,230,0.95)"
+            tc    = "#1a1a3a"
+            subc  = "#6677aa"
+
+        noun = "чат" if chat_count == 1 else                "чата" if 2 <= chat_count <= 4 else "чатов"
+
+        toast = QtWidgets.QWidget(self,
+            QtCore.Qt.WindowType.Tool |
+            QtCore.Qt.WindowType.FramelessWindowHint |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        toast.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        toast.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        tl = QtWidgets.QHBoxLayout(toast)
+        tl.setContentsMargins(18, 12, 18, 12)
+        tl.setSpacing(10)
+
+        icon_lbl = QtWidgets.QLabel("✅")
+        icon_lbl.setStyleSheet("background:transparent;border:none;font-size:20px;")
+        tl.addWidget(icon_lbl)
+
+        txt_col = QtWidgets.QVBoxLayout()
+        txt_col.setSpacing(2)
+        h_lbl = QtWidgets.QLabel("Все чаты удалены")
+        h_lbl.setFont(_apple_font(13, weight=QtGui.QFont.Weight.Bold))
+        h_lbl.setStyleSheet(f"background:transparent;border:none;color:{tc};")
+        s_lbl = QtWidgets.QLabel(f"Удалено {chat_count} {noun}")
+        s_lbl.setFont(_apple_font(11))
+        s_lbl.setStyleSheet(f"background:transparent;border:none;color:{subc};")
+        txt_col.addWidget(h_lbl)
+        txt_col.addWidget(s_lbl)
+        tl.addLayout(txt_col)
+
+        toast.setStyleSheet(f"""
+            QWidget {{
+                background: {bg};
+                border: 1px solid {bord};
+                border-radius: 16px;
+            }}
+        """)
+
+        toast.adjustSize()
+        tw = toast.sizeHint().width() + 36
+        th = toast.sizeHint().height() + 24
+        toast.setFixedSize(max(tw, 220), max(th, 60))
+
+        # Позиция: снизу по центру экрана (над полем ввода)
+        gw = self.geometry()
+        gp = self.mapToGlobal(QtCore.QPoint(0, 0))
+        tx = gp.x() + (gw.width() - toast.width()) // 2
+        ty = gp.y() + gw.height() - toast.height() - 90
+
+        toast.move(tx, ty + 40)
+        toast.show()
+        toast.raise_()
+        _apply_windows_rounded(toast, radius=16)
+
+        # Slide-up + fade-in
+        _eff = QtWidgets.QGraphicsOpacityEffect(toast)
+        toast.setGraphicsEffect(_eff)
+        _eff.setOpacity(0.0)
+        _op_in = QtCore.QPropertyAnimation(_eff, b"opacity")
+        _op_in.setDuration(260); _op_in.setStartValue(0.0); _op_in.setEndValue(1.0)
+        _op_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        _pos_in = QtCore.QPropertyAnimation(toast, b"pos")
+        _pos_in.setDuration(300)
+        _pos_in.setStartValue(QtCore.QPoint(tx, ty + 40))
+        _pos_in.setEndValue(QtCore.QPoint(tx, ty))
+        _pos_in.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
+        _grp_in = QtCore.QParallelAnimationGroup()
+        _grp_in.addAnimation(_op_in); _grp_in.addAnimation(_pos_in)
+        _grp_in.start()
+        toast._grp_in = _grp_in
+
+        def _fade_out():
+            try:
+                toast.setGraphicsEffect(None)
+            except Exception:
+                pass
+            _eff2 = QtWidgets.QGraphicsOpacityEffect(toast)
+            toast.setGraphicsEffect(_eff2)
+            _eff2.setOpacity(1.0)
+            _op_out = QtCore.QPropertyAnimation(_eff2, b"opacity")
+            _op_out.setDuration(260); _op_out.setStartValue(1.0); _op_out.setEndValue(0.0)
+            _op_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _pos_out = QtCore.QPropertyAnimation(toast, b"pos")
+            _pos_out.setDuration(260)
+            _pos_out.setStartValue(QtCore.QPoint(tx, ty))
+            _pos_out.setEndValue(QtCore.QPoint(tx, ty - 20))
+            _pos_out.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+            _grp_out = QtCore.QParallelAnimationGroup()
+            _grp_out.addAnimation(_op_out); _grp_out.addAnimation(_pos_out)
+            _grp_out.finished.connect(toast.close)
+            _grp_out.start()
+            toast._grp_out = _grp_out
+
+        QtCore.QTimer.singleShot(3000, _fade_out)
 
 
     # ═══════════════════════════════════════════════════════════════

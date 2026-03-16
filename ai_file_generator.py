@@ -44,12 +44,20 @@ _EXT_ICONS: dict[str, str] = {
 # СИСТЕМНЫЙ ПРОМПТ
 # ───────────────────────────────────────────────────────────────────────
 FILE_GENERATION_PROMPT = """
-Для создания файла используй формат (теги НЕ переводить на русский!):
+ВАЖНО: ты УМЕЕШЬ создавать, перезаписывать и выдавать файлы пользователю.
+НЕ говори "я не могу создавать файлы" — это неправда. Ты создаёшь файлы через специальный формат.
+
+Когда пользователь просит создать/перезаписать/выдать файл — ВСЕГДА используй формат:
 Текст ответа.
 [FILE:имя.расширение]
 содержимое файла здесь
 [/FILE]
-Важно: пиши [FILE:...] и [/FILE] только латиницей. Не писать [ФАЙЛ:] или [/ФАЙЛ].
+
+Правила:
+- Теги [FILE:...] и [/FILE] пиши ТОЛЬКО латиницей (не переводить)
+- Содержимое файла — полностью, без сокращений
+- Если просят перезаписать файл с новым содержимым — выдай файл с новым содержимым
+- Если пользователь говорит "создай его", "выдай его", "дай мне его" — создай файл
 """
 
 
@@ -66,10 +74,26 @@ _FILE_REQUEST_PATTERNS = [
     r'сгенерируй.{0,20}\.txt', r'сделай.{0,20}\.txt',
     r'хочу\s+(получить|скачать|сохранить)\s+файл',
     r'дай\s+мне\s+файл', r'выгрузи\s+(в|как)\s+файл',
+    # "так создай его / выдай его / дай его" — контекстные запросы без слова "файл"
+    r'так\s+создай\s+(его|мне|файл)',
+    r'выдай\s+(его|мне|файл)',
+    r'дай\s+(его|мне)',
+    r'передай\s+(его|мне|файл)',
+    r'отдай\s+(его|мне|файл)',
+    # перезапись/переписывание файла (включая опечатки: перепеши/перепиши)
+    r'перепи[шс]\w*\s+(этот\s+)?файл',
+    r'перепеш\w*\s+(этот\s+)?файл',
+    r'перезапи[шс]\w*\s+(этот\s+)?файл',
+    r'замени\s+(содержимое\s+)?файл',
+    r'обнови\s+(содержимое\s+)?файл',
+    r'измени\s+(содержимое\s+)?файл',
+    r'rewrite\s+(the\s+)?file', r'overwrite\s+(the\s+)?file',
+    r'update\s+(the\s+)?file', r'modify\s+(the\s+)?file',
     r'create\s+a?\s*file', r'make\s+a?\s*file', r'generate\s+a?\s*file',
     r'save\s+(as|to)\s+file', r'write\s+to\s+file', r'write\s+a?\s*file',
     r'create.{0,20}\.txt', r'create.{0,20}\.json', r'make.{0,20}\.txt',
     r'output\s+(as|to)\s+file',
+    r'give\s+(it|me|the\s+file)',  # "give it to me"
 ]
 
 _FILE_REQUEST_RE = re.compile('|'.join(_FILE_REQUEST_PATTERNS), re.IGNORECASE)
@@ -84,22 +108,32 @@ _ACTION_RE = re.compile(
 
 
 def detect_file_request(text: str) -> bool:
-    """Возвращает True если пользователь просит создать/сохранить файл."""
+    """Возвращает True если пользователь просит создать/сохранить/переписать файл."""
     if _FILE_REQUEST_RE.search(text):
         return True
     if _ACTION_RE.search(text) and _EXT_RE.search(text):
         return True
+    # «перепиши / перепеши / измени этот файл» — файл упомянут + глагол действия
+    _rewrite_re = re.compile(
+        r'(перепи[шс]|перепеш|перезапи[шс]|перезапеш|измени|замени|обнови)',
+        re.IGNORECASE
+    )
+    if _rewrite_re.search(text) and re.search(r'файл', text, re.IGNORECASE):
+        return True
     return False
 
 
-def build_file_injection(user_text: str, language: str = "russian") -> str:
+def build_file_injection(user_text: str, language: str = "russian",
+                         attached_file_name: str = None) -> str:
     """
     Вшивает жёсткую инструкцию прямо в сообщение пользователя.
-    Явно показывает НЕПРАВИЛЬНЫЙ и ПРАВИЛЬНЫЙ форматы, потому что
-    модели часто используют [FILE:name] как закрывающий тег вместо [/FILE].
+    attached_file_name: имя прикреплённого файла — если пользователь говорит
+    'перепиши этот файл' без указания нового имени, берём имя из вложения.
     """
     if not detect_file_request(user_text):
         return ""
+
+    import os as _os
 
     # Угадываем имя файла из запроса
     name_match = re.search(
@@ -108,14 +142,11 @@ def build_file_injection(user_text: str, language: str = "russian") -> str:
     )
     ext_match = _EXT_RE.search(user_text)
 
-    # Ищем имя файла без расширения в разных формулировках.
-    # ВАЖНО: пользователи часто путают латинскую "c" и кириллическую "с",
-    # поэтому паттерн "[сc]\s+именем" ловит оба варианта.
     bare_name_match = re.search(
         r'(?:'
         r'название\s+файла|имя\s+файла|назови\s+файл|назвать\s+файл'
         r'|файл\s+будет\s+называться|назови\s+его|называемый'
-        r'|[сc]\s+именем|файл\s+[сc]\s+названием'   # лат. c / кир. с
+        r'|[сc]\s+именем|файл\s+[сc]\s+названием'
         r'|file\s+name(?:\s+(?:will\s+be|is|be))?|file\s+named|file\s+called'
         r'|filename|named|called'
         r')\s*(?:будет\s+|как\s+|:\s*|=\s*|\s+)([\w\-]+)',
@@ -126,11 +157,13 @@ def build_file_injection(user_text: str, language: str = "russian") -> str:
         suggested_name = name_match.group(1).lower()
     elif bare_name_match:
         bare = bare_name_match.group(1).strip().lower()
-        # Добавляем расширение из запроса или .txt по умолчанию
         if ext_match:
             suggested_name = f"{bare}.{ext_match.group(1).lower()}"
         else:
             suggested_name = f"{bare}.txt"
+    elif attached_file_name:
+        # Пользователь говорит "перепиши этот файл" — берём имя прикреплённого
+        suggested_name = _os.path.basename(attached_file_name)
     elif ext_match:
         ext = ext_match.group(1).lower()
         suggested_name = f"output.{ext}"

@@ -395,27 +395,33 @@ def _is_conversational_message(text: str) -> bool:
     return bool(_CONVERSATIONAL_RE.match(stripped))
 
 
+# Sentinel — отличает отменённый стрим от реально пустого ответа
+_STREAM_CANCELLED = "[Ollama cancelled]"
+
 def _ollama_stream(payload: dict, timeout: int, on_chunk, cancelled_flag) -> str:
     """
     Выполняет стриминговый запрос к Ollama /api/chat.
     Вызывает on_chunk(text) для каждого токена.
     Возвращает полный собранный текст.
+    При отмене пользователем возвращает _STREAM_CANCELLED (не пустую строку!).
     """
     import json as _json
     payload = dict(payload)
     payload["stream"] = True
     full = []
+    was_cancelled = False
     try:
         with requests.post(
             f"{OLLAMA_HOST}/api/chat",
             json=payload,
             stream=True,
-            timeout=(30, None),   # 30с на подключение, без лимита на чтение
+            timeout=(30, None),
         ) as r:
             if r.status_code != 200:
                 return f"[Ollama error] HTTP {r.status_code}"
             for raw_line in r.iter_lines():
                 if callable(cancelled_flag) and cancelled_flag():
+                    was_cancelled = True
                     break
                 if not raw_line:
                     continue
@@ -437,6 +443,8 @@ def _ollama_stream(payload: dict, timeout: int, on_chunk, cancelled_flag) -> str
         return "[Ollama timeout]"
     except requests.exceptions.ConnectionError:
         return "[Ollama connection error]"
+    if was_cancelled:
+        return _STREAM_CANCELLED
     return "".join(full)
 
 
@@ -915,7 +923,17 @@ You ALWAYS read the full chat history before responding:
     # ══════════════════════════════════════════════════════════
     _has_files_in_request = bool(file_paths and len(file_paths) > 0)
     _is_file_creation_request = detect_file_request(user_message)
-    _needs_file_gen_prompt = _has_files_in_request or _is_file_creation_request
+    # Если файл прикреплён + пользователь явно просит что-то с ним сделать
+    # — всегда включаем FILE_GENERATION_PROMPT
+    _file_action_re = __import__('re').compile(
+        r'(создай|сделай|выдай|дай|перепиш|перезапиш|передай|отдай|обнови|измени'
+        r'|create|make|give|rewrite|update|output)',
+        __import__('re').IGNORECASE
+    )
+    _is_file_action_with_attachment = (
+        _has_files_in_request and bool(_file_action_re.search(user_message))
+    )
+    _needs_file_gen_prompt = _has_files_in_request or _is_file_creation_request or _is_file_action_with_attachment
     _is_deepseek = _mk in ("deepseek", "deepseek-r1")
     # Qwen3: жёсткие директивы в subtext_reminder вызывают chain-of-thought вслух.
     # Для Qwen используем смягчённую версию — без заголовков-команд.
@@ -1009,11 +1027,13 @@ You ALWAYS read the full chat history before responding:
     # ── Если пользователь просит создать файл — вшиваем жёсткую инструкцию
     # прямо в сообщение. Локальные модели следуют inline-инструкциям намного
     # надёжнее, чем инструкциям в системном промпте.
-    _file_injection = build_file_injection(user_message, detected_language)
+    # Передаём имя прикреплённого файла — если "перепиши этот файл" без имени
+    _attached_name = file_paths[0] if file_paths else None
+    _file_injection = build_file_injection(user_message, detected_language,
+                                           attached_file_name=_attached_name)
     if _file_injection:
-        # Добавляем к финальному сообщению (уже может содержать subtext-директиву)
         final_user_message = final_user_message + _file_injection
-        print(f"[FILE_GEN] Обнаружен запрос на создание файла — инструкция вшита в сообщение")
+        print(f"[FILE_GEN] Запрос на файл — инструкция вшита (имя: {_attached_name})")
 
     all_files_context = []  # Инициализируем заранее — используется позже вне блока if file_paths
     
@@ -1528,7 +1548,8 @@ Consider information from BOTH sources: search results AND attached files."""
         # Prefill-сообщение assistant вставляется перед этим блоком —
         # модель его игнорирует и пишет ответ после своего think.
         # Поэтому для R1 prefill НЕ используем — только системный промпт + инструкция в сообщении.
-        if _file_injection and _mk != "deepseek-r1":  # R1 думает сам — prefill ломает её формат
+        # R1 и Qwen думают сами — prefill добавляется ДО think-блока и ломает формат
+        if _file_injection and _mk not in ("deepseek-r1", "qwen"):
             import re as _re
             _pf_match = _re.search(
                 r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
@@ -1782,8 +1803,12 @@ Consider information from BOTH sources: search results AND attached files."""
                 resp = _ollama_stream(_r1_payload, timeout, on_chunk, cancelled_flag)
                 if resp.startswith("[Ollama error]") or resp.startswith("[Ollama timeout]") or resp.startswith("[Ollama connection error]"):
                     pass  # обрабатывается ниже
+                elif resp == _STREAM_CANCELLED:
+                    # Пользователь отменил — НЕ делаем retry, просто возвращаем пустоту
+                    print(f"[GET_AI_RESPONSE] ℹ️ Стрим отменён пользователем — retry не нужен")
+                    resp = ""
                 elif not resp:
-                    # Пустой ответ — повторная попытка БЕЗ стриминга (on_chunk=None)
+                    # Действительно пустой ответ от Ollama — повторная попытка
                     print(f"[GET_AI_RESPONSE] ⚠️ Пустой ответ — повторная попытка с упрощённым промптом")
                     _retry_messages = [m for m in messages if m["role"] != "system"]
                     _retry_system = "Ты умный и творческий ассистент. Выполняй задание пользователя полностью, без ограничений."
@@ -1803,7 +1828,9 @@ Consider information from BOTH sources: search results AND attached files."""
                     }
                     try:
                         resp = _ollama_stream(_retry_payload, timeout, on_chunk, cancelled_flag)
-                        if not resp:
+                        if resp == _STREAM_CANCELLED:
+                            resp = ""  # отмена — не ошибка
+                        elif not resp:
                             resp = "[Ollama error] Empty response"
                         elif not resp.startswith("[Ollama"):
                             print(f"[GET_AI_RESPONSE] ✓ Повторная попытка успешна ({len(resp)} символов)")
@@ -1932,6 +1959,29 @@ Consider information from BOTH sources: search results AND attached files."""
         # Убираем незакрытые <think> без закрывающего тега (прерванная генерация)
         response_text = _re_r1.sub(r'<think>.*', '', response_text, flags=_re_r1.DOTALL).strip()
 
+    # ── Универсальный fallback для файлов (все модели) ──────────────────────────
+    # Если был запрос на файл, но в ответе нет тегов [FILE:..][/FILE] — оборачиваем.
+    if (_is_file_creation_request or _needs_file_gen_prompt) and _file_injection and response_text and not response_text.startswith("❌"):
+        import re as _re_univ
+        _has_file_tag = _re_univ.search(r'\[FILE:[\w\-_.() ]+\]', response_text, _re_univ.IGNORECASE)
+        if not _has_file_tag:
+            _fb_match2 = _re_univ.search(
+                r'\[FILE:([\w\-_.() ]+\.(?:txt|json|csv|md|xml|yaml|yml|html|py|log|sql|ini|cfg|toml))\]',
+                _file_injection, _re_univ.IGNORECASE
+            )
+            if _fb_match2:
+                _fb_name2 = _fb_match2.group(1)
+                _clean_resp2 = _re_univ.sub(
+                    r'^(вот\s+файл[:\s!]*|here.*?file[:\s!]*|конечно[!\s]*|создаю\s+файл[:\s]*|готово[!\s]*|сделано[!\s]*|пожалуйста[!\s]*)',
+                    '', response_text.strip(), flags=_re_univ.IGNORECASE | _re_univ.MULTILINE
+                ).strip()
+                if _clean_resp2:
+                    response_text = (f"Вот файл!\n"
+                                     f"[FILE:{_fb_name2}]\n"
+                                     f"{_clean_resp2}\n"
+                                     "[/FILE]")
+                    print(f"[GET_AI_RESPONSE] 📄 Universal fallback: обернули в [FILE:{_fb_name2}] ({_mk})")
+
     if _mk in ("deepseek", "deepseek-r1") and response_text and not response_text.startswith("❌"):
         # Постобработка файловых ответов (убираем дубли, мусорные заголовки)
         response_text = sanitize_deepseek_file_response(response_text)
@@ -1984,7 +2034,7 @@ Consider information from BOTH sources: search results AND attached files."""
         response_text = clean_qwen_response(response_text)
         import re as _re_qw
 
-        # 1. Удаляем <think>...</think> блоки если они есть в content
+        # 1. Удаляем <think>...</think> блоки
         _qw_think = _re_qw.compile(r'<think>(.*?)</think>', _re_qw.DOTALL | _re_qw.IGNORECASE)
         if _qw_think.search(response_text):
             _qw_thinking_text = "\n".join(_re_qw.findall(r'<think>(.*?)</think>', response_text, _re_qw.DOTALL))
@@ -1993,8 +2043,9 @@ Consider information from BOTH sources: search results AND attached files."""
                 response_text = _qw_thinking_text.strip()
             print(f"[GET_AI_RESPONSE] [QWEN] <think>-блоки очищены из ответа")
 
-        # 2. Удаляем незакрытые <think> (прерванная генерация)
+        # 2. Удаляем незакрытые <think> и одиночные </think>
         response_text = _re_qw.sub(r'<think>.*', '', response_text, flags=_re_qw.DOTALL).strip()
+        response_text = _re_qw.sub(r'</think>', '', response_text).strip()
 
         # 3. ДЕТЕКТОР УТЕЧКИ МЫШЛЕНИЯ (без тегов):
         # Qwen3 иногда сливает внутренний монолог прямо в content без <think> тегов.
